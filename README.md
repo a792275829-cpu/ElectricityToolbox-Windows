@@ -1,12 +1,12 @@
 # 电力工作工具箱（macOS / Windows）
 
-这里是 `development` 源码开发分支。[返回安装包下载首页](https://github.com/QiaoZhang013/electricity-toolbox-rust-windows)；普通使用者下载 Windows 完整安装包后双击安装即可。
+这里是 `development` 源码开发分支。[返回安装包下载首页](https://github.com/a792275829-cpu/ElectricityToolbox-Windows)；普通使用者下载 Windows 完整安装包后双击安装即可。
 
 源码修改和 Pull Request 均以 `development` 为目标；`main` 仅维护下载页和构建入口。
 
 这是一个面向 macOS 和 Windows 的电力业务桌面工具集合。统一入口为原版 Tkinter 图形界面，当前集成 16 个工具，包括上网电量导出、风力预测截图、市场表更新、现货价格分析表更新、交易系统信息更新、功率调整收益统计表更新、广东电价预测、电力交易分析、500kV断面分析、广东运行日报解析上传、南方分公司电力市场日报、出清结果汇总上传、私有数据批量上传、生产经营报告生成、集团每日数据上传和 WPS/KDocs 写入。
 
-Windows 移植版：[QiaoZhang013/electricity-toolbox-rust-windows](https://github.com/QiaoZhang013/electricity-toolbox-rust-windows) · [安装包下载](https://github.com/QiaoZhang013/electricity-toolbox-rust-windows/releases/latest)
+Windows 移植版：[a792275829-cpu/ElectricityToolbox-Windows](https://github.com/a792275829-cpu/ElectricityToolbox-Windows) · [安装包下载](https://github.com/a792275829-cpu/ElectricityToolbox-Windows/releases/latest)
 
 原项目：[a792275829-cpu/electricity-toolbox-scripts](https://github.com/a792275829-cpu/electricity-toolbox-scripts)。本仓库保留原版 Tk 界面、业务字段和 Git 历史，在此基础上提供 Rust 后端与 Windows 安装包；macOS 的原有源码兼容路径继续保留。
 
@@ -62,7 +62,7 @@ macOS 14+、Apple 芯片电脑使用 DMG 桌面版，已内置 Python、Node、C
 使用 Git 克隆：
 
 ```bash
-git clone --branch development https://github.com/QiaoZhang013/electricity-toolbox-rust-windows.git
+git clone --branch development https://github.com/a792275829-cpu/ElectricityToolbox-Windows.git
 cd electricity-toolbox-rust-windows
 ```
 

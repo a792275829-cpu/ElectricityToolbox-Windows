@@ -19,7 +19,7 @@ import urllib.request
 from github_update import Cancelled, GitHubUpdater, Release, UpdateError, trusted_url, version_parts
 from windows_delta import INDEX_NAME, cleanup_stage, install_version, prepare_update, select_windows_route
 
-WINDOWS_REPOSITORY = "QiaoZhang013/electricity-toolbox-rust-windows"
+WINDOWS_REPOSITORY = "a792275829-cpu/ElectricityToolbox-Windows"
 
 
 def installer_name(tag):

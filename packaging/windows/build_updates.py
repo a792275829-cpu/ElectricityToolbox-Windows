@@ -17,7 +17,7 @@ from github_update import UpdateError, version_parts
 from windows_delta import (INDEX_NAME, PLATFORM, apply_patch, clone_installation, create_patch,
     digest, install_version, inventory, patch_name, select_windows_route)
 
-REPOSITORY='QiaoZhang013/electricity-toolbox-rust-windows'
+REPOSITORY='a792275829-cpu/ElectricityToolbox-Windows'
 
 def gh(*args):
     executable=shutil.which('gh') or str(ROOT/'.toolbox/build-tools/gh-2.103.3/bin/gh.exe')

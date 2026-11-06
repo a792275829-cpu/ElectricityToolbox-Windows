@@ -51,7 +51,7 @@ GitHub Actions 的 Windows desktop 工作流对 Windows 核心执行回归，手
 
 从 0.1.22 开始，安装版启动时自动检查本仓库的 Windows 正式版；也可从托盘选择“检查更新”。发现新版后点击“开始更新”，自动下载完整 x64 安装包、校验大小与 SHA-256、退出旧程序、安装并重新打开；配置和数据保留。正在运行任务时不能更新，下载可取消，安装失败会恢复旧程序并在重新打开时提示原因。客户端不会下载 macOS 的 DMG 或增量补丁。安装包暂未配置代码签名。
 
-0.1.21 及更早 Windows 版尚无更新器，需要先从 [发布页](https://github.com/QiaoZhang013/electricity-toolbox-rust-windows/releases/latest) 手动安装新版。迁移到新 GitHub 仓库前的版本（包括 0.1.22～0.1.24）也需要手动安装一次 0.1.25 或更新版本，之后即可从新仓库在应用内更新。自动安装仅适用于完整桌面安装版。
+0.1.21 及更早 Windows 版尚无更新器，需要先从 [发布页](https://github.com/a792275829-cpu/ElectricityToolbox-Windows/releases/latest) 手动安装新版。迁移到新 GitHub 仓库前的版本（包括 0.1.22～0.1.24）也需要手动安装一次 0.1.25 或更新版本，之后即可从新仓库在应用内更新。自动安装仅适用于完整桌面安装版。
 
 Windows 图片标签识别使用系统 OCR，需要安装简体中文 OCR 语言功能。WPS 自动化优先使用已安装的 Chrome/Edge，独立浏览器配置和登录态与其他工具隔离。
 
