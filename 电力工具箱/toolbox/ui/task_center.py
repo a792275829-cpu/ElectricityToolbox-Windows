@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tkinter as tk
 from tkinter import ttk
 
@@ -13,7 +14,10 @@ class TaskCenter(ttk.Frame):
         self.registry = registry
         ttk.Label(self, text="任务中心", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, 4))
         ttk.Label(self, text="最近的运行记录", style="Small.TLabel").pack(anchor="w", pady=(0, 10))
-        self.listbox = tk.Listbox(self, width=28, height=12, borderwidth=0, activestyle="none", exportselection=False)
+        # 列表本身随右栏伸展（expand=True）；height 只决定请求高度。Windows 屏幕
+        # 较矮时压低请求高度，让"清能账号/运行诊断"始终完整可见而不是整栏滚动。
+        rows = 4 if os.name == "nt" else 12
+        self.listbox = tk.Listbox(self, width=28, height=rows, borderwidth=0, activestyle="none", exportselection=False)
         self.listbox.pack(fill="both", expand=True)
         self.empty_label = ttk.Label(self.listbox, text="暂无运行记录", style="CardMuted.TLabel", justify="center")
         self.listbox.bind("<<ListboxSelect>>", self._sync_cancel_state)
