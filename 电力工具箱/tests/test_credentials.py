@@ -199,6 +199,42 @@ class CredentialsPanelTests(unittest.TestCase):
             self.assertEqual(reopened.password_var.get(), "new-secret")
             reopened.destroy()
 
+    def test_status_messages_keep_panel_height_stable(self):
+        # 输入账号密码时状态文案在“等待自动保存／未填完整／已保存”之间切换。
+        # 状态行必须固定占一行，否则右侧任务中心会随每次按键上下跳动。
+        from toolbox.ui.credentials_panel import CredentialsPanel
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            accounts.CredentialStore(root).save("original", "old-secret")
+            panel = CredentialsPanel(self.root, root)
+            panel.pack(fill="x")
+            self.root.update()
+            baseline = panel.winfo_reqheight()
+            # 窗口在测试中处于 withdraw 状态，实际高度只有 1px，改看固定槽位设定值。
+            slot_height = int(panel.status_holder.cget("height"))
+            self.assertGreater(slot_height, 0)
+            for message in ("等待自动保存…", "账号和密码需填写完整，尚未保存", "已保存到本机",
+                            "读取失败，请检查本机账号配置文件"):
+                panel.status_var.set(message)
+                if panel._save_id is not None:  # 只看文案切换，不等自动保存改写
+                    panel.after_cancel(panel._save_id)
+                    panel._save_id = None
+                self.root.update()
+                self.assertEqual(panel.winfo_reqheight(), baseline, message)
+                self.assertEqual(int(panel.status_holder.cget("height")), slot_height, message)
+                self.assertEqual(panel.status_label.winfo_manager(), "pack", message)
+                # 文案保持单行，槽位不需要为它增高。
+                self.assertLessEqual(panel.status_label.winfo_reqheight(), slot_height, message)
+            # 未填完整是需要注意的失败态：换醒目颜色，而不是撑高面板。
+            panel.username_var.set("only-user")
+            panel.password_var.set("")
+            self.assertFalse(panel.save())
+            self.root.update()
+            self.assertEqual(str(panel.status_label.cget("style")), "Alert.TLabel")
+            self.assertEqual(panel.winfo_reqheight(), baseline)
+            panel.destroy()
+
     def test_app_places_account_below_tasks_without_clipping(self):
         from toolbox.app import PAGE_NAMES, ToolboxApp
 

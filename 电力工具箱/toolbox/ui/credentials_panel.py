@@ -39,8 +39,16 @@ class CredentialsPanel(ttk.Frame):
         actions.pack(fill="x", pady=(2, 0))
         SettingCheckbutton(actions, text="显示密码", variable=self.show_password_var, command=self._toggle_password).pack(side="left")
         ttk.Button(actions, text="保存", command=self.save).pack(side="right")
-        self.status_label = ttk.Label(self, textvariable=self.status_var, style="Muted.TLabel", wraplength=250)
-        self._status_trace = self.status_var.trace_add("write", self._update_status_visibility)
+        # 状态行固定在单行槽位里：文字在"等待自动保存／已保存／未填完整"之间切换时
+        # 面板请求高度不变，右侧任务中心和下方诊断面板就不会跟着上下跳动。
+        self.status_holder = ttk.Frame(self)
+        self.status_holder.pack(fill="x", pady=(4, 0))
+        self.status_label = ttk.Label(self.status_holder, textvariable=self.status_var,
+                                      style="Muted.TLabel", anchor="w")
+        self.status_label.pack(fill="both", expand=True)
+        self.status_holder.configure(height=self.status_label.winfo_reqheight())
+        self.status_holder.pack_propagate(False)
+        self._status_trace = self.status_var.trace_add("write", self._update_status_style)
         try:
             saved = self.store.load()
             self.username_var.set(saved.get("username", ""))
@@ -56,12 +64,13 @@ class CredentialsPanel(ttk.Frame):
             entry.bind("<FocusOut>", lambda _event: self.save())
             entry.bind("<Return>", lambda _event: self.save())
 
-    def _update_status_visibility(self, *_args) -> None:
-        # Routine save messages take no space; keep actionable failures visible.
-        if any(word in self.status_var.get() for word in ("失败", "异常", "尚未保存")):
-            self.status_label.pack(fill="x", pady=(4, 0))
-        else:
-            self.status_label.pack_forget()
+    def _update_status_style(self, *_args) -> None:
+        # Routine save messages stay muted; actionable failures turn to the alert
+        # colour inside the same one-line slot, so nothing reflows.
+        alarm = any(word in self.status_var.get() for word in ("失败", "异常", "尚未保存"))
+        style = "Alert.TLabel" if alarm else "Muted.TLabel"
+        if str(self.status_label.cget("style")) != style:
+            self.status_label.configure(style=style)
 
     def _toggle_password(self) -> None:
         self.password_entry.configure(show="" if self.show_password_var.get() else "•")

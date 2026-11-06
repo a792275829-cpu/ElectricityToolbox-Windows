@@ -199,6 +199,7 @@ def configure_theme(style: ttk.Style) -> None:
     style.configure("Hero.TLabel", font=(family, 25, "normal"))
     style.configure("PanelTitle.TLabel", font=(family, 12, "bold"))
     style.configure("Muted.TLabel", foreground=MUTED)
+    style.configure("Alert.TLabel", foreground="#a65044")
     style.configure("Small.TLabel", foreground=MUTED, font=(family, 10, "normal"))
     style.configure("Sidebar.TFrame", background=SIDEBAR)
     style.configure("AppTitle.TLabel", background=SIDEBAR, foreground=TEXT, font=(family, 14, "bold"))
