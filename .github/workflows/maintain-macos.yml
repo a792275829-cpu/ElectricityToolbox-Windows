@@ -1,0 +1,8 @@
+name: Check macOS from development
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  macos:
+    uses: a792275829-cpu/ElectricityToolbox-Windows/.github/workflows/desktop-ci.yml@development

@@ -1,0 +1,15 @@
+name: Build Windows from development
+on:
+  workflow_dispatch:
+    inputs:
+      installer:
+        description: Build the complete Windows installer
+        type: boolean
+        default: true
+permissions:
+  contents: read
+jobs:
+  windows:
+    uses: a792275829-cpu/ElectricityToolbox-Windows/.github/workflows/windows-desktop.yml@development
+    with:
+      installer: ${{ inputs.installer }}
