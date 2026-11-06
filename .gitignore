@@ -1,0 +1,64 @@
+# Local secrets and browser login state
+/.toolbox/
+**/config.json
+**/auth_state.json
+**/auth_state.json.lock
+**/upload.config.json
+**/wps_excel_to_kdocs_config.json
+**/file_dialog_settings.json
+**/.browser-profile/
+南方分公司电力市场日报/.state/
+**/.browser-profile-uploader/
+**/wps-browser-profile/
+**/wps-chrome.pid
+**/wps-chrome-state.json
+**/测试样例/
+
+# Runtime caches and dependencies
+.codegraph/
+**/__pycache__/
+**/*.py[cod]
+**/node_modules/
+/.venv/
+/dist/
+/desktop/src-tauri/target/
+/native/price-xlsx/target/
+/500kV断面分析/bin/
+/desktop/src-tauri/gen/
+/desktop/src-tauri/payload/
+/desktop/frontend-dist/
+**/.pytest_cache/
+**/.mypy_cache/
+
+# Logs and debug artifacts
+**/logs/
+**/*.log
+**/debug/
+
+# Generated business data and reports
+**/输出/
+广东电价预测/历史分析/
+集团每日上传/*.xlsx
+每日生产经营情况汇报自动生成工具/输出/
+上网电量抓取/输出/
+500kV断面分析/local_data/
+500kV断面分析/result/
+
+# Local office temp files
+~$*
+*.tmp
+*.bak
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local Codex/Superpowers workspaces
+.worktrees/
+.superpowers/
+电力工具箱/bin/
+
+# WorkBuddy session data
+/.workbuddy/

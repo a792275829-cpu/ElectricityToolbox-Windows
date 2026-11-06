@@ -1,0 +1,331 @@
+from __future__ import annotations
+
+import os
+import queue
+import threading
+import inspect
+import traceback
+import shlex
+from datetime import datetime
+import tkinter as tk
+from pathlib import Path
+from tkinter import messagebox, ttk
+from typing import Callable, TypeVar
+
+from toolbox_log_console import LogConsole
+
+from .runtime import TaskRegistry, utf8_environment
+from .tasks import TaskSnapshot, TaskState, classify_error
+from .tasks.errors import RemoteTaskError
+
+
+T = TypeVar("T")
+
+
+class ToolPage(ttk.Frame):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        registry: TaskRegistry,
+        title: str = "",
+        description: str = "",
+        expand_content: bool = False,
+    ) -> None:
+        super().__init__(parent, padding=18)
+        self.registry = registry
+        self.busy = False
+        self.status_var = tk.StringVar(master=self, value="")
+        self._busy_widgets: list[tk.Widget] = []
+        self.current_task_id: str | None = None
+        self._log_queue: queue.Queue[str] = queue.Queue()
+        self._completion_queue: queue.Queue[tuple[TaskSnapshot, Callable | None]] = queue.Queue()
+        self._poll_after_id: str | None = None
+        self._current_cancellable = True
+
+        self.columnconfigure(0, weight=1)
+        # Windows 窗口比卡片内容高得多，按内容撑满会在卡片和运行日志之间
+        # 留下整片空白；改成内容贴顶、剩余高度归日志。macOS 保持原版分配。
+        # 内容本身需要撑满的页面（表格、清单）传 expand_content=True。
+        self._expand_content = expand_content or os.name != "nt"
+        self.rowconfigure(2, weight=1)
+
+        header = ttk.Frame(self)
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        if title:
+            ttk.Label(
+                header,
+                text=title,
+                style="PageTitle.TLabel",
+            ).pack(anchor="w")
+        if description:
+            self._description_wraplength = 820
+            self.description_label = ttk.Label(
+                header,
+                text=description,
+                style="Muted.TLabel",
+                wraplength=820,
+            )
+            self.description_label.pack(anchor="w", pady=(6, 0))
+            header.bind("<Configure>", self._resize_description)
+
+        self.actions = ttk.Frame(self)
+        self.actions.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+
+        self.content = ttk.Frame(self)
+        self.content.grid(row=2, column=0, sticky="nsew")
+        self.content.columnconfigure(0, weight=1)
+
+        self.footer = ttk.Frame(self)
+        self.footer.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        self.footer.columnconfigure(0, weight=1)
+        self.progress = ttk.Progressbar(self.footer, mode="indeterminate")
+        self.progress.bind("<Map>", self._sync_progress_animation)
+        self.progress.bind("<Unmap>", self._sync_progress_animation)
+        self.progress.grid(row=0, column=0, sticky="ew")
+        self.progress.grid_remove()
+        self.cancel_button = ttk.Button(
+            self.footer, text="取消任务", command=self.cancel_current_task, state="disabled"
+        )
+        self.cancel_button.grid(row=0, column=1, padx=(8, 0))
+        ttk.Label(self.footer, textvariable=self.status_var).grid(
+            row=1, column=0, sticky="w", pady=(5, 0)
+        )
+
+        self.log_console = LogConsole(self.footer, module=title or "工具箱")
+        self.log_console.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
+        self.log_text = self.log_console.text
+        self.log_text.configure(height=10)
+        if not self._expand_content:
+            self.rowconfigure(2, weight=0)
+            self.rowconfigure(3, weight=1)
+            self.footer.grid_configure(sticky="nsew")
+            self.footer.rowconfigure(2, weight=1)
+        self._schedule_poll()
+
+    def _resize_description(self, event) -> None:
+        wraplength = max(180, event.width - 8)
+        if wraplength != self._description_wraplength:
+            self._description_wraplength = wraplength
+            self.description_label.configure(wraplength=wraplength)
+
+    def set_task_console_visible(self, visible: bool) -> None:
+        """Show or hide this module's generic task controls and log console."""
+        if visible:
+            self.footer.grid()
+        else:
+            self.footer.grid_remove()
+
+    def register_busy_widgets(self, *widgets: tk.Widget) -> None:
+        self._busy_widgets.extend(widgets)
+        primary = tuple(getattr(self, name, None) for name in (
+            "run_button", "export_button", "generate_button", "update_button",
+            "upload_button", "predict_button",
+        ))
+        for widget in widgets:
+            if widget in primary and isinstance(widget, ttk.Button):
+                widget.configure(style="Primary.TButton")
+
+    def set_busy(self, busy: bool, status: str = "") -> None:
+        self.busy = busy
+        state = "disabled" if busy else "normal"
+        for widget in self._busy_widgets:
+            try:
+                widget.configure(state=state)
+            except tk.TclError:
+                pass
+        if busy:
+            self._schedule_poll()
+            self.progress.grid()
+            self._sync_progress_animation()
+        else:
+            self.progress.stop()
+            self.progress.grid_remove()
+        if status:
+            self.status_var.set(status)
+            if busy:
+                self.log_console.status.set(status)
+            elif status == "无数据":
+                self.log_console.finish(status)
+        self.cancel_button.configure(state="normal" if busy and self._current_cancellable else "disabled")
+
+    def _sync_progress_animation(self, _event=None) -> None:
+        # A 10 ms timer can redraw faster than macOS can paint the page, keeping
+        # the shared event loop busy. Hidden tasks need no animation at all.
+        if self.busy and self.progress.winfo_ismapped():
+            self.progress.start(80)
+        else:
+            self.progress.stop()
+
+    def append_log(self, text: str) -> None:
+        self._log_queue.put(f"[{datetime.now():%H:%M:%S}] " + text.rstrip("\n") + "\n")
+        if threading.current_thread() is threading.main_thread():
+            self._drain_log_queue()
+
+    def _schedule_poll(self) -> None:
+        if self._poll_after_id is None:
+            self._poll_after_id = self.after(50, self._poll_queues)
+
+    def _has_pending_work(self) -> bool:
+        # Cached pages must keep servicing hidden tasks, but an idle page needs
+        # no timer. Otherwise visiting more modules adds permanent UI wakeups.
+        return (self.busy or self.current_task_id is not None
+                or not self._log_queue.empty() or not self._completion_queue.empty())
+
+    def _poll_queues(self) -> None:
+        if self._poll_after_id is not None:
+            self.after_cancel(self._poll_after_id)
+        self._poll_after_id = None
+        # Yield to navigation between batches, including logs from hidden pages.
+        self._drain_log_queue(limit=200)
+        while self._log_queue.empty():
+            try:
+                snapshot, callback = self._completion_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._finish_snapshot(snapshot, callback)
+        if self._has_pending_work():
+            self._schedule_poll()
+
+    def _drain_log_queue(self, *, limit: int | None = None, render: bool = True) -> None:
+        chunks: list[str] = []
+        size = 0
+        while limit is None or (len(chunks) < limit and size < 64_000):
+            try:
+                chunk = self._log_queue.get_nowait()
+                chunks.append(chunk)
+                size += len(chunk)
+            except queue.Empty:
+                break
+        if not chunks:
+            return
+        self.log_console.append("".join(chunks), render=render)
+
+    def clear_log(self) -> None:
+        self._drain_log_queue()
+        self.log_console.begin()
+
+    def run_in_thread(
+        self,
+        worker: Callable[[], T],
+        *,
+        status: str,
+        on_success: Callable[[T], None] | None = None,
+        cancellable: bool = True,
+    ) -> None:
+        if self.busy:
+            return
+        if getattr(self.registry, "remote_business", False) is True and not getattr(worker, "_remote_business", False):
+            worker = self.registry.prepare_page_worker(self, status)
+        if not self.log_console._initialized or self.log_console.finished:
+            self.log_console.begin(status)
+        self._current_cancellable = cancellable
+        self.log_console.status.set(status)
+        self.set_busy(True, status)
+
+        def task_worker(token, _emit):
+            token.raise_if_cancelled()
+            result = worker(token) if len(inspect.signature(worker).parameters) else worker()
+            token.raise_if_cancelled()
+            return result
+
+        self.current_task_id = self.registry.start_callable(
+            status,
+            task_worker,
+            on_done=lambda snapshot: self._completion_queue.put((snapshot, on_success)),
+            cancellable=cancellable,
+        )
+
+    def _finish_success(
+        self,
+        result: T,
+        callback: Callable[[T], None] | None,
+    ) -> None:
+        self.log_console.finish("已完成")
+        self.set_busy(False, "已完成")
+        if callback is not None:
+            callback(result)
+
+    def _finish_error(self, exc: Exception, details: str) -> None:
+        error = classify_error(exc, details)
+        self.log_console.finish("执行失败", error.summary, error.advice)
+        self.append_log(details)
+        self.set_busy(False, "执行失败")
+        messagebox.showerror("执行失败", f"{error.summary}\n\n{error.advice}", parent=self)
+
+    def cancel_current_task(self) -> None:
+        if self.current_task_id and self.registry.cancel(self.current_task_id):
+            self.set_busy(True, "正在取消...")
+
+    def _finish_snapshot(self, snapshot: TaskSnapshot, callback: Callable | None) -> None:
+        self.current_task_id = None
+        self._drain_log_queue()
+        if snapshot.state is TaskState.SUCCEEDED:
+            output = self.log_console.contents()
+            warning = any(marker in output for marker in ("跳过", "回读不一致", "读取失败", "数据缺失", "无数据："))
+            state = "完成（有提示）" if warning else "已完成"
+            self.log_console.finish(state)
+            self.set_busy(False, state)
+            if callback is not None:
+                callback(snapshot.result)
+            return
+        if snapshot.state is TaskState.CANCELLED:
+            self.log_console.finish("已取消")
+            self.set_busy(False, "已取消")
+            return
+        error = classify_error(snapshot.error or RuntimeError("未知错误"), self.log_console.contents())
+        self.log_console.finish("执行失败", error.summary, error.advice)
+        if snapshot.error is not None:
+            details = (snapshot.error.log_details if isinstance(snapshot.error, RemoteTaskError)
+                       else "".join(traceback.format_exception(snapshot.error)))
+            self.append_log(details)
+        self.set_busy(False, "执行失败")
+        messagebox.showerror(
+            "执行失败", f"{error.summary}\n\n{error.advice}", parent=self
+        )
+
+    def run_process(
+        self,
+        command: list[str],
+        *,
+        cwd: Path,
+        status: str,
+        on_success: Callable[[int], None] | None = None,
+        cancellable: bool = True,
+    ) -> None:
+        if self.busy:
+            return
+        if getattr(self.registry, "remote_business", False) is True:
+            worker = self.registry.prepare_page_worker(self, status, command=command, process=True)
+            self.append_log(f"工作目录：{cwd}\n> {shlex.join(command)}")
+            self.run_in_thread(worker, status=status, on_success=on_success, cancellable=cancellable)
+            return
+        if not self.log_console._initialized or self.log_console.finished:
+            self.log_console.begin(status)
+        self.append_log(f"工作目录：{cwd}\n> {shlex.join(command)}")
+        self._current_cancellable = cancellable
+        self.log_console.status.set(status)
+        self.set_busy(True, status)
+        self.current_task_id = self.registry.start_process(
+            status,
+            command,
+            cwd=cwd,
+            env=utf8_environment(),
+            on_output=self.append_log,
+            on_done=lambda snapshot: self._completion_queue.put((snapshot, on_success)),
+            cancellable=cancellable,
+        )
+
+    def destroy(self) -> None:
+        # The app has stopped task producers before destroying pages. Persist
+        # their queued tail without rebuilding either log view during shutdown.
+        while not self._log_queue.empty():
+            self._drain_log_queue(limit=200, render=False)
+        self.progress.stop()
+        if self._poll_after_id is not None:
+            try:
+                self.after_cancel(self._poll_after_id)
+            except tk.TclError:
+                pass
+            self._poll_after_id = None
+        super().destroy()

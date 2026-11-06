@@ -1,0 +1,388 @@
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from openpyxl import Workbook
+
+from src.analyze_500kv_section_gaps import TopologyEdge
+from src.build_500kv_map_html import (
+    SVG_H,
+    SVG_W,
+    _build_diagram_coordinates,
+    _build_edge_payloads,
+    _build_flow_directions,
+    _parse_node_regions,
+    build_map_html,
+)
+
+
+class Build500kVMapHtmlTest(unittest.TestCase):
+    def test_parse_node_regions_accepts_generic_numbered_section_heading(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            topology_path = Path(tmp) / "topology.md"
+            topology_path.write_text(
+                """# test
+
+## 1. 节点分区
+
+### 粤北、清远
+凤城站、水乡站
+
+## 2. 已确认的接线拓扑
+凤城站-水乡站
+""",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                _parse_node_regions(topology_path),
+                {"凤城站": "粤北、清远", "水乡站": "粤北、清远"},
+            )
+
+    def test_build_diagram_coordinates_requires_verified_anchors_and_preserves_layout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            positions_path = Path(tmp) / "positions.json"
+            positions_path.write_text(
+                json.dumps(
+                    {
+                        "image": {"width": 7111, "height": 5025, "path": "接线图.png"},
+                        "nodes": [
+                            {"name": "凤城站", "status": "verified", "anchor": {"x": 100, "y": 200}},
+                            {"name": "水乡站", "status": "verified", "anchor": {"x": 7000, "y": 4900}},
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            coordinates, metadata = _build_diagram_coordinates(["凤城站", "水乡站"], positions_path)
+
+            self.assertEqual(metadata["coordinate_mode"], "wiring-diagram")
+            self.assertLess(coordinates["凤城站"]["x"], coordinates["水乡站"]["x"])
+            self.assertLess(coordinates["凤城站"]["y"], coordinates["水乡站"]["y"])
+            self.assertGreaterEqual(coordinates["凤城站"]["x"], 0)
+            self.assertLessEqual(coordinates["水乡站"]["x"], SVG_W)
+            self.assertLessEqual(coordinates["水乡站"]["y"], SVG_H)
+
+    def test_build_diagram_coordinates_rejects_unverified_nodes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            positions_path = Path(tmp) / "positions.json"
+            positions_path.write_text(
+                json.dumps(
+                    {
+                        "image": {"width": 7111, "height": 5025},
+                        "nodes": [{"name": "凤城站", "status": "candidate", "anchor": {"x": 100, "y": 200}}],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "凤城站"):
+                _build_diagram_coordinates(["凤城站"], positions_path)
+
+    def test_build_map_html_embeds_nodes_edges_and_price_series(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            original_path = tmp_path / "original.xlsx"
+            processed_path = tmp_path / "processed.xlsx"
+            analysis_path = tmp_path / "analysis.xlsx"
+            topology_path = tmp_path / "topology.md"
+            output_path = tmp_path / "map.html"
+
+            self._write_price_workbook(original_path, extra_rows=1)
+            self._write_price_workbook(processed_path, extra_rows=0)
+            self._write_analysis_workbook(analysis_path)
+            topology_path.write_text(
+                """# test
+
+## 2. 跨片区主通道边
+
+### 佛山片 - 东莞片
+凤城-水乡、凤城-广南
+
+## 3. next
+""",
+                encoding="utf-8",
+            )
+
+            build_map_html(
+                topology_path=topology_path,
+                original_price_path=original_path,
+                processed_price_path=processed_path,
+                analysis_path=analysis_path,
+                output_path=output_path,
+            )
+
+            html = output_path.read_text(encoding="utf-8")
+            self.assertIn("广东省电网 500kV 节点断面地图", html)
+            self.assertIn('"edge": "凤城-水乡"', html)
+            self.assertIn('"is_section": true', html)
+            self.assertIn('"edge": "凤城-广南"', html)
+            self.assertEqual(html.count('"is_section": true'), 2)
+            self.assertIn('"name": "凤城"', html)
+            self.assertIn('"prices": [100.0, 120.0]', html)
+            self.assertIn('"original_rows": 3', html)
+            self.assertIn('"processed_rows": 2', html)
+            self.assertIn('"severity_basis": "intervals_and_max_abs_diff"', html)
+            self.assertIn('"min_section_intervals": 4', html)
+            self.assertIn('"threshold": 80.0', html)
+            self.assertIn('"section_interval_basis": "daily_accumulated"', html)
+            self.assertIn('id="gapThreshold" type="number" min="0" step="5" inputmode="decimal" value="80"', html)
+            self.assertIn('id="gapThresholdReset"', html)
+            self.assertIn('id="thresholdCount"', html)
+            toolbar_start = html.index('<div class="map-toolbar">')
+            self.assertLess(toolbar_start, html.index('class="threshold-control"'))
+            self.assertLess(html.index('class="threshold-control"'), html.index('id="zoomIn"'))
+            self.assertIn('function edgeSectionStats(edge, threshold)', html)
+            self.assertIn('function applyGapThreshold(threshold)', html)
+            self.assertIn('function refreshTimelineBand()', html)
+            self.assertIn('if (absDiff <= threshold) continue;', html)
+            self.assertIn('按累计时点', html)
+            self.assertNotIn('累计时点更多、价差更大', html)
+            self.assertNotIn('原始数据行数：', html)
+            self.assertNotIn('处理后500kV行数：', html)
+            self.assertNotIn('缺少价格节点：', html)
+            self.assertIn('id="zoomIn"', html)
+            self.assertIn('id="mapViewport"', html)
+            self.assertIn('function panByWheel(deltaX, deltaY)', html)
+            self.assertIn('function isLikelyTrackpadWheel(event)', html)
+            self.assertIn("event.ctrlKey || event.metaKey", html)
+            self.assertIn("mapSvg.addEventListener('gesturechange'", html)
+            self.assertIn('touch-action: none', html)
+            self.assertIn("event.target.closest?.('.node-group, .edge, .edge-hit, .flow-arrow')", html)
+            self.assertIn('Math.hypot(moveX, moveY) < 4', html)
+            self.assertIn('const shouldClearSelection = !drag.moved;', html)
+            self.assertIn('if (shouldClearSelection) clearSelection();', html)
+            self.assertIn("hitLine.setAttribute('class', edge.is_section ? 'edge-hit section-hit' : 'edge-hit');", html)
+            self.assertIn('.edge-hit:focus { outline: none; }', html)
+            self.assertIn('.edge-hit:focus-visible + .edge {', html)
+            self.assertIn("hitLine.addEventListener('pointerdown', event => {", html)
+            self.assertIn('event.preventDefault();', html)
+            self.assertIn("selectEdge(edge, line);", html)
+            self.assertNotIn('id="metricLabel1"', html)
+            self.assertNotIn('完整拓扑线路，未触发断面判定；以下显示两端节点电价。', html)
+            self.assertIn("const command = drawing ? 'L' : 'M';", html)
+            self.assertNotIn('id="toggleTopology"', html)
+            self.assertIn('"blocked": true', html)
+            self.assertIn('label.setAttribute(\'class\', node.blocked ? \'label blocked-label\' : \'label\');', html)
+            self.assertIn('两端节点24小时电价曲线', html)
+            self.assertIn('"regions":', html)
+            self.assertIn('"location_accuracy": "公开站址"', html)
+            self.assertIn('"lon": 113.08991', html)
+            self.assertIn('id="regions"', html)
+            self.assertIn('id="sectionSearch"', html)
+            self.assertIn('id="sectionList"', html)
+            self.assertNotIn('id="toggleRegions"', html)
+            self.assertNotIn('regionData.forEach(region =>', html)
+            self.assertNotIn('119个节点按已确认接线图锚点排布', html)
+            self.assertNotIn('灰蓝线为完整拓扑边', html)
+            self.assertNotIn('class="summary-grid"', html)
+            self.assertNotIn('id="summaryMaxGap"', html)
+            self.assertIn('grid-template-columns: minmax(0, 1fr) 380px;', html)
+            self.assertIn('height: calc(100vh - 139px);', html)
+            self.assertIn('function renderSectionList()', html)
+            self.assertNotIn('id="gapRange"', html)
+            self.assertNotIn('最低最大价差', html)
+            self.assertNotIn('class="quick-filter', html)
+            self.assertNotIn('id="focusSelected"', html)
+            self.assertNotIn('id="chartTitle"', html)
+            self.assertNotIn('<strong>断面列表</strong>', html)
+            self.assertIn('id="focusMode"', html)
+            self.assertNotIn('id="themeToggle"', html)
+            self.assertIn('<body data-theme="light">', html)
+            self.assertNotIn("500kv-map-theme-v2", html)
+            self.assertNotIn('<option value="name">按名称</option>', html)
+            self.assertNotIn('class="item-meta"', html)
+            self.assertNotIn("edge.severity_score.toFixed(0)", html)
+            self.assertIn("edge.is_section ? .4 : .8", html)
+            self.assertIn('class="fullscreen-icon"', html)
+            self.assertIn('body[data-theme="light"] .node', html)
+            self.assertIn("group.setAttribute('class', 'node-group');", html)
+            self.assertIn('function layoutNodeLabels()', html)
+            self.assertIn('function boxesOverlap(a, b, padding = 4)', html)
+            self.assertIn('function boxHitsEdge(box, edge, padding = 5)', html)
+            self.assertIn('const distances = item.node.blocked ? [12, 16, 20, 24, 28, 32, 36, 40] : [8, 12, 16, 20, 24, 28, 32, 36];', html)
+            self.assertIn('if (inBounds && labelOverlap === 0 && nodeOverlap === 0', html)
+            self.assertIn('item.label.dataset.distance = String(chosen.distance);', html)
+            self.assertIn('const moved = chosen.distance >= 20 && chosen.distance <= 28;', html)
+            self.assertNotIn('116, 140', html)
+            self.assertIn('id="labelLeaders"', html)
+            self.assertIn('"layout_canvas_width": 1500', html)
+            self.assertIn("label.addEventListener('click'", html)
+            self.assertIn("hit.setAttribute('r', '12');", html)
+            self.assertNotIn('id="toggleLabels"', html)
+            self.assertIn('function selectNode(node, group)', html)
+            self.assertNotIn('id="detailSubtitle"', html)
+            self.assertNotIn('class="metric-grid"', html)
+            self.assertIn('function clearSelection()', html)
+            self.assertIn("element.classList.remove('active', 'neighbor', 'context-dimmed')", html)
+            self.assertIn('id="selectionDetails" hidden', html)
+            self.assertIn('function drawNodeChart(node)', html)
+            self.assertIn('function attachPriceCrosshair(svg, options)', html)
+            self.assertIn("hit.addEventListener('pointermove', showFromPointer);", html)
+            self.assertIn("hit.addEventListener('pointerdown', showFromPointer);", html)
+            self.assertIn("'stroke-dasharray': '4 4'", html)
+            self.assertIn("value.toFixed(2) + ' 元/MWh'", html)
+            self.assertIn("series: [{ name: node.name, color: '#168ac0', prices: node.prices }]", html)
+            self.assertIn('点击查看电价数据', html)
+            self.assertIn('id="toggleFlow"', html)
+            self.assertIn('id="flowArrows"', html)
+            self.assertNotIn('id="flowArrowHead"', html)
+            self.assertIn("flowVisible = !flowVisible;", html)
+            self.assertIn("edge.flow_kind === 'bidirectional'", html)
+            self.assertIn('id="topologyTime" type="range" min="0" max="95" step="1"', html)
+            self.assertNotIn('id="topologyTimePrev"', html)
+            self.assertNotIn('id="topologyTimeNext"', html)
+            self.assertNotIn('id="curveMode"', html)
+            self.assertNotIn('id="curveShowAll"', html)
+            self.assertNotIn('id="curveHideAll"', html)
+            self.assertNotIn('断面强度颜色图例', html)
+            self.assertIn('resetAllFlowArrows();', html)
+            self.assertIn('if (slot >= 0) setTopologyTime(slot, false);', html)
+            self.assertNotIn("label.setAttribute('class', 'flow-arrow-label')", html)
+            self.assertNotIn("不代表实际物理潮流", html)
+
+    def test_flow_direction_requires_four_consecutive_points_per_direction(self):
+        times = [f"{hour:02d}:{minute:02d}" for hour in range(2) for minute in (0, 15, 30, 45)]
+        edges = [
+            TopologyEdge("测试", "甲", "乙"),
+            TopologyEdge("测试", "甲", "丙"),
+            TopologyEdge("测试", "甲", "丁"),
+        ]
+        matched_rows = {
+            "甲": {"prices": dict.fromkeys(times, 100)},
+            "乙": {
+                "prices": {
+                    time: (300 if index < 4 else -100)
+                    for index, time in enumerate(times)
+                }
+            },
+            "丙": {
+                "prices": {
+                    time: (300 if index < 3 else -100)
+                    for index, time in enumerate(times[:6])
+                }
+            },
+        }
+
+        flows = _build_flow_directions(edges, matched_rows, times)
+
+        self.assertEqual(flows["甲-乙"]["kind"], "bidirectional")
+        self.assertEqual(len(flows["甲-乙"]["directions"]), 2)
+        self.assertEqual(flows["甲-乙"]["by_time"]["00:00"], "甲->乙")
+        self.assertEqual(flows["甲-乙"]["by_time"]["01:45"], "乙->甲")
+        self.assertEqual(flows["甲-丙"]["kind"], "single")
+        self.assertEqual(len(flows["甲-丙"]["by_time"]), 6)
+        self.assertNotIn("甲-丁", flows)
+
+    def test_edge_color_severity_increases_with_intervals_and_gap(self):
+        edges = [
+            TopologyEdge("测试", "甲", "乙"),
+            TopologyEdge("测试", "甲", "丙"),
+            TopologyEdge("测试", "甲", "丁"),
+        ]
+        summaries = [
+            {"edge": "甲-乙", "intervals": 4, "max_abs_diff": 200},
+            {"edge": "甲-丙", "intervals": 8, "max_abs_diff": 200},
+            {"edge": "甲-丁", "intervals": 8, "max_abs_diff": 400},
+        ]
+        coordinates = {
+            "甲": {"x": 0, "y": 0},
+            "乙": {"x": 1, "y": 1},
+            "丙": {"x": 2, "y": 2},
+            "丁": {"x": 3, "y": 3},
+        }
+
+        payloads = _build_edge_payloads(edges, summaries, [], coordinates)
+
+        self.assertLess(payloads[0]["severity"], payloads[1]["severity"])
+        self.assertLess(payloads[1]["severity"], payloads[2]["severity"])
+
+    def test_build_map_html_embeds_generation_threshold_as_page_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            original_path = tmp_path / "original.xlsx"
+            processed_path = tmp_path / "processed.xlsx"
+            analysis_path = tmp_path / "analysis.xlsx"
+            topology_path = tmp_path / "topology.md"
+            output_path = tmp_path / "map.html"
+
+            self._write_price_workbook(original_path, extra_rows=0)
+            self._write_price_workbook(processed_path, extra_rows=0)
+            self._write_analysis_workbook(analysis_path)
+            topology_path.write_text(
+                """# test
+
+## 2. 跨片区主通道边
+
+### 佛山片 - 东莞片
+凤城-水乡
+
+## 3. next
+""",
+                encoding="utf-8",
+            )
+
+            build_map_html(
+                topology_path=topology_path,
+                original_price_path=original_path,
+                processed_price_path=processed_path,
+                analysis_path=analysis_path,
+                output_path=output_path,
+                threshold=120,
+            )
+
+            html = output_path.read_text(encoding="utf-8")
+            self.assertIn('"threshold": 120.0', html)
+            self.assertIn('id="gapThreshold" type="number" min="0" step="5" inputmode="decimal" value="120"', html)
+            self.assertIn("const DEFAULT_GAP_THRESHOLD = Number.isFinite(Number(DATA.metadata.threshold))", html)
+
+    def _write_price_workbook(self, path: Path, extra_rows: int) -> None:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "实时节点电价查询"
+        ws.append(["节点名称", "数据项", "00:00", "00:15"])
+        ws.append(["其他凤城站500kV", "电价(元/MWh)", 100, 120])
+        ws.append(["其他水乡站500kV", "电价(元/MWh)", 800, 900])
+        for index in range(extra_rows):
+            ws.append([f"其他非500kV节点{index}", "电价(元/MWh)", 1, 2])
+        wb.save(path)
+
+    def _write_analysis_workbook(self, path: Path) -> None:
+        wb = Workbook()
+        summary = wb.active
+        summary.title = "断面汇总"
+        summary.append(
+            [
+                "group",
+                "edge",
+                "intervals",
+                "windows",
+                "max_abs_diff",
+                "max_time",
+                "max_low",
+                "max_high",
+                "main_direction",
+                "direction_counts",
+            ]
+        )
+        summary.append(["佛山片 - 东莞片", "凤城-水乡", 2, "00:00-00:15", "780.00", "00:15", "凤城", "水乡", "凤城->水乡", "凤城->水乡:2"])
+        summary.append(["佛山片 - 东莞片", "凤城-广南", 4, "00:15-01:00", "1200.00", "00:15", "凤城", "广南", "凤城->广南", "凤城->广南:4"])
+        summary.append(["佛山片 - 东莞片", "凤城-水乡", 5, "00:15-01:15", "780.00", "00:15", "凤城", "水乡", "凤城->水乡", "凤城->水乡:5"])
+
+        details = wb.create_sheet("逐时段明细")
+        details.append(["group", "edge", "a", "b", "time", "price_a", "price_b", "diff_b_minus_a", "abs_diff", "low", "high", "direction"])
+        details.append(["佛山片 - 东莞片", "凤城-水乡", "凤城", "水乡", "00:00", 100, 800, 700, 700, "凤城", "水乡", "凤城->水乡"])
+        details.append(["佛山片 - 东莞片", "凤城-水乡", "凤城", "水乡", "00:15", 120, 900, 780, 780, "凤城", "水乡", "凤城->水乡"])
+
+        group = wb.create_sheet("片区汇总")
+        group.append(["group", "flagged_edges", "flagged_intervals", "max_abs_diff"])
+        group.append(["佛山片 - 东莞片", 1, 2, "780.00"])
+        wb.save(path)
+
+
+if __name__ == "__main__":
+    unittest.main()

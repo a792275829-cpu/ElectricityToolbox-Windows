@@ -1,0 +1,169 @@
+name: Desktop release
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+      full_only:
+        default: false
+        type: boolean
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag (for example v0.1.0)
+        required: true
+        type: string
+      full_only:
+        description: 重大更新仅使用完整包，重设补丁基线
+        required: false
+        default: false
+        type: boolean
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+permissions:
+  contents: write
+concurrency:
+  group: desktop-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+jobs:
+  prepare:
+    # Forks publish Windows installers separately; macOS releases remain manual.
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'a792275829-cpu/electricity-toolbox-scripts'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      release: ${{ steps.draft.outputs.release }}
+      should_release: ${{ steps.draft.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - id: version
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: python packaging/tauri/version.py check --tag "$RELEASE_TAG" --require-notes --release-notes release-notes.md --github-output "$GITHUB_OUTPUT"
+      - id: draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft > draft-state.txt 2>/dev/null; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "电力工具箱 $RELEASE_TAG" --notes-file release-notes.md
+          elif [ "$(cat draft-state.txt)" != "true" ]; then
+            echo 'should_release=false' >> "$GITHUB_OUTPUT"
+            echo "### $RELEASE_TAG 已正式发布，本次正常跳过构建和发布。" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          gh release edit "$RELEASE_TAG" --notes-file release-notes.md
+          gh release view "$RELEASE_TAG" --json databaseId --jq '"release=" + (.databaseId|tostring)' >> "$GITHUB_OUTPUT"
+          echo 'should_release=true' >> "$GITHUB_OUTPUT"
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            requirements: packaging/tauri/requirements-macos.lock
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.3"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11.15"
+          activate-environment: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+      - run: >-
+          uv pip install --python python --require-hashes --no-deps --only-binary :all: -r ${{ matrix.requirements }}
+      - run: npm ci
+        working-directory: desktop
+      - run: npm test
+        working-directory: desktop
+      - run: python native/price-xlsx/build.py
+      - run: TOOLBOX_XLSX_BACKEND=rust PYTHONPATH=.. python -m unittest discover -s tests -p test_native_excel.py -v
+        working-directory: 电力工具箱
+      - run: TOOLBOX_XLSX_BACKEND=rust PYTHONPATH=.. python -m unittest discover -s tests -p test_summary_station_folder.py -v
+        working-directory: 电力工具箱
+      - run: TOOLBOX_XLSX_BACKEND=rust TOOLBOX_COMPUTE_BACKEND=rust PYTHONPATH=.. python -m unittest discover -s tests -p test_remaining_native.py -v
+        working-directory: 电力工具箱
+      - run: TOOLBOX_XLSX_BACKEND=rust PYTHONPATH=.. python -m unittest discover -s tests -p test_native_updates.py -v
+        working-directory: 电力工具箱
+      - run: TOOLBOX_XLSX_BACKEND=rust PYTHONPATH=.. python -m unittest discover -s tests -p test_all_trial_optimizations.py -v
+        working-directory: 电力工具箱
+      - run: PYTHONPATH=.. python -m unittest discover -s tests -p test_workbook_inspection.py -v
+        working-directory: 电力工具箱
+      - run: TOOLBOX_XLSX_BACKEND=rust PYTHONPATH=.. python -m unittest discover -s tests -p test_power_benefit_update.py -v
+        working-directory: 电力工具箱
+      - run: TOOLBOX_XLSX_BACKEND=rust PYTHONPATH=.. python -m unittest discover -s tests -p test_transaction_info_update.py -v
+        working-directory: 电力工具箱
+      - run: TOOLBOX_COMPUTE_BACKEND=rust PYTHONPATH=.. python -m unittest discover -s tests -p test_daily_pdf_parser.py -v
+        working-directory: 电力工具箱
+      - run: TOOLBOX_500KV_BACKEND=rust python -m unittest discover -s tests -v
+        working-directory: 500kV断面分析
+      - run: python -m unittest discover -s desktop/tests/python -v
+      - run: python packaging/tauri/prepare_payload.py --target ${{ matrix.target }}
+        env:
+          FORECAST_MASTER_URL: ${{ secrets.FORECAST_MASTER_URL }}
+          FORECAST_MASTER_SHA256: ${{ vars.FORECAST_MASTER_SHA256 }}
+      - run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked
+      - name: Build application for DMG
+        working-directory: desktop
+        run: npm run build -- --target ${{ matrix.target }} --bundles app
+      - name: Build and upload full installer and incremental updates
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          FULL_ONLY: ${{ inputs.full_only && 'true' || 'false' }}
+        run: |
+          python packaging/tauri/build_dmg.py desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/电力工具箱.app --output dist
+          update_args=()
+          if [ "$FULL_ONLY" = "true" ]; then update_args+=(--full-only); fi
+          python packaging/tauri/build_updates.py desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/电力工具箱.app --output dist "${update_args[@]}"
+          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = "true"
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' > release-assets.txt
+          while IFS= read -r asset; do
+            if [[ "$asset" == *.patch.tar.xz && ! -f "dist/updates/$asset" ]]; then
+              gh release delete-asset "$RELEASE_TAG" "$asset" --yes
+            fi
+          done < release-assets.txt
+          gh release upload "$RELEASE_TAG" dist/*.dmg dist/*.dmg.sha256 dist/updates/* --clobber
+  publish:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - name: Validate installer metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          release_id="$(gh release view "$RELEASE_TAG" --json databaseId --jq .databaseId)"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" > release.json
+          gh release download "$RELEASE_TAG" --pattern update-manifest.json
+          python packaging/tauri/validate_installer.py release.json --index update-manifest.json
+      - name: Publish only after the macOS build succeeded
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: gh release edit "$RELEASE_TAG" --draft=false --latest

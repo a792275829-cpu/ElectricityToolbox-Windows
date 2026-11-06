@@ -1,0 +1,21 @@
+name: Publish macOS release from development
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag
+        required: true
+        type: string
+      full_only:
+        description: Reset the incremental update baseline with a full installer
+        type: boolean
+        default: false
+permissions:
+  contents: write
+jobs:
+  release:
+    uses: QiaoZhang013/electricity-toolbox-rust-windows/.github/workflows/desktop-release.yml@development
+    with:
+      tag: ${{ inputs.tag }}
+      full_only: ${{ inputs.full_only }}
+    secrets: inherit
