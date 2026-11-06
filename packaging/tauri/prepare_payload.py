@@ -68,6 +68,47 @@ def validate_runtime_assets(source: Path) -> None:
             raise FileNotFoundError(f"打包缺少必需功能资源或文件为空：{relative}")
 
 
+# `playwright install chromium` 会把完整 Chromium、headless shell 和 ffmpeg 全装上，
+# Windows 上合计 547 MB。工具箱只用到前两个：ffmpeg 仅供 record_video 使用，本仓库
+# 没有任何调用方；locales 除简中／英文外都用不到；chrome_proxy / pwa_launcher /
+# notification_helper 是浏览器自身发布用的辅助进程，自动化不需要。
+BROWSER_KEPT_LOCALES = frozenset({"zh-CN.pak", "en-US.pak"})
+BROWSER_DROPPED_EXECUTABLES = ("chrome_proxy.exe", "chrome_pwa_launcher.exe",
+                               "notification_helper.exe")
+
+
+def _tree_size(path: Path) -> int:
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
+def prune_browser_runtime(browsers: Path) -> dict[str, int]:
+    """Trim Playwright browser payload the toolbox never loads.
+
+    只删除确实用不到的静态文件，保留 `INSTALLATION_COMPLETE` 与全部 dll／pak，
+    因此浏览器行为不变；安装包因此少约 20 MB（locales 为主）。
+    """
+    if not browsers.is_dir():
+        return {}
+    saved: dict[str, int] = {}
+    for folder in sorted(browsers.glob("ffmpeg-*")):
+        saved[f"ffmpeg:{folder.name}"] = _tree_size(folder)
+        shutil.rmtree(folder)
+    for folder in sorted(browsers.glob("chromium*")):
+        for locales in sorted(folder.glob("chrome-*/locales")):
+            removed = 0
+            for pak in locales.glob("*.pak"):
+                if pak.name not in BROWSER_KEPT_LOCALES:
+                    removed += pak.stat().st_size
+                    pak.unlink()
+            if removed:
+                saved[f"locales:{folder.name}"] = removed
+        for binary in folder.glob("chrome-*/*.exe"):
+            if binary.name in BROWSER_DROPPED_EXECUTABLES:
+                saved[f"exe:{binary.name}"] = binary.stat().st_size
+                binary.unlink()
+    return saved
+
+
 def prepare_forecast_seed(defaults: Path, workbook: Path | None = None) -> Path:
     """Ship a byte-preserving initial workbook; never manage users' live data."""
     from migrate_forecast_data import copy_atomic, resolve_paths

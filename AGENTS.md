@@ -2,7 +2,7 @@
 
 ## 默认执行方式
 
-- 按用户明确要求，同时维护 macOS 与 Windows x64；共用原版 Tk UI、业务逻辑和 Rust 后端，平台安装与更新流程分别维护。
+- 按用户明确要求，本仓库只保证 **Windows x64** 可安装、可运行；macOS 不作为开发与验证约束。新增或修改功能时不再为 macOS 写分支、双平台文案或 `sys.platform == "darwin"` 回退；现存 macOS 代码与 `*.command` / `packaging/tauri` 构建脚本保留不删（它们不参与 Windows 构建），但不再随功能改动同步维护，也不作为设计约束。
 
 - 对修改、安装、配置、修复类请求，默认直接实施，不先输出长篇方案。
 - 只有业务口径、覆盖范围或破坏性操作存在实质歧义时才询问用户；其余小问题自行检查并处理。
@@ -23,9 +23,8 @@
 ## 启动与依赖
 
 - 项目 Python 环境以根目录 `.venv` 为准；不要把个人机器上的绝对解释器路径写入代码。
-- macOS 初始化入口是 `./setup_macos.command`，GUI 启动入口是 `./电力工具箱.command`。
-- Windows 初始化入口是 `setup_windows.ps1`，源码启动入口是 `start_windows.ps1`；安装包构建入口为 `packaging/windows/build.ps1`。使用原版 Tk 页面，不另写一套外观近似的 UI。
-- 保持“复制整个文件夹到另一台 Mac 后可初始化并运行”的可移植目标。
+- Windows 初始化入口是 `setup_windows.ps1`，源码启动入口是 `start_windows.ps1`（源码调试版 `start_source_test.ps1`）；安装包构建入口为 `packaging/windows/build.ps1`。使用原版 Tk 页面，不另写一套外观近似的 UI。
+- 保持“复制整个文件夹到另一台 Windows 机器后可初始化并运行”的可移植目标；macOS 的 `setup_macos.command` / `电力工具箱.command` 仅作历史入口保留，不再验证。
 - 路径处理使用 `pathlib.Path` 和脚本/仓库相对定位；打开目录及进程控制集中使用平台适配逻辑，避免把系统专用调用散布到业务页面。
 - Node/npm 依赖只应作用于实际需要它们的子工具，不得变成所有 Python 工具的强制前置条件。
 
@@ -52,10 +51,12 @@
 - 采用“最小充分验证”，先运行与改动最相关的测试，再按风险扩大范围。
 - 文案或小范围 GUI 修改：至少完成模块导入或页面创建 smoke test。
 - 计算、解析、映射修改：运行针对性测试，并用小型或真实样本核对结果。
-- 登录、真实写入、安装、并发和跨 Mac 改动：运行端到端流程，并检查实际产物或持久化状态。
-- 工具箱测试通常从 `电力工具箱/` 目录运行：`python3 -m unittest discover -s tests`。
-- 启动器 smoke test 使用：`TOOLBOX_SMOKE=1 ./电力工具箱.command`。
-- 修改依赖或启动流程时，运行 `./setup_macos.command` 或等价的 `.venv` 导入检查，并验证启动器实际可用。
+- 登录、真实写入、安装、并发改动：运行端到端流程，并检查实际产物或持久化状态。
+- 工具箱测试在 `电力工具箱/` 目录逐模块运行（`unittest discover` 会卡在 GUI／网络用例）：
+  `PYTHONPATH=<仓库根>;<电力工具箱>;<电力工具箱>\tests PYTHONUTF8=1 ..\.venv\Scripts\python.exe -m unittest tests.<模块>`。
+  Git Bash 下需用 `cygpath -w` 转成 Windows 路径，否则 `PYTHONPATH` 失效。
+- 启动器 smoke test 使用：`powershell -ExecutionPolicy Bypass -File start_source_test.ps1 -Smoke`（输出 `TOOLBOX_SMOKE=OK`）。
+- 修改依赖或启动流程时，运行 `setup_windows.ps1` 或等价的 `.venv` 导入检查，并验证启动器实际可用。
 - 测试被环境、权限或外部服务阻塞时，明确报告未验证部分及具体原因，不要把部分成功表述成全部完成。
 
 ## 输出与交付
@@ -70,9 +71,7 @@
 - 使用 `.venv/bin/python packaging/tauri/version.py set X.Y.Z --notes "具体变更"` 同步版本和日志；多项变更重复传入 `--notes`。日期默认采用 Asia/Shanghai，历史记录必须保留。
 - `CHANGELOG.md` 是逐版本更新内容的唯一来源；`packaging/tauri/release_notes.md` 只维护通用安装说明。发布时由版本脚本提取当前版本内容并拼接安装说明，用于 GitHub Release 与应用内更新说明。
 - 发布前执行 `version.py check --tag vX.Y.Z --require-notes`，确认版本一致且更新内容非空；缺少对应日志时禁止打包发布。已发布版本不得覆盖，下一次发布递增版本号。
-- macOS 构建 Apple 芯片 DMG；Windows 构建 x64 NSIS 安装包及 SHA-256。完成针对性测试、安装包与摘要校验后才可发布正式版；生成物和签名私钥不进入 Git。Windows 0.1.28 起优先使用独立的 Windows 文件增量补丁与 windows-update-manifest.json，缺少路径或验证失败回退完整 NSIS；0.1.27 及更早客户端需最后完整升级一次。禁止混用 macOS DMG／增量更新通道。
-
-- 桌面发行每个版本保留完整 DMG 和 `.dmg.sha256`，另发布 `update-manifest.json` 及适用的 `.patch.tar.xz` 增量补丁；不发布独立 `.app`、`.app.tar.gz`、`.sig` 或旧 `latest.json`，也不恢复 PKG。内部 `.app` 仅作构建与验证中间产物。
-- 日常维护优先增量更新，为最近三个正式版本生成直达补丁，保留历史补丁与索引中的升级路径；不得因只保留最新源码副本而删除旧版本发行附件。客户端选择总下载量最小且小于完整包的升级路径，逐步校验与还原；缺少路径、旧应用被改动或补丁失败时自动回退完整 DMG，用户取消不触发回退。
-- 跨主／次版本或显式 `--full-only` 的重大更新使用完整包重设补丁基线。首次引入增量机制时，旧更新器仍需完整升级一次。发布补丁前必须用旧应用副本实际还原，核对全部文件／权限／符号链接与应用签名，并校验索引及 GitHub 附件摘要；禁止将测试补丁直接当发行包。
-- 增量更新只在临时副本还原完整应用并本地生成 DMG。安装到 `~/Applications/电力工具箱.app`；校验后打开镜像，退出旧程序后运行镜像内安装命令，继续复用安装回滚逻辑，保留原配置、用户数据和样例。
+- 只发 Windows x64：构建 NSIS 安装包及 SHA-256。完成针对性测试、安装包与摘要校验后才可发布正式版；生成物和签名私钥不进入 Git。Windows 0.1.28 起优先使用独立的 Windows 文件增量补丁与 windows-update-manifest.json，缺少路径或验证失败回退完整 NSIS；0.1.27 及更早客户端需最后完整升级一次。
+- 以下两条为 macOS DMG 通道的历史记录，已停止执行，保留以免误删脚本与附件：Apple 芯片 DMG ＋ `.dmg.sha256`／`update-manifest.json`／`.patch.tar.xz` 增量补丁；为最近三个版本保留升级路径。macOS 相关脚本与历史发行附件保持原状，不再构建、不再验证。
+- 跨主／次版本或显式 `--full-only` 的重大更新使用完整包重设补丁基线。首次引入增量机制时，旧更新器仍需完整升级一次。发布补丁前必须用旧应用副本实际还原，核对全部文件／应用签名，并校验索引及 GitHub 附件摘要；禁止将测试补丁直接当发行包。
+- Windows 增量更新只在临时副本还原完整应用；校验后退出旧程序再运行安装程序，继续复用安装回滚逻辑，保留原配置、用户数据和样例。macOS 的 DMG 还原步骤（`~/Applications/电力工具箱.app`、打开镜像、镜像内安装命令）不再执行。

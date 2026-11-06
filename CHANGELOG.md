@@ -2,6 +2,15 @@
 
 ## [0.1.31] - 2026-11-06
 
+- 修复 WPS 写入工具在最小窗口下被横向压缩：该页面表体由工作线程延迟装配，装配后只改变"请求尺寸"、不改变当前尺寸，视口收不到 `<Configure>` 事件，于是一直按装配前的 928px 挤压内容（实际需要 1191px）。`ToolPage.refresh_viewport()` 在装配完成与加载失败两条路径主动重测，`Viewport` 增加有界布局探测（8 次 × 150ms），捕获任何迟到的请求尺寸变化；最小窗口用例 46 项多轮稳定通过。
+- 诊断中心补齐三个此前漏检的运行时前提：Rust 业务后端（缺失时 WPS 文档配置、市场日报「填写日前及实时市场」直接不可用）、浏览器自动化（系统 Chrome/Edge 或内置 Chromium）、私有上传 `node_modules`。此前缺这两项仍报「22 项正常」，用户看到全绿却用不了对应功能；现按缺失项报提醒并给出当前平台的初始化脚本。
+- 修复打包测试在中文用户名机器上的误报：`test_installed_group_upload_uses_bundled_template_with_separate_data_root` 用 `is_relative_to(Path.cwd())` 直接比字符串，而中文账户的 `%TEMP%` 会带 8.3 短名（`AAA建~1`），短名与长名比较必然为假，导致模板路径明明正确却报错；两侧改为 `resolve()` 后比较。`desktop/tests/python` 全套 224 项通过（63 项因未构建 Rust 后端跳过）。
+- Windows 安装包浏览器瘦身：`playwright install chromium` 会装完整 Chromium、headless shell 和 ffmpeg 共约 550 MB（LZMA 压缩后仍约 210 MB）。构建时新增 `prune_browser_runtime()`，只删除工具箱确定用不到的文件——录像用 `ffmpeg-*`、除 `zh-CN`/`en-US` 外的 locale、`chrome_proxy.exe`/`chrome_pwa_launcher.exe`/`notification_helper.exe`，保留 `INSTALLATION_COMPLETE`、全部 dll/pak 与 `winldd`。在真实浏览器副本上实测省 43.4 MB（locales 38.6 MB + 3 个 exe 4.7 MB），瘦身后有头登录启动、无头启动、PDF 导出、中文渲染全部正常（`navigator.language=zh-CN`）；新增 `desktop/tests/python/test_browser_payload.py` 2 项，覆盖删除清单、保留清单、幂等与目录缺失。
+- 产品范围收敛为「只保证 Windows x64 可安装可运行」，macOS 不再作为开发与验证约束：删除为兼容 macOS 而写的双平台文案（诊断中心、日志诊断规则、市场日报补录、WPS 浏览器缺失提示统一改为 `setup_windows.ps1`），浏览器目录探测与系统浏览器探测只保留 Windows 布局（`chrome-win`/`chrome-win64`、Chrome/Edge 安装路径），`_playwright_browser_dir()` 去掉 macOS 缓存目录分支。`市场表更新` 与 `集团每日上传` 的权限错误提示原本写的是 macOS「隐私与安全性／完全磁盘访问权限」，在 Windows 上是错误引导，改为占用／只读／目录不可写的排查顺序。`AGENTS.md` 同步改为「只发 Windows、macOS 脚本与历史附件保留但不维护」。
+- 修正诊断中心的浏览器判定口径：安装包外壳会设置 `TOOLBOX_PORTABLE=1`，此时各抓取脚本以 `channel=None` 启动、只用内置 Chromium，系统 Chrome/Edge 不参与；此前只要机器装了 Chrome 就判「浏览器自动化」正常，内置浏览器缺失时用户仍会登录失败。现便携模式下只认内置 Chromium，缺失时提示重新安装而不是「去装 Chrome」，源码运行时仍按系统浏览器优先。
+- 修正 Windows 上的 macOS 专用提示：市场日报补录与日志诊断不再提示「请运行 setup_macos.command」，改为按平台区分（Windows：`setup_windows.ps1`；macOS：`setup_macos.command`）。
+- 修正两处与当前早报口径脱节的测试断言：上网电量句改由 `build_online_energy_text()` 断言（原 `ensure_qingyuan_online_energy_text()` 已移除），鮀莲／归湖电量并入「光伏」段；日前出清总数按「火电＋新能源三站＋清远计划（AA64+AC64 后除以 10）」计算，旧断言仍按 19.5／12.5 的旧口径。
+- 验证：`test_minimum_window`、`test_credentials`、`test_login_ui`、`test_ui_performance`、`test_surface_cache`、`test_navigation_benchmark` 组合 46 项两轮全通过；`test_toolbox`、`test_tasks`、`test_task_widgets`、`test_log_console`、`test_platform_ui`（新增 3 项诊断回归）、`test_six_performance`、`test_all_trial_optimizations`、`test_optimization_regressions` 共 179 项通过（13 项跳过）；WPS 与导航 8 个模块 48 项通过。收敛到 Windows 单平台后复跑 `test_toolbox`＋`test_platform_ui`＋`test_log_console` 138 项、`test_wps_layout`＋`test_group_upload_template`＋`test_market_table_month_format`＋`test_credentials` 21 项，均通过；改动文件 `py_compile` 全通过。本机实测补齐 Playwright Chromium 后 `test_wps_api_recovery` 11 项由失败转为全通过；仍缺 Rust 工具链，9 个原生后端模块未验证。
 - 新增「私有数据批量上传」第 16 个工具：按单元直连网站批量上传，12 个文件／10 MB 自动拆批，逐文件回报并回读数据状态，登录态与出清结果汇总上传隔离。
 - 界面与上游 v0.1.31 对齐：16 个工具页删除页头功能介绍与重复操作小字，保留日期口径、覆盖规则、单位和运行状态；WPS 登录区去掉重复提示。
 - 早报全套口径对齐：三厂策略按厂拆块并取自 D 日「快报（日前）」A39，上网电量段接入 D-1 取数，机组启停按套号列出，生成前核对三份工作簿 A2 运行日并写入审计；海风预测表压缩到一页 A4、日清分负数标红、现货偏差正文不标红。

@@ -116,6 +116,22 @@ class ToolPage(ttk.Frame):
         else:
             self.footer.grid_remove()
 
+    def refresh_viewport(self) -> None:
+        """Re-measure the enclosing viewport after adding widgets later.
+
+        延迟装配的页面只改变"请求尺寸"，当前尺寸不变，视口收不到 <Configure>，
+        于是一直按旧宽度挤压内容。装配完成后主动让视口重新量一次。
+        """
+        widget = self.master
+        while widget is not None:
+            if callable(getattr(widget, "refresh", None)) and hasattr(widget, "canvas"):
+                # 第一次在空闲期量，第二次留给 Tk 完成几何传播后再量一次，
+                # 否则可能赶在新表体算出请求尺寸之前。
+                self.after_idle(widget.refresh)
+                self.after(80, widget.refresh)
+                return
+            widget = getattr(widget, "master", None)
+
     def register_busy_widgets(self, *widgets: tk.Widget) -> None:
         self._busy_widgets.extend(widgets)
         primary = tuple(getattr(self, name, None) for name in (

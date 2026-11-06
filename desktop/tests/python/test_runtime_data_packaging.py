@@ -124,8 +124,10 @@ class RuntimeDataPackagingTests(unittest.TestCase):
             "energy = folder / '广东-能销数据-20261023.xlsx'; energy.write_bytes(b'energy'); "
             "day, uploads = m.prepare_upload_files([energy]); "
             "assert day == '2026-10-23' and uploads[0].builtin_template; "
-            "assert uploads[0].path.is_relative_to(Path.cwd()); "
-            "assert not uploads[0].path.is_relative_to(folder); "
+            # 中文用户名的临时目录会带 8.3 短名（如 AAA建~1），直接比较字符串会误判，
+            # 两侧都 resolve 成完整路径后再比。
+            "assert uploads[0].path.resolve().is_relative_to(Path.cwd().resolve()); "
+            "assert not uploads[0].path.resolve().is_relative_to(folder.resolve()); "
             "assert m.province_output_path(uploads[0].path, day, output_dir=folder).parent == folder; "
             "print('Installed builtin province template OK')",
             str(data_root / "energy"),

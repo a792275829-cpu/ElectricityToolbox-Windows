@@ -559,9 +559,19 @@ def replace_weather_prefix(paragraph, report_date: str) -> None:
     replace_paragraph(paragraph, updated)
 
 
+# 快报表里停机、未投产、计划口径的单元格用斜杠／横线占位，
+# 它们与空白一样表示“此处无数值”，不能当成非法数据。
+BLANK_CELL_MARKERS = {"", "/", "\uff0f", "\\", "-", "\u2014", "\u2013", "\u2015"}
+
+
 def parse_float(value: Any) -> float:
     if value is None:
         return 0.0
+    if isinstance(value, str):
+        text = value.strip()
+        if text in BLANK_CELL_MARKERS:
+            return 0.0
+        return float(text)
     return float(value)
 
 
@@ -652,6 +662,26 @@ def _clearing_label_row(labels, wanted, sheet_name):
     return min(matches)
 
 
+# 火电区的历史行号。模板插入机组行（例如海门 #5／#6）后整体下移，
+# 分公司合计公式也会随之改指（=J8+J13+J21+J27），所以优先按首列标签定位，
+# 只有拿不到标签的老模板／导出件才退回这些行号。
+LEGACY_FIRE_ROWS = {
+    "\u5206\u516c\u53f8": 7,
+    "\u6c55\u5934": 8,
+    "\u6d77\u95e8": 13,
+    "\u4e1c\u839e": 19,
+}
+
+
+def _fire_label_row(label_rows: dict[str, int], label: str, sheet_name: str) -> int:
+    if label in label_rows:
+        return label_rows[label]
+    legacy = LEGACY_FIRE_ROWS.get(label)
+    if legacy is None:
+        raise KeyError(f"{sheet_name} 中未找到行：{label}")
+    return legacy
+
+
 def load_day_ahead_clearing_summary(date_text: str, workbook_path: Path | None = None) -> dict[str, Any]:
     if workbook_path is None:
         workbook_path = find_clearing_workbook(date_text)
@@ -672,10 +702,10 @@ def load_day_ahead_clearing_summary(date_text: str, workbook_path: Path | None =
     qingyuan_energy = sum(qingyuan_components.values()) / 10
 
     rows = {
-        "company": 7,
-        "\u6c55\u5934": 8,
-        "\u6d77\u95e8": 13,
-        "\u4e1c\u839e": 19,
+        "company": _fire_label_row(label_rows, "\u5206\u516c\u53f8", sheet_name),
+        "\u6c55\u5934": _fire_label_row(label_rows, "\u6c55\u5934", sheet_name),
+        "\u6d77\u95e8": _fire_label_row(label_rows, "\u6d77\u95e8", sheet_name),
+        "\u4e1c\u839e": _fire_label_row(label_rows, "\u4e1c\u839e", sheet_name),
         "\u6d77\u4e0a\u98ce\u7535": _clearing_label_row(label_rows, ("\u6c55\u5934\u6d77\u98ce", "\u6d77\u4e0a\u98ce\u7535"), sheet_name),
         "\u9b80\u83b2": _clearing_label_row(label_rows, ("\u9b80\u83b2\u5149\u4f0f", "\u9b80\u83b2"), sheet_name),
         "\u5f52\u6e56": _clearing_label_row(label_rows, ("\u5f52\u6e56\u5149\u4f0f", "\u5f52\u6e56"), sheet_name),
@@ -743,11 +773,11 @@ def load_online_price_summary(date_text: str, workbook_path: Path | None = None)
     return {
         "workbook": str(workbook_path),
         "sheet": sheet_name,
-        "averagePrice": parse_float(value(7, 7)),
+        "averagePrice": parse_float(value(_fire_label_row(label_rows, "\u5206\u516c\u53f8", sheet_name), 7)),
         "companies": {
-            "\u6c55\u5934": parse_float(value(8, 7)),
-            "\u6d77\u95e8": parse_float(value(13, 7)),
-            "\u4e1c\u839e": parse_float(value(19, 7)),
+            "\u6c55\u5934": parse_float(value(_fire_label_row(label_rows, "\u6c55\u5934", sheet_name), 7)),
+            "\u6d77\u95e8": parse_float(value(_fire_label_row(label_rows, "\u6d77\u95e8", sheet_name), 7)),
+            "\u4e1c\u839e": parse_float(value(_fire_label_row(label_rows, "\u4e1c\u839e", sheet_name), 7)),
             "\u6d77\u4e0a\u98ce\u7535": parse_float(value(renewable_rows["\u6d77\u4e0a\u98ce\u7535"], 8)),
             "\u9b80\u83b2": parse_float(value(renewable_rows["\u9b80\u83b2"], 8)),
             "\u5f52\u6e56": parse_float(value(renewable_rows["\u5f52\u6e56"], 8)),
@@ -788,10 +818,10 @@ def load_online_energy_summary(date_text: str, workbook_path: Path | None = None
                 return labels[name]
         raise KeyError(f"{sheet_name} 中未找到行：{'/'.join(wanted)}")
 
-    shantou = value(8, 10)
-    haimen = value(13, 10)
-    dongguan = value(19, 10)
-    total_fire = value(7, 10)
+    shantou = value(_fire_label_row(labels, "\u6c55\u5934", sheet_name), 10)
+    haimen = value(_fire_label_row(labels, "\u6d77\u95e8", sheet_name), 10)
+    dongguan = value(_fire_label_row(labels, "\u4e1c\u839e", sheet_name), 10)
+    total_fire = value(_fire_label_row(labels, "\u5206\u516c\u53f8", sheet_name), 10)
     offshore = value(label_row(("\u6c55\u5934\u6d77\u98ce", "\u6d77\u4e0a\u98ce\u7535")), 11)
     tuolian = value(label_row(("\u9b80\u83b2\u5149\u4f0f", "\u9b80\u83b2")), 11)
     guihu = value(label_row(("\u5f52\u6e56\u5149\u4f0f", "\u5f52\u6e56")), 11)

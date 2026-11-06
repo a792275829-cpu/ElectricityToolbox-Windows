@@ -63,7 +63,7 @@ def explain_error(text: str) -> tuple[str, str] | None:
     """Use specific failure signals, never ordinary mentions of login/network."""
     lower = text.lower()
     rules = (
-        (("modulenotfounderror", "importerror", "no module named", "缺少运行依赖"), "缺少运行依赖", "开发版请运行 setup_macos.command；安装版请更新或重新安装工具箱。"),
+        (("modulenotfounderror", "importerror", "no module named", "缺少运行依赖"), "缺少运行依赖", "开发版请运行初始化脚本 setup_windows.ps1；安装版请更新或重新安装工具箱。"),
         (("executable doesn't exist", "playwright install", "找不到浏览器"), "浏览器组件缺失", "开发版请重新初始化环境；安装版请更新或重新安装工具箱。"),
         (("permissionerror", "permission denied", "operation not permitted", "只读", "文件被占用"), "文件访问权限不足或被占用", "关闭占用文件的 Excel/WPS，检查文件和输出目录的访问权限后重试。"),
         (("filenotfounderror", "no such file or directory", "文件不存在", "找不到文件"), "找不到输入文件或程序", "重新选择输入文件，确认文件未移动且安装目录完整。"),

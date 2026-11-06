@@ -71,8 +71,10 @@ class PerformanceBoundaryTests(unittest.TestCase):
             ), module.clearing_input_cache():
                 ahead = module.load_day_ahead_clearing_summary("2026-10-24", path)
                 prices = module.load_online_price_summary("2026-10-23", path)
-                self.assertEqual(ahead["totalEnergy"], 19.5)
-                self.assertEqual(ahead["companies"]["清远"]["energy"], 12.5)
+                # 口径：总数＝分公司火电 F7 ＋ 新能源三站 G 列 ＋ 清远计划
+                # （基础信息 AA64+AC64 后除以 10）。
+                self.assertEqual(ahead["totalEnergy"], 7 + (20.25 + 25.25 + 30.25) + 1.25)
+                self.assertEqual(ahead["companies"]["清远"]["energy"], 1.25)
                 self.assertEqual(prices["companies"]["归湖"], -30)
                 self.assertEqual(loader.call_count, 1)
                 self.assertIsNone(opened[0]._archive.fp)

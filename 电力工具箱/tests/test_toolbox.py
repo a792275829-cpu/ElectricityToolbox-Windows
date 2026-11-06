@@ -746,10 +746,24 @@ class RuntimeTests(unittest.TestCase):
             paths.report_scripts_dir / "generate_red_marked_report.py",
         )
 
-        online_text = module.ensure_qingyuan_online_energy_text(
-            "7月1日分公司上网电量9003万千瓦时，其中，汕头1526万、海门6120万、"
-            "东莞1232万、海上风电58万、光伏67万千瓦时；分公司日前均价404厘/千瓦时，"
-            "其中汕头387厘、海门406厘、东莞411厘、海上风电347厘、鮀莲361厘、归湖358厘/千瓦时。"
+        # 上网电量句现在由 build_online_energy_text 统一生成（含清远计划口径），
+        # 旧的 ensure_qingyuan_online_energy_text 已在重构中移除。
+        online_text = module.build_online_energy_text(
+            "2026-07-01",
+            {
+                "total": 9003,
+                "companies": {
+                    "汕头": 1526, "海门": 6120, "东莞": 1232,
+                    "海上风电": 58, "光伏": 67, "清远": 0,
+                },
+            },
+            {
+                "averagePrice": 404,
+                "companies": {
+                    "汕头": 387, "海门": 406, "东莞": 411,
+                    "海上风电": 347, "鮀莲": 361, "归湖": 358,
+                },
+            },
         )
         self.assertIn("光伏67万千瓦时、清远0万千瓦时；", online_text)
 
@@ -768,7 +782,8 @@ class RuntimeTests(unittest.TestCase):
                 },
             },
         )
-        self.assertIn("归湖34万千瓦时、清远（计划）0万千瓦时；", clearing_text)
+        # 鮀莲与归湖电量合并计入「光伏」段，归湖只出现在均价分项里。
+        self.assertIn("光伏58万千瓦时、清远（计划）0万千瓦时；", clearing_text)
 
     def test_utf8_environment_sets_python_encoding(self) -> None:
         from toolbox.runtime import utf8_environment

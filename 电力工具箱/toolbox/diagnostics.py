@@ -72,6 +72,112 @@ class DiagnosticReport:
         return "\n".join(lines)
 
 
+WINDOWS_SETUP_HINT = "运行平台初始化脚本 setup_windows.ps1（在工具箱目录下用 PowerShell 执行）。"
+
+
+def _rust_backend_check() -> DiagnosticCheck:
+    """Rust 业务后端不是所有页面都必需，但缺它会让两个功能直接不可用。"""
+    try:
+        from toolbox_native_excel import native_binary
+
+        binary = native_binary()
+    except (ImportError, OSError, ValueError) as exc:
+        binary = None
+        detail = f"无法检查：{exc}"
+    else:
+        detail = str(binary) if binary is not None else (
+            "未安装；WPS 文档配置、市场日报「填写日前及实时市场」不可用，"
+            "其余工具自动回退 Python 实现"
+        )
+    return DiagnosticCheck(
+        "Rust 业务后端",
+        binary is not None,
+        detail,
+        "运行环境",
+        f"构建原生后端：{WINDOWS_SETUP_HINT}",
+        DiagnosticLevel.OK if binary is not None else DiagnosticLevel.WARNING,
+    )
+
+
+def _playwright_browser_dir() -> Path | None:
+    override = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if override and override not in {"0", ""}:
+        return Path(override).expanduser()
+    base = os.environ.get("LOCALAPPDATA")
+    return Path(base) / "ms-playwright" if base else None
+
+
+def _bundled_browser_executable() -> Path | None:
+    cache = _playwright_browser_dir()
+    if cache is None or not cache.is_dir():
+        return None
+    layouts = (
+        ("chromium-*", ("chrome-win/chrome.exe", "chrome-win64/chrome.exe")),
+        ("chromium_headless_shell-*", ("chrome-win/headless_shell.exe",
+                                       "chrome-win64/headless_shell.exe")),
+    )
+    for pattern, relatives in layouts:
+        for folder in sorted(cache.glob(pattern)):
+            for relative in relatives:
+                candidate = folder / relative
+                if candidate.is_file():
+                    return candidate
+    return None
+
+
+def _portable_mode() -> bool:
+    # 安装包外壳会设置 TOOLBOX_PORTABLE=1，此时各抓取脚本以 channel=None 启动，
+    # 只用内置 Chromium，系统 Chrome 根本不参与。
+    return os.environ.get("TOOLBOX_PORTABLE") == "1"
+
+
+def _system_browser_executable() -> Path | None:
+    # 源码运行时抓取脚本优先用系统 Chrome、再回退内置 Chromium，所以装了
+    # Chrome/Edge 的机器即使没下载内置浏览器也能登录抓取。
+    if _portable_mode():
+        return None
+    candidates: list[Path] = []
+    for env in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        base = os.environ.get(env)
+        if base:
+            candidates.append(Path(base) / "Google/Chrome/Application/chrome.exe")
+            candidates.append(Path(base) / "Microsoft/Edge/Application/msedge.exe")
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def _browser_check() -> DiagnosticCheck:
+    system = _system_browser_executable()
+    bundled = _bundled_browser_executable()
+    if system is not None:
+        return DiagnosticCheck(
+            "浏览器自动化",
+            True,
+            f"使用系统浏览器：{system}" if bundled is None
+            else f"系统浏览器：{system}（已内置 Chromium 兜底）",
+        )
+    if bundled is not None:
+        return DiagnosticCheck("浏览器自动化", True, f"内置 Chromium：{bundled}")
+    if _portable_mode():
+        # 便携版不认系统浏览器，让用户去装 Chrome 只会白跑一趟。
+        return DiagnosticCheck(
+            "浏览器自动化",
+            False,
+            f"便携版固定使用内置 Chromium，但内置浏览器缺失（查找目录：{_playwright_browser_dir()}）；"
+            "登录抓取和市场日报 PDF 不可用",
+            "运行环境",
+            "重新安装工具箱（安装包自带 Chromium），或运行初始化脚本补齐运行时。",
+            DiagnosticLevel.WARNING,
+        )
+    return DiagnosticCheck(
+        "浏览器自动化",
+        False,
+        "未找到 Chrome/Edge，也没有内置 Chromium；登录抓取和市场日报 PDF 不可用",
+        "运行环境",
+        f"安装 Chrome 或 Edge，或{WINDOWS_SETUP_HINT}",
+        DiagnosticLevel.WARNING,
+    )
+
+
 def _path_access_check(name: str, path: Path, *, category: str = "文件与权限") -> DiagnosticCheck:
     if not path.exists():
         return DiagnosticCheck(
@@ -88,7 +194,7 @@ def _path_access_check(name: str, path: Path, *, category: str = "文件与权�
             False,
             f"没有读取权限：{path}",
             category,
-            "请授予工具箱读取该目录的权限（Windows：文件夹属性→安全；macOS：隐私与安全性）。",
+            "请授予工具箱读取该目录的权限（文件夹属性 → 安全 → 编辑，给当前用户读取权限）。",
         )
     return DiagnosticCheck(name, True, str(path), category)
 
@@ -135,7 +241,7 @@ def diagnose_environment(paths: ToolPaths) -> DiagnosticReport:
             sys.version_info >= (3, 11),
             f"{sys.version.split()[0]} · {sys.executable}",
             "运行环境",
-            "请运行对应平台的初始化脚本（Windows：setup_windows.ps1；macOS：setup_macos.command）。",
+            "请运行 setup_windows.ps1 初始化环境，或重新安装工具箱。",
         )
     ]
     workspace = paths.workspace
@@ -207,8 +313,21 @@ def diagnose_environment(paths: ToolPaths) -> DiagnosticReport:
             True,
             node if node_available else "未找到；其他工具不受影响",
             "运行环境",
-            "私有数据上传不可用时，运行对应平台的初始化脚本或配置 Node.js 路径。",
+            "私有数据上传不可用时，运行 setup_windows.ps1 或配置 Node.js 路径。",
             DiagnosticLevel.OK if node_available else DiagnosticLevel.WARNING,
         )
     )
+    modules = paths.private_uploader.parent.parent / "node_modules"
+    checks.append(
+        DiagnosticCheck(
+            "私有上传依赖（node_modules）",
+            modules.is_dir(),
+            str(modules) if modules.is_dir() else "未安装；私有数据批量上传会直接失败",
+            "运行环境",
+            "在电力工具脚本/private-data-uploader-tool 目录执行 npm ci。",
+            DiagnosticLevel.OK if modules.is_dir() else DiagnosticLevel.WARNING,
+        )
+    )
+    checks.append(_rust_backend_check())
+    checks.append(_browser_check())
     return DiagnosticReport(tuple(checks))

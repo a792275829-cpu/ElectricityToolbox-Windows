@@ -218,9 +218,8 @@ def find_date_row(sheet, target: date) -> int:
 
 def workbook_permission_error(path: Path) -> RuntimeError:
     return RuntimeError(
-        "无法打开 Excel 文件，macOS 拒绝了当前程序访问该文件。"
-        f"请关闭正在占用的 Excel/WPS，并在“系统设置 > 隐私与安全性 > 文件和文件夹”或"
-        f"“完全磁盘访问权限”中允许启动工具箱的程序访问桌面/文稿，或把文件移到当前程序可访问的目录后重试：{path}"
+        "无法打开 Excel 文件，Windows 拒绝了对该文件的访问（通常是被 Excel/WPS 独占打开，或文件被设为只读、被安全软件拦截）。"
+        f"请关闭正在占用该文件的 Excel/WPS；若文件属性为只读请取消只读；仍失败时把文件复制到当前用户可写的目录（如桌面）后重试：{path}"
     )
 
 

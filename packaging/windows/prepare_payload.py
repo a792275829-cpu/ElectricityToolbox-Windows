@@ -77,6 +77,13 @@ def prepare(python_root: Path, forecast_workbook: Path | None = None):
     browser_env = {**os.environ, 'PLAYWRIGHT_BROWSERS_PATH': str(runtime / 'ms-playwright')}
     subprocess.run([str(python), '-m', 'playwright', 'install', 'chromium'],
                    check=True, env=browser_env)
+    # Trim what the toolbox never loads (ffmpeg for record_video, non-zh/en locales,
+    # browser helper executables). Verified on a real copy: headed login, headless
+    # export and CJK rendering all still work, 43 MB smaller payload.
+    saved = common.prune_browser_runtime(runtime / 'ms-playwright')
+    if saved:
+        print('Pruned browser runtime: ' + ', '.join(
+            f'{name} {size / 2**20:.1f} MB' for name, size in sorted(saved.items())))
     registry = bundled_python / 'Lib/site-packages/playwright/driver/package/browsers.json'
     if json.loads(registry.read_text()) != json.loads((uploader / 'node_modules/playwright-core/browsers.json').read_text()):
         raise RuntimeError('Python and Node Playwright browser versions differ.')

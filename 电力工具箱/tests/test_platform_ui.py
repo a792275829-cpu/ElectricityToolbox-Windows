@@ -85,6 +85,99 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(before.st_size, after.st_size)
         self.assertEqual(before.st_mtime_ns, after.st_mtime_ns)
 
+    def test_diagnostics_flag_missing_rust_backend_and_browser(self) -> None:
+        # 缺 Rust 后端或浏览器时，所有工具文件和 Node 都“正常”，旧诊断仍报全绿，
+        # 用户却在 WPS 文档配置和市场日报补录里直接遇到异常。
+        import os
+        import tempfile
+        from unittest import mock
+        from toolbox.diagnostics import DiagnosticLevel, diagnose_environment
+        from toolbox.runtime import ToolPaths
+
+        workspace = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch("toolbox_native_excel.native_binary", return_value=None), \
+                mock.patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": str(Path(directory) / "browsers")}), \
+                mock.patch("toolbox.diagnostics._system_browser_executable", return_value=None):
+            report = diagnose_environment(ToolPaths(workspace))
+        checks = {item.name: item for item in report.checks}
+        rust = checks["Rust 业务后端"]
+        browser = checks["浏览器自动化"]
+        self.assertEqual(DiagnosticLevel.WARNING, rust.status)
+        # 产品线只维护 Windows，提示里不应再出现 macOS 初始化脚本。
+        self.assertIn("setup_windows.ps1", rust.recommendation)
+        self.assertNotIn("setup_macos.command", rust.recommendation)
+        self.assertNotIn("macOS", rust.recommendation)
+        self.assertEqual(DiagnosticLevel.WARNING, browser.status)
+        self.assertIn("Chrome", browser.detail)
+        self.assertIn("setup_windows.ps1", browser.recommendation)
+
+    def test_diagnostics_accept_bundled_chromium_runtime_layout(self) -> None:
+        import os
+        import tempfile
+        from unittest import mock
+        from toolbox.diagnostics import DiagnosticLevel, diagnose_environment
+        from toolbox.runtime import ToolPaths
+
+        workspace = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "browsers"
+            executable = cache / "chromium-1187" / "chrome-win" / "chrome.exe"
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"stub")
+            with mock.patch("toolbox_native_excel.native_binary", return_value=executable), \
+                    mock.patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": str(cache)}), \
+                    mock.patch("toolbox.diagnostics._system_browser_executable", return_value=None):
+                report = diagnose_environment(ToolPaths(workspace))
+        checks = {item.name: item for item in report.checks}
+        self.assertEqual(DiagnosticLevel.OK, checks["浏览器自动化"].status)
+        self.assertIn("chromium-1187", checks["浏览器自动化"].detail)
+
+    def test_diagnostics_treat_system_browser_as_unusable_in_portable_mode(self) -> None:
+        # 安装包外壳设置 TOOLBOX_PORTABLE=1 后，抓取脚本一律 channel=None 走内置
+        # Chromium；此时"机器上有 Chrome"帮不上忙，诊断不能据此报绿。
+        import os
+        import tempfile
+        from unittest import mock
+        from toolbox import diagnostics
+        from toolbox.diagnostics import DiagnosticLevel, diagnose_environment
+        from toolbox.runtime import ToolPaths
+
+        with mock.patch.dict(os.environ, {"TOOLBOX_PORTABLE": "1"}), \
+                mock.patch.object(diagnostics.Path, "is_file", return_value=True):
+            self.assertIsNone(diagnostics._system_browser_executable())
+        with mock.patch.dict(os.environ, {"TOOLBOX_PORTABLE": "0"}), \
+                mock.patch.object(diagnostics.Path, "is_file", return_value=True):
+            self.assertIsNotNone(diagnostics._system_browser_executable())
+
+        workspace = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.dict(os.environ, {"TOOLBOX_PORTABLE": "1",
+                                             "PLAYWRIGHT_BROWSERS_PATH": str(Path(directory) / "browsers")}):
+            report = diagnose_environment(ToolPaths(workspace))
+        browser = {item.name: item for item in report.checks}["浏览器自动化"]
+        self.assertEqual(DiagnosticLevel.WARNING, browser.status)
+        self.assertIn("内置 Chromium", browser.detail)
+        # 便携版不给"去装 Chrome"这种无效建议。
+        self.assertNotIn("安装 Chrome", browser.recommendation)
+
+    def test_manual_market_missing_backend_hint_names_windows_script(self) -> None:
+        from datetime import date
+        from unittest import mock
+        from toolbox.runtime import load_module
+
+        workspace = Path(__file__).resolve().parents[2]
+        module = load_module(
+            "market_manual_platform_hint_test",
+            workspace / "南方分公司电力市场日报/gd_power_report/manual_market.py",
+        )
+        with mock.patch.object(module, "native_binary", return_value=None), \
+                self.assertRaises(RuntimeError) as error:
+            module.preview_manual_market({}, date(2026, 11, 6))
+        message = str(error.exception)
+        self.assertIn("setup_windows.ps1", message)
+        self.assertNotIn("setup_macos.command", message)
+
 
 class WorkbenchTests(unittest.TestCase):
     def setUp(self) -> None:

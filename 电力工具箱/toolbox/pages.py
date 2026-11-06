@@ -1137,6 +1137,9 @@ class WpsWriterPage(ToolPage):
             self.writer_frame.grid(row=0, column=0, sticky="nsew")
             if self._navigation_paused:
                 self.writer_frame.grid_remove()
+            # 表体是延迟装配的，请求宽度会变大而当前尺寸不变；不主动让视口
+            # 重新测量，页面会一直停在装配前的窄宽度上被横向压缩。
+            self.refresh_viewport()
         except Exception as exc:
             self._show_load_error(str(exc))
 
@@ -1166,6 +1169,7 @@ class WpsWriterPage(ToolPage):
             text="打开日志目录",
             command=lambda: _open_directory(self.paths.wps_writer_logs_dir),
         ).pack(side="left", padx=(8, 0))
+        self.refresh_viewport()
 
 def page_factories() -> Mapping[str, object]:
     return {

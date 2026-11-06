@@ -46,6 +46,32 @@ class MinimumWindowTests(unittest.TestCase):
             self.app.update()
             time.sleep(0.01)
 
+    def _settle_page(self, name: str, *, timeout: float = 5.0) -> None:
+        """Wait until the page's actual and requested size both stop changing.
+
+        WPS 页面的表体由工作线程延迟装配，装配途中会短暂出现 1191 甚至 1680 的
+        瞬时请求宽度（稳定后回落到 928），固定 sleep 量到中途状态就会误判成压缩。
+        """
+        deadline = time.monotonic() + timeout
+        started = time.monotonic()
+        previous = None
+        stable = 0
+        while time.monotonic() < deadline:
+            self.app.update()
+            page = self.app.pages.get(name)
+            if page is None:
+                time.sleep(0.01)
+                continue
+            current = (page.winfo_width(), page.winfo_reqwidth(),
+                       page.winfo_height(), page.winfo_reqheight())
+            stable = stable + 1 if current == previous else 0
+            previous = current
+            loaded = name != "WPS写入工具" or getattr(page, "_writer_load_done", True)
+            # 约 150 ms 内尺寸不再变化，且已过最短观察窗，才算完成布局。
+            if stable >= 15 and loaded and time.monotonic() - started >= 0.4:
+                return
+            time.sleep(0.01)
+
     def test_minimum_size_contract(self):
         self.assertEqual((MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT), (1280, 802))
         self.assertGreaterEqual(DEFAULT_WINDOW_WIDTH, MIN_WINDOW_WIDTH)
@@ -74,6 +100,25 @@ class MinimumWindowTests(unittest.TestCase):
         self.assertLessEqual(app.winfo_rootx() + app.winfo_width(), left + width)
         self.assertLessEqual(app.winfo_rooty() + app.winfo_height(), top + height)
 
+    @staticmethod
+    def _widest_children(page) -> str:
+        """List the widest descendants, so a compression failure names its cause."""
+        rows = []
+
+        def walk(widget, depth=0):
+            try:
+                requested = widget.winfo_reqwidth()
+            except Exception:
+                return
+            if requested >= 600:
+                rows.append((requested, depth, widget.winfo_class()))
+            for child in widget.winfo_children():
+                walk(child, depth + 1)
+
+        walk(page)
+        widest = sorted(rows, reverse=True)[:4]
+        return "，".join(f"{cls}@{depth}={req}" for req, depth, cls in widest) or "无"
+
     def test_all_pages_keep_full_size_at_minimum_window(self):
         skip_if_window_does_not_fit(self, self.app)
         app = self.app
@@ -86,15 +131,24 @@ class MinimumWindowTests(unittest.TestCase):
         for name in PAGE_NAMES:
             with self.subTest(page=name):
                 app.show_page(name)
-                self._settle(0.25)
+                self._settle_page(name)
                 page = app.pages[name]
+                context = (
+                    f"窗口 {app.winfo_width()}x{app.winfo_height()} "
+                    f"页面区 {app.page_host.winfo_width()} "
+                    f"页面区请求宽 {app.page_host.winfo_reqwidth()} "
+                    f"画布项宽 {app.page_viewport.canvas.itemcget(app.page_viewport.window, 'width')} "
+                    f"右栏 {'显示' if app.right_rail_visible else '收起'}"
+                )
+                widest = self._widest_children(page)
                 self.assertGreaterEqual(
                     page.winfo_width(), page.winfo_reqwidth() - 2,
-                    f"{name} 被横向压缩：{page.winfo_width()} < {page.winfo_reqwidth()}",
+                    f"{name} 被横向压缩：{page.winfo_width()} < {page.winfo_reqwidth()}"
+                    f"（{context}；最宽控件 {widest}）",
                 )
                 self.assertGreaterEqual(
                     page.winfo_height(), page.winfo_reqheight() - 2,
-                    f"{name} 被纵向压缩：{page.winfo_height()} < {page.winfo_reqheight()}",
+                    f"{name} 被纵向压缩：{page.winfo_height()} < {page.winfo_reqheight()}（{context}）",
                 )
 
     def test_overflow_is_scrollable_and_switching_resets_scroll(self):

@@ -45,15 +45,18 @@ def _transport(value):
     return value
 
 
+SETUP_HINT = "请运行初始化脚本 setup_windows.ps1"
+
+
 def _execute(**payload):
     binary = native_binary()
     if binary is None:
-        raise RuntimeError("未安装 Rust 市场数据后端，请运行 setup_macos.command。")
+        raise RuntimeError(f"未安装 Rust 市场数据后端，{SETUP_HINT}。")
     try:
         result = call(binary, "market_manual", "", payload=payload)
     except subprocess.CalledProcessError as exc:
         if "unknown operation" in exc.stderr:
-            raise RuntimeError("Rust 市场数据后端版本较旧，请运行 setup_macos.command 重新构建。") from exc
+            raise RuntimeError(f"Rust 市场数据后端版本较旧，{SETUP_HINT}重新构建。") from exc
         raise ValueError(exc.stderr.strip() or "Rust 市场数据处理失败。") from exc
     if "error" in result:
         raise ValueError(result["error"])

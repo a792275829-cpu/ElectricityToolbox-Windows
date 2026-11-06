@@ -1507,9 +1507,9 @@ def run_api_upload(
                     uploads = update_province_excel_for_upload(context, target_date, uploads)
                 except PermissionError as exc:
                     raise PermissionError(
-                        "macOS 拒绝访问所选 Excel。请在工具箱中重新选择该文件；"
-                        "如仍失败，请在“系统设置 > 隐私与安全性 > 文件和文件夹”中"
-                        "允许电力工具箱访问桌面。"
+                        "无法读取或写入所选 Excel：文件可能正被 Excel/WPS 独占打开，"
+                        "或所在目录不允许当前用户写入。请关闭占用该文件的程序后重试；"
+                        "若文件在只读目录或网络盘上，请复制到本地可写目录再选择。"
                     ) from exc
                 except Exception:
                     if login_refreshed:

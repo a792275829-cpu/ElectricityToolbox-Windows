@@ -6,6 +6,11 @@ from tkinter import ttk
 
 from .theme import BACKGROUND
 
+# 延迟装配的页面（WPS 表体）只改变请求尺寸、不改变当前尺寸，视口收不到
+# <Configure>。布局完成后按固定节拍复查若干次，发现请求尺寸变大就重新测量。
+LAYOUT_PROBE_ATTEMPTS = 8
+LAYOUT_PROBE_DELAY_MS = 150
+
 
 class Viewport(ttk.Frame):
     def __init__(self, parent: tk.Misc, *, width: int) -> None:
@@ -21,6 +26,8 @@ class Viewport(ttk.Frame):
         self.horizontal = ttk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
         self.canvas.configure(yscrollcommand=self.vertical.set, xscrollcommand=self.horizontal.set)
         self._refresh_id = None
+        self._probe_id = None
+        self._probe_left = 0
         self.canvas.bind("<Configure>", self.refresh)
         self.content.bind("<Configure>", self.refresh)
         self._layout_bindings = {
@@ -52,6 +59,24 @@ class Viewport(ttk.Frame):
             self._content_size = size
             self.canvas.itemconfigure(self.window, width=size[0], height=size[1])
             self.canvas.configure(scrollregion=(0, 0, *size))
+        self._start_layout_probe()
+
+    def _start_layout_probe(self) -> None:
+        if self._probe_id is not None:
+            self.after_cancel(self._probe_id)
+        self._probe_left = LAYOUT_PROBE_ATTEMPTS
+        self._probe_id = self.after(LAYOUT_PROBE_DELAY_MS, self._probe_layout)
+
+    def _probe_layout(self) -> None:
+        self._probe_id = None
+        applied = getattr(self, "_content_size", (0, 0))
+        needed = (self.content.winfo_reqwidth(), self.content.winfo_reqheight())
+        if needed[0] > applied[0] or needed[1] > applied[1]:
+            self.refresh()
+            return
+        self._probe_left -= 1
+        if self._probe_left > 0:
+            self._probe_id = self.after(LAYOUT_PROBE_DELAY_MS, self._probe_layout)
 
     def _queue_refresh(self, event) -> None:
         # A child can change its requested size while the canvas window keeps
@@ -108,6 +133,9 @@ class Viewport(ttk.Frame):
     def destroy(self) -> None:
         if self._refresh_id is not None:
             self.after_cancel(self._refresh_id)
+        if self._probe_id is not None:
+            self.after_cancel(self._probe_id)
+            self._probe_id = None
         top = self.winfo_toplevel()
         for event, binding in self._layout_bindings.items():
             top.unbind(event, binding)

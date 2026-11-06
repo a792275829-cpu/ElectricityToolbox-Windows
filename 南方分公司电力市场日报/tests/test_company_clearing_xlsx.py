@@ -125,6 +125,28 @@ class SheetSelectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "缺少可识别的日报工作表"):
             MODULE._select_report_sheet(workbook)
 
+    def test_alias_sheet_without_day_narrative_names_the_real_defect(self):
+        workbook = openpyxl.Workbook()
+        workbook.active.title = MODULE.ENERGY_METRICS_SHEET_NAME
+        sheet = workbook.active
+        sheet["A2"] = datetime(2026, 11, 7)
+        sheet["Q4"] = "占位"
+        sheet["A71"] = "二、实时市场简析"
+        with self.assertRaisesRegex(ValueError, "缺少“日前市场简析"):
+            MODULE._select_report_sheet(workbook)
+
+    def test_alias_sheet_accepts_the_short_narrative_heading(self):
+        workbook = openpyxl.Workbook()
+        workbook.active.title = MODULE.ENERGY_METRICS_SHEET_NAME
+        sheet = workbook.active
+        sheet["A4"] = "日前简析：\n    1.运行日统调负荷需求上涨。"
+        sheet["Q4"] = "占位"
+        sheet["A71"] = "二、实时市场简析"
+        self.assertEqual(
+            MODULE._select_report_sheet(workbook).title,
+            MODULE.ENERGY_METRICS_SHEET_NAME,
+        )
+
     def test_fallback_picks_the_highest_versioned_snapshot(self):
         workbook = openpyxl.Workbook()
         workbook.active.title = "说明"

@@ -18,6 +18,10 @@ from openpyxl.utils import get_column_letter, range_boundaries
 SHEET_NAME = "新快报"
 ENERGY_METRICS_SHEET_NAME = "新"
 REPORT_SHEET_ALIASES = ("新",)
+# Source workbooks label the day-ahead paragraph either "一、日前市场简析" or
+# the shorter "日前简析："; neither string contains the other, so match both.
+DAY_NARRATIVE_MARKERS = ("日前简析", "日前市场简析")
+DAY_NARRATIVE_LABEL = "日前市场简析／日前简析"
 FALLBACK_SHEET_PREFIX = "快报"
 DAY_AHEAD_RANGE = "A6:Q66"
 REALTIME_RANGE = "A68:Q84"
@@ -25,15 +29,48 @@ ERROR_VALUES = {"#DIV/0!", "#REF!", "#NAME?", "#VALUE!", "#N/A", "#NUM!", "#NULL
 WORKBOOK_DATE_RE = re.compile(r"分公司(?P<year>\d{4})\.(?P<month>\d{1,2})\.(?P<day>\d{1,2})")
 
 
+def _is_day_narrative(value: Any) -> bool:
+    text = str(value or "")
+    return any(marker in text for marker in DAY_NARRATIVE_MARKERS)
+
+
 def _looks_like_report_sheet(sheet: Any) -> bool:
-    day_text = str(sheet["A4"].value or "")
-    if "日前市场简析" not in day_text or int(sheet.max_column or 0) < 17:
+    if not _is_day_narrative(sheet["A4"].value) or int(sheet.max_column or 0) < 17:
         return False
+    return _has_realtime_section(sheet)
+
+
+def _has_realtime_section(sheet: Any) -> bool:
     return any(
         isinstance(sheet.cell(row, 1).value, str)
         and "实时市场简析" in sheet.cell(row, 1).value
         for row in range(1, min(int(sheet.max_row or 1), 200) + 1)
     )
+
+
+def _missing_narrative_sheets(workbook: Any) -> list[str]:
+    """Report-shaped sheets whose only defect is an empty A4 day narrative.
+
+    Real clearing workbooks occasionally reach the toolbox with the day-ahead
+    paragraph cleared (rows 3-5 empty) while the tables below stay intact.
+    Naming that defect is far more actionable than claiming no report sheet
+    exists, so keep the detection strict and explain the gap instead.
+    """
+
+    names: list[str] = []
+    for name in workbook.sheetnames:
+        if name != SHEET_NAME and name not in REPORT_SHEET_ALIASES and not name.strip().startswith(
+            FALLBACK_SHEET_PREFIX
+        ):
+            continue
+        sheet = workbook[name]
+        if int(sheet.max_column or 0) < 17:
+            continue
+        if _is_day_narrative(sheet["A4"].value):
+            continue
+        if _has_realtime_section(sheet):
+            names.append(name)
+    return names
 
 
 def _select_report_sheet(workbook: Any, preferred: str | None = None) -> Any:
@@ -53,6 +90,13 @@ def _select_report_sheet(workbook: Any, preferred: str | None = None) -> Any:
         and _looks_like_report_sheet(workbook[name])
     ]
     if not candidates:
+        missing = _missing_narrative_sheets(workbook)
+        if missing:
+            labels = "、".join(f"“{name}”" for name in missing)
+            raise ValueError(
+                f"出清情况 Excel 的{labels}工作表缺少“{DAY_NARRATIVE_LABEL}”段落（A4 为空），"
+                "请在源表补齐当日日前简析后再生成日报"
+            )
         raise ValueError(
             f"出清情况 Excel 缺少可识别的日报工作表：{SHEET_NAME}或最新版快报"
         )
@@ -220,13 +264,18 @@ def _date_label(value: date) -> str:
     return f"{value.month}月{value.day}日（周{weekdays[value.weekday()]}）"
 
 
-def _section_text(sheet: Any, marker: str, preferred_coordinate: str) -> str:
+def _section_text(
+    sheet: Any,
+    marker: str | tuple[str, ...],
+    preferred_coordinate: str,
+) -> str:
+    markers = (marker,) if isinstance(marker, str) else marker
     preferred = str(sheet[preferred_coordinate].value or "")
-    if marker in preferred:
+    if any(item in preferred for item in markers):
         return preferred
     for row in range(1, min(int(sheet.max_row or 1), 200) + 1):
         value = sheet.cell(row, 1).value
-        if isinstance(value, str) and marker in value:
+        if isinstance(value, str) and any(item in value for item in markers):
             return value
     return preferred
 
@@ -238,9 +287,7 @@ def _dated_day_narrative(workbook: Any, report_date: date) -> str | None:
             continue
         for row in range(1, min(int(sheet.max_row or 1), 200) + 1):
             value = sheet.cell(row, 1).value
-            if not isinstance(value, str) or (
-                "日前简析" not in value and "日前市场简析" not in value
-            ):
+            if not isinstance(value, str) or not _is_day_narrative(value):
                 continue
             nearby_dates = [
                 _as_date(sheet.cell(candidate_row, 1).value)
@@ -256,7 +303,7 @@ def _dated_day_narrative(workbook: Any, report_date: date) -> str | None:
 
 def _date_matched_day_narrative(workbook: Any, report_date: date, fallback_sheet: Any) -> str:
     return _dated_day_narrative(workbook, report_date) or _section_text(
-        fallback_sheet, "日前市场简析", "A4"
+        fallback_sheet, DAY_NARRATIVE_MARKERS, "A4"
     )
 
 
@@ -1174,7 +1221,7 @@ def _operation_table(
     quick_sheet: Any | None = None,
 ) -> dict[str, Any]:
     quick = quick_sheet or _select_report_sheet(current_workbook)
-    quick_text = _section_text(quick, "日前市场简析", "A4")
+    quick_text = _section_text(quick, DAY_NARRATIVE_MARKERS, "A4")
     dated_operations = _dated_operations_from_text(quick_text, current_date)
     workbook_operations = _operations(current_workbook)
     undated_operations = _operations_from_text(quick_text)
@@ -1537,7 +1584,7 @@ def _market_cards_from_quick(
         must_run_workbook=must_run_workbook,
     )
     fallback_by_label = {card["label"]: card for card in fallback}
-    day_text = text_override or _section_text(sheet, "日前市场简析", "A4")
+    day_text = text_override or _section_text(sheet, DAY_NARRATIVE_MARKERS, "A4")
     if realtime:
         text = text_override or _section_text(sheet, "实时市场简析", "A68")
         peak = _text_number(text, r"全天(?:最大|峰值)(?:值)?(?:为|达到)?\s*([\d,.]+)\s*万千瓦")
@@ -1896,7 +1943,7 @@ def parse_daily_report_workbook(
         realtime_comparison_workbook,
     )
     dated_day_narrative = _dated_day_narrative(workbook, report_date)
-    day_narrative_text = dated_day_narrative or _section_text(sheet, "日前市场简析", "A4")
+    day_narrative_text = dated_day_narrative or _section_text(sheet, DAY_NARRATIVE_MARKERS, "A4")
     strategies = _strategy_lines(day_narrative_text)
     if dated_day_narrative is not None:
         strategies = _sync_strategy_profits(strategies, sheet, report_date)

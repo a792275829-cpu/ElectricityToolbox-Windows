@@ -10,6 +10,7 @@ from generate_red_marked_report import (
     build_online_energy_text,
     load_online_energy_summary,
     load_online_price_summary,
+    parse_float,
 )
 
 
@@ -83,6 +84,56 @@ class OnlineEnergyTests(unittest.TestCase):
         energy = load_online_energy_summary("2026-11-05", self.path)
 
         self.assertEqual(energy["total"], 0)
+
+    def test_placeholders_are_blank_not_invalid(self) -> None:
+        # 停机、未投产、计划口径的单元格写作斜杠／横线，与空白同义。
+        for value in (None, "", " ", "/", "\uff0f", "-", "\u2014", "\u2013"):
+            self.assertEqual(parse_float(value), 0.0, repr(value))
+        self.assertEqual(parse_float("12.5"), 12.5)
+
+    def test_shifted_fire_rows_follow_labels_and_slash_cells(self) -> None:
+        # 现网模板在海门增加了 #5／#6 机组，东莞整体下移到第 21 行，
+        # 分公司合计公式也随之变成 =J8+J13+J21+J27；按标签定位才能读到东莞。
+        workbook = Workbook()
+        brief = workbook.active
+        brief.title = "快报"
+        for row, label, energy in (
+            (7, "分公司", 300.0), (8, "汕头", 100.0), (13, "海门", 150.0), (21, "东莞", 50.0),
+        ):
+            brief.cell(row, 1, label)
+            brief.cell(row, 10, energy)
+        for row, unit in ((18, "#5机组"), (19, "#6机组")):
+            brief.cell(row, 2, unit)
+            brief.cell(row, 6, "/")
+            brief.cell(row, 7, "/")
+        brief.cell(28, 1, "新能源")
+        for row, label, energy in (
+            (32, "汕头海风", 10.0), (33, "鮀莲光伏", 2.0), (34, "归湖光伏", 3.0),
+        ):
+            brief.cell(row, 1, label)
+            brief.cell(row, 11, energy)
+
+        day_ahead = workbook.create_sheet("快报  (日前)")
+        for row, label, price in (
+            (7, "分公司", 300), (8, "汕头", 310), (13, "海门", 320), (21, "东莞", 330),
+        ):
+            day_ahead.cell(row, 1, label)
+            day_ahead.cell(row, 7, price)
+        day_ahead.cell(19, 7, "/")
+        for row, label, price in (
+            (32, "汕头海风", 676), (33, "鮀莲光伏", 598), (34, "归湖光伏", 576),
+        ):
+            day_ahead.cell(row, 1, label)
+            day_ahead.cell(row, 8, price)
+        workbook.save(self.path)
+
+        energy = load_online_energy_summary("2026-11-07", self.path)
+        prices = load_online_price_summary("2026-11-07", self.path)
+
+        self.assertAlmostEqual(energy["companies"]["东莞"], 50.0)
+        self.assertAlmostEqual(energy["companies"]["清远"], 0.0)
+        self.assertAlmostEqual(prices["companies"]["东莞"], 330)
+        self.assertAlmostEqual(prices["companies"]["汕头"], 310)
 
 
 if __name__ == "__main__":

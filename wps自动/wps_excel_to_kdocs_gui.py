@@ -1359,7 +1359,7 @@ def write_to_wps(
     cdp_url: str = "http://127.0.0.1:9222",
 ) -> dict[str, Any]:
     if sync_playwright is None:
-        raise RuntimeError("缺少浏览器自动化组件，请运行对应平台的初始化脚本（Windows：setup_windows.ps1；macOS：setup_macos.command）。")
+        raise RuntimeError("缺少浏览器自动化组件，请运行初始化脚本 setup_windows.ps1。")
 
     payload = [
         {
@@ -1434,7 +1434,7 @@ def read_online_document_info(url: str, browser_mode: str, cdp_url: str, log) ->
     if _REMOTE_BUSINESS is not None:
         return _REMOTE_BUSINESS.wps_read('read_online_document_info', {'url': url, 'browser_mode': browser_mode, 'cdp_url': cdp_url}, log)
     if sync_playwright is None:
-        raise RuntimeError("缺少浏览器自动化组件，请运行对应平台的初始化脚本（Windows：setup_windows.ps1；macOS：setup_macos.command）。")
+        raise RuntimeError("缺少浏览器自动化组件，请运行初始化脚本 setup_windows.ps1。")
 
     started_at = time_module.monotonic()
     log("正在读取表格名称和工作表列表…")
@@ -1502,7 +1502,7 @@ def read_online_ranges(
     if not requests:
         return []
     if sync_playwright is None:
-        raise RuntimeError("缺少浏览器自动化组件，请运行对应平台的初始化脚本（Windows：setup_windows.ps1；macOS：setup_macos.command）。")
+        raise RuntimeError("缺少浏览器自动化组件，请运行初始化脚本 setup_windows.ps1。")
 
     with sync_playwright() as p:
         browser, context, close_context = open_browser_context(
