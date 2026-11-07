@@ -179,6 +179,59 @@ class GitHubUpdateTests(unittest.TestCase):
         self.assertIsNone(GitHubUpdater("1.2.0", opener=opener).check())
         self.assertEqual(len(calls), 2)
 
+    def test_public_fallback_keeps_installer_when_optional_asset_is_unverifiable(self):
+        data = release()
+        asset = data["assets"][0]
+        base = f"https://github.com/{REPO}/releases"
+        def opener(request, timeout):
+            if request.full_url.startswith("https://api.github.com/"):
+                raise urllib.error.HTTPError(request.full_url, 503, "unavailable", {}, None)
+            if request.full_url == base + "/latest":
+                return Response(b'<div class="markdown-body">notes</div>', data["html_url"])
+            if "/expanded_assets/" in request.full_url:
+                html = (f'<li><a href="/{REPO}/releases/download/v1.2.0/{asset["name"]}">dmg</a>'
+                        f'<clipboard-copy value="{asset["digest"]}"></clipboard-copy></li>'
+                        f'<li><a href="/{REPO}/releases/download/v1.2.0/update-manifest.json">index</a></li>')
+                return Response(html.encode())
+            self.assertEqual(request.get_method(), "HEAD")
+            return Response(headers={"Content-Length": "123"})
+        result = GitHubUpdater("0.1.3", opener=opener).check()
+        self.assertEqual(result.version, "v1.2.0")
+        self.assertIsNone(result.update_asset)
+        self.assertEqual(result.asset["size"], 123)
+
+    def test_public_fallback_reads_digest_rendered_as_visible_text(self):
+        data = release()
+        asset = data["assets"][0]
+        base = f"https://github.com/{REPO}/releases"
+        def opener(request, timeout):
+            if request.full_url.startswith("https://api.github.com/"):
+                raise urllib.error.HTTPError(request.full_url, 429, "rate limit", {}, None)
+            if request.full_url == base + "/latest":
+                return Response(b'<div class="markdown-body">notes</div>', data["html_url"])
+            if "/expanded_assets/" in request.full_url:
+                html = (f'<li><a href="/{REPO}/releases/download/v1.2.0/{asset["name"]}">dmg</a>'
+                        f'<span class="text-mono">{asset["digest"]}</span></li>')
+                return Response(html.encode())
+            return Response(headers={"Content-Length": "123"})
+        result = GitHubUpdater("0.1.3", opener=opener).check()
+        self.assertEqual(result.asset["digest"], asset["digest"])
+
+    def test_non_json_api_response_still_uses_public_release_page(self):
+        public, _ = self.public_opener()
+        def opener(request, timeout):
+            if request.full_url.startswith("https://api.github.com/"):
+                return Response(b"<html>captive portal</html>", request.full_url)
+            return public(request, timeout)
+        result = GitHubUpdater("0.1.3", opener=opener).check()
+        self.assertEqual(result.version, "v1.2.0")
+        def offline(request, timeout):
+            if request.full_url.startswith("https://api.github.com/"):
+                return Response(b"<html>portal</html>")
+            raise TimeoutError("public site unreachable")
+        with self.assertRaisesRegex(UpdateError, "版本信息无效.*备用检测失败.*public site unreachable"):
+            GitHubUpdater("0.1.3", opener=offline).check()
+
     def test_publication_requires_matching_dmg_and_checksum(self):
         sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "packaging/tauri"))
         from validate_installer import validate

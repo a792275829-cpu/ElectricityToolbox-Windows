@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 REPOSITORY = "a792275829-cpu/electricity-toolbox-scripts"
 CHECK_TIMEOUT = 10
+SHA256_DIGEST = re.compile(r"sha256:[a-fA-F0-9]{64}")
 
 
 class UpdateError(ValueError):
@@ -71,7 +72,11 @@ class ReleaseHTML(HTMLParser):
                               name=attrs["href"].rsplit("/", 1)[-1])
             self.assets.append(self.asset)
         if tag == "clipboard-copy" and self.asset is not None:
-            self.asset["digest"] = attrs.get("value", "")
+            # GitHub may render the asset digest as a copy button or as visible
+            # text; keep whichever form the page exposes.
+            value = attrs.get("value", "")
+            if value:
+                self.asset["digest"] = value
         if tag == "div":
             if self.notes_depth:
                 self.notes_depth += 1
@@ -89,6 +94,10 @@ class ReleaseHTML(HTMLParser):
     def handle_data(self, data):
         if self.notes_depth:
             self.notes.append(data)
+        elif self.asset is not None and not self.asset.get("digest"):
+            found = SHA256_DIGEST.search(data)
+            if found:
+                self.asset["digest"] = found.group(0)
 
 
 def parse_release(data: dict, current: str, repository: str = REPOSITORY) -> Release | None:
@@ -195,7 +204,11 @@ class GitHubUpdater:
             except Exception as fallback:
                 raise UpdateError(f"GitHub 更新接口不可用（{detail}）；备用检测失败：{fallback}") from exc
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise UpdateError("GitHub 版本信息无效") from exc
+            # A proxy or captive portal can answer 200 with non-JSON content.
+            try:
+                return self.check_public_release()
+            except Exception as fallback:
+                raise UpdateError(f"GitHub 版本信息无效；备用检测失败：{fallback}") from exc
 
     def check_public_release(self) -> Release | None:
         base = f"https://github.com/{self.repository}/releases"
@@ -225,25 +238,33 @@ class GitHubUpdater:
         with request(base + "/expanded_assets/" + tag) as response:
             assets = read_html(response).assets
         names = self.release_asset_names(tag)
+        primary = self.primary_asset_name(tag)
         selected = []
         for asset in assets:
             if asset["name"] not in names:
                 continue
+            # The delta index is optional. A page that cannot expose it must not
+            # hide the verified full installer, matching the API channel.
+            required = asset["name"] == primary
             url = asset["browser_download_url"]
             if url.startswith("/"):
                 url = "https://github.com" + url
-            if not url.startswith(base + "/download/" + tag + "/") or not re.fullmatch(
-                    r"sha256:[a-fA-F0-9]{64}", asset.get("digest", "")):
-                raise UpdateError("GitHub 发布附件链接或摘要无效")
+            if not url.startswith(base + "/download/" + tag + "/") or not SHA256_DIGEST.fullmatch(
+                    asset.get("digest", "")):
+                if required:
+                    raise UpdateError("GitHub 发布附件链接或摘要无效")
+                continue
             asset["browser_download_url"] = url
             with request(url, "HEAD") as response:
                 size = response.headers.get("Content-Length", "")
                 if response.status != 200 or not size.isascii() or not size.isdecimal() or int(size) <= 0:
-                    raise UpdateError("GitHub 发布附件大小无效")
+                    if required:
+                        raise UpdateError("GitHub 发布附件大小无效")
+                    continue
                 asset["size"] = int(size)
             selected.append(asset)
         # A changed/empty HTML layout must not silently look like a successful check.
-        if not any(a["name"] == self.primary_asset_name(tag) for a in selected):
+        if not any(a["name"] == primary for a in selected):
             raise UpdateError("GitHub 发布页面未找到可校验的安装包")
         return self.parse_data(dict(tag_name=tag, html_url=page, draft=False, prerelease=False,
                                    body=notes, assets=selected))

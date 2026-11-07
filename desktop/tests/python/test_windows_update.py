@@ -178,6 +178,23 @@ class WindowsChannelTests(unittest.TestCase):
         self.assertEqual(release.asset,asset)
         self.assertTrue(all('apple' not in url for url,_ in calls))
 
+    def test_rate_limit_fallback_keeps_installer_when_index_has_no_digest(self):
+        data=metadata();asset=data['assets'][0];base=f'https://github.com/{WINDOWS_REPOSITORY}/releases'
+        def opener(request,timeout):
+            if request.full_url.startswith('https://api.github.com/'):
+                raise urllib.error.HTTPError(request.full_url,403,'rate limit',{},None)
+            if request.full_url==base+'/latest':
+                return Response(b'<div class="markdown-body">Windows notes</div>',data['html_url'])
+            if request.full_url==base+'/expanded_assets/v0.1.22':
+                html=(f'<li><a href="/{WINDOWS_REPOSITORY}/releases/download/v0.1.22/{asset["name"]}">installer</a>'
+                      f'<clipboard-copy value="{asset["digest"]}"></clipboard-copy></li>'
+                      f'<li><a href="/{WINDOWS_REPOSITORY}/releases/download/v0.1.22/windows-update-manifest.json">index</a></li>')
+                return Response(html.encode(),request.full_url)
+            return Response(b'',request.full_url,{'Content-Length':str(len(PAYLOAD))})
+        release=WindowsUpdater('0.1.21',opener=opener).check()
+        self.assertEqual(release.asset,asset)
+        self.assertIsNone(release.update_asset)
+
     def test_corrupt_or_cancelled_download_leaves_no_installer(self):
         release=parse_windows_release(metadata(),'0.1.21')
         updater=WindowsUpdater('0.1.21',opener=lambda *a,**kw:Response(PAYLOAD[:-1]+b'!'))
