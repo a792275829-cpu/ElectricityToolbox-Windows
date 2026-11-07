@@ -20,6 +20,8 @@
 **/*.py[cod]
 **/node_modules/
 /.venv/
+# Bundled portable runtime (Node.js, Python, browsers) prepared by setup/build
+/runtime/
 /dist/
 /desktop/src-tauri/target/
 /native/price-xlsx/target/

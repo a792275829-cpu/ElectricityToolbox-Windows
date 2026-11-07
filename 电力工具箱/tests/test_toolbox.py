@@ -812,10 +812,45 @@ class RuntimeTests(unittest.TestCase):
             with (
                 mock.patch("toolbox.runtime.sys.platform", "darwin"),
                 mock.patch("toolbox.runtime.shutil.which", return_value=None),
+                mock.patch("toolbox.runtime.portable_runtime_root", return_value=Path(folder) / "runtime"),
                 mock.patch("toolbox.runtime.Path.home", return_value=Path(folder)),
                 mock.patch.dict(os.environ, {"HOME": folder}),
             ):
                 self.assertEqual(node_executable(), str(local_node))
+
+    def test_node_executable_finds_windows_install_outside_path(self) -> None:
+        from toolbox.runtime import node_executable
+
+        with tempfile.TemporaryDirectory() as folder:
+            program_files = Path(folder) / "Program Files"
+            system_node = program_files / "nodejs" / "node.exe"
+            system_node.parent.mkdir(parents=True)
+            system_node.write_bytes(b"")
+            with (
+                mock.patch("toolbox.runtime.sys.platform", "win32"),
+                mock.patch("toolbox.runtime.shutil.which", return_value=None),
+                mock.patch("toolbox.runtime.portable_runtime_root", return_value=Path(folder) / "runtime"),
+                mock.patch.dict(
+                    os.environ,
+                    {"ProgramFiles": str(program_files), "ProgramW6432": "", "ProgramFiles(x86)": "",
+                     "LOCALAPPDATA": "", "APPDATA": "", "NVM_HOME": "", "NVM_SYMLINK": ""},
+                    clear=False,
+                ),
+            ):
+                self.assertEqual(node_executable(), str(system_node))
+
+    def test_node_executable_prefers_bundled_runtime(self) -> None:
+        from toolbox.runtime import node_executable
+
+        with tempfile.TemporaryDirectory() as folder:
+            bundled = Path(folder) / "node" / "node.exe"
+            bundled.parent.mkdir(parents=True)
+            bundled.write_bytes(b"")
+            with (
+                mock.patch("toolbox.runtime.shutil.which", return_value=None),
+                mock.patch("toolbox.runtime.portable_runtime_root", return_value=Path(folder)),
+            ):
+                self.assertEqual(node_executable(), str(bundled))
 
     def test_task_registry_tracks_and_terminates_owned_process(self) -> None:
         from toolbox.runtime import TaskRegistry

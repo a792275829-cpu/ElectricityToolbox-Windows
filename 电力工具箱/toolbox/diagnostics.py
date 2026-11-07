@@ -8,7 +8,7 @@ from enum import Enum
 import os
 from pathlib import Path
 
-from .runtime import ToolPaths, node_executable
+from .runtime import ToolPaths, node_executable, node_file_usable
 
 
 class DiagnosticLevel(str, Enum):
@@ -306,14 +306,14 @@ def diagnose_environment(paths: ToolPaths) -> DiagnosticReport:
     node_path = Path(node)
     node_available = node != "node" or shutil.which("node") is not None
     if node_path.is_absolute():
-        node_available = node_path.is_file() and os.access(node_path, os.X_OK)
+        node_available = node_file_usable(node_path)
     checks.append(
         DiagnosticCheck(
             "Node.js（仅私有上传需要）",
             True,
             node if node_available else "未找到；其他工具不受影响",
             "运行环境",
-            "私有数据上传不可用时，运行 setup_windows.ps1 或配置 Node.js 路径。",
+            "私有数据上传不可用时，运行 setup_windows.ps1 自动准备便携 Node.js，或配置 TOOLBOX_NODE 环境变量。",
             DiagnosticLevel.OK if node_available else DiagnosticLevel.WARNING,
         )
     )

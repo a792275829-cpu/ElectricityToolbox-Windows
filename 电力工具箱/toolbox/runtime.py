@@ -352,6 +352,55 @@ def pythonw_executable() -> str:
     return python_executable()
 
 
+def node_file_usable(path: Path) -> bool:
+    try:
+        if not path.is_file():
+            return False
+    except OSError:
+        return False
+    return sys.platform.startswith("win") or os.access(path, os.X_OK)
+
+
+def _windows_node_candidates() -> list[Path]:
+    """Install locations of a system Node.js that may be missing from PATH."""
+
+    candidates: list[Path] = []
+    for variable in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
+        base = os.environ.get(variable)
+        if base:
+            candidates.append(Path(base) / "nodejs" / "node.exe")
+    # nvm-windows keeps a symlink to the active version plus every installed one.
+    for variable in ("NVM_SYMLINK", "NVM_HOME"):
+        base = os.environ.get(variable)
+        if base:
+            candidates.append(Path(base) / "node.exe")
+    nvm_home = os.environ.get("NVM_HOME")
+    if nvm_home:
+        candidates.extend(sorted(Path(nvm_home).glob("v*/node.exe"), reverse=True))
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        candidates.append(Path(local) / "Programs" / "nodejs" / "node.exe")
+        candidates.append(Path(local) / "Volta" / "bin" / "node.exe")
+    roaming = os.environ.get("APPDATA")
+    if roaming:
+        candidates.extend(sorted(Path(roaming).glob("fnm/node-versions/*/installation/node.exe"), reverse=True))
+    candidates.append(Path(os.environ.get("ChocolateyInstall", r"C:\ProgramData\chocolatey")) / "bin" / "node.exe")
+    candidates.append(Path.home() / "scoop" / "apps" / "nodejs" / "current" / "node.exe")
+    return candidates
+
+
+def _macos_node_candidates() -> list[Path]:
+    home = Path.home()
+    candidates = [
+        home / ".local" / "bin" / "node",
+        home / ".volta" / "bin" / "node",
+        Path("/opt/homebrew/bin/node"),
+        Path("/usr/local/bin/node"),
+    ]
+    candidates.extend(sorted((home / ".nvm" / "versions" / "node").glob("*/bin/node"), reverse=True))
+    return candidates
+
+
 def node_executable() -> str:
     configured = os.environ.get("TOOLBOX_NODE")
     if configured and Path(configured).is_file():
@@ -364,23 +413,15 @@ def node_executable() -> str:
     if discovered:
         return discovered
 
-    if sys.platform == "darwin":
-        home = Path.home()
-        candidates = [
-            home / ".local" / "bin" / "node",
-            home / ".volta" / "bin" / "node",
-            Path("/opt/homebrew/bin/node"),
-            Path("/usr/local/bin/node"),
-        ]
-        candidates.extend(
-            sorted(
-                (home / ".nvm" / "versions" / "node").glob("*/bin/node"),
-                reverse=True,
-            )
-        )
-        for candidate in candidates:
-            if candidate.is_file() and os.access(candidate, os.X_OK):
-                return str(candidate)
+    if sys.platform.startswith("win"):
+        candidates = _windows_node_candidates()
+    elif sys.platform == "darwin":
+        candidates = _macos_node_candidates()
+    else:
+        candidates = []
+    for candidate in candidates:
+        if node_file_usable(candidate):
+            return str(candidate)
     return "node"
 
 
