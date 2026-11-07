@@ -1464,10 +1464,17 @@ def _sync_strategy_profits(
 
 
 def _time_rows(sheet: Any) -> list[int]:
+    """Rows holding ``0:00``-``23:00`` labels, first occurrence per hour.
+
+    Hours may be text (``8:00``) or real time values (``08:00:00``); missing the
+    latter would fall back to the fixed 60-row floor in ``_appendix_ranges`` and
+    silently clip the tail of an appendix that grew past it.
+    """
+
     rows_by_hour: dict[int, int] = {}
     for row in range(1, min(int(sheet.max_row or 1), 300) + 1):
         value = str(sheet.cell(row, 1).value or "").strip()
-        match = re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", value)
+        match = re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d(?::00)?", value)
         if match:
             rows_by_hour.setdefault(int(match.group(1)), row)
     return [rows_by_hour[hour] for hour in sorted(rows_by_hour)]

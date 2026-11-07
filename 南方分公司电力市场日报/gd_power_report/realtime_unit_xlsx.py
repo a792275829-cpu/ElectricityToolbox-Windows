@@ -184,8 +184,11 @@ def _parse_unit(sheet: Any, plant: str, source_unit: str, block: tuple[int, dict
 def parse_realtime_unit_workbook(path: str | Path, expected_date: date) -> dict[str, Any]:
     """Parse a current-workbook unit-level realtime recap into ordered MWh hours."""
     source = Path(path).expanduser().resolve()
+    target_date = _as_date(expected_date)
+    if target_date is None:
+        raise ValueError(f"实时机组 Excel 的目标日期不可用：{expected_date!r}")
     workbook = load_workbook(source, data_only=True, read_only=False)
-    realtime_date = _realtime_date(workbook, expected_date)
+    realtime_date = _realtime_date(workbook, target_date)
     plants: list[dict[str, Any]] = []
     for plant, unit_map in EXPECTED_UNITS.items():
         if plant not in workbook.sheetnames:

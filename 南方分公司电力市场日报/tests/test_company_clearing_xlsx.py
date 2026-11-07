@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, time
 from pathlib import Path
 
 TOOL_DIR = Path(__file__).resolve().parents[1]
@@ -502,6 +502,40 @@ class HaimenSixUnitTests(unittest.TestCase):
         text = "各机组日前偏差收益分别为：1万元、2万元、3万元、4万元、5万元与6万元。"
         synced = MODULE._sync_strategy_profits([{"plant": "海门厂", "text": text}], sheet, date(2026, 11, 8))
         self.assertEqual(synced[0]["text"], text)
+
+
+class AppendixRangeTests(unittest.TestCase):
+    """取表区域跟随内容下移；60 行只是下限，不能截断表格尾部。"""
+
+    def test_range_tracks_content_past_the_60_row_floor(self):
+        sheet = openpyxl.Workbook().active
+        sheet.title = MODULE.SHEET_NAME
+        sheet["A4"] = "日前市场简析"
+        sheet["A6"] = datetime(2026, 11, 8)
+        sheet["A6"].number_format = '"分公司日前出清复盘（"yyyy/m/d")"'
+        for row in range(7, 44):
+            sheet.cell(row, 1, f"明细行{row}")
+        sheet["A44"] = "时刻"
+        for offset in range(24):
+            # 整点是真实时间值而不是文本，等价的 "08:00:00" 也必须被识别。
+            sheet.cell(45 + offset, 1, time(offset))
+            sheet.cell(45 + offset, 2, 100.0)
+        sheet["A69"] = "合计"
+
+        day_range, _ = MODULE._appendix_ranges(sheet)
+
+        self.assertEqual(day_range, "A6:Q69")
+
+    def test_text_hours_keep_their_existing_range(self):
+        sheet = openpyxl.Workbook().active
+        sheet.title = MODULE.SHEET_NAME
+        sheet["A6"] = datetime(2026, 11, 8)
+        sheet["A6"].number_format = '"分公司日前出清复盘（"yyyy/m/d")"'
+        for offset in range(24):
+            sheet.cell(7 + offset, 1, f"{offset}:00")
+        sheet["A31"] = "合计"
+        day_range, _ = MODULE._appendix_ranges(sheet)
+        self.assertEqual(day_range, "A6:Q66")
 
 
 class OperationTests(unittest.TestCase):

@@ -104,6 +104,16 @@ class OptionalUnitBlockTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "未识别机组块"):
             self.parse(workbook)
 
+    def test_iso_date_text_is_accepted_and_unusable_dates_are_reported(self):
+        workbook = unit_workbook()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "units.xlsx"
+            workbook.save(path)
+            parsed = MODULE.parse_realtime_unit_workbook(path, "2026-11-08")
+            self.assertEqual(parsed["realtime_date"], "2026-11-08")
+            with self.assertRaisesRegex(ValueError, "目标日期不可用"):
+                MODULE.parse_realtime_unit_workbook(path, "11月8日")
+
 
 if __name__ == "__main__":
     unittest.main()
