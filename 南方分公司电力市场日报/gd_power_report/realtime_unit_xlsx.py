@@ -18,6 +18,12 @@ EXPECTED_UNITS = {
     },
 }
 
+# 海门 5、6 号机随出清情况表改版加入机组序列：源表出现对应机组块时才解析，
+# 源表尚未补充时不判为缺块，避免整表解析失败。
+OPTIONAL_UNITS = {
+    "海门": {"5号机": "#5机组", "6号机": "#6机组"},
+}
+
 _METRICS = {
     "日前出清": "day_ahead_mwh",
     "实时出清": "realtime_mwh",
@@ -69,6 +75,23 @@ def _number(value: Any) -> float | None:
         return None
 
 
+def _realtime_recap_date(sheet: Any) -> date | None:
+    """Locate the realtime recap date by its title number format.
+
+    The recap block keeps its own title cell ("分公司实时出清复盘（yyyy/m/d）"),
+    so the daily recap growing by a row (海门 5、6 号机) never hides the date.
+    """
+
+    for row in range(1, min(int(sheet.max_row or 1), 400) + 1):
+        cell = sheet.cell(row, 1)
+        if "分公司实时出清复盘" not in str(cell.number_format or ""):
+            continue
+        candidate = _as_date(cell.value)
+        if candidate is not None:
+            return candidate
+    return None
+
+
 def _realtime_date(workbook: Any, expected_date: date) -> date:
     if "新" not in workbook.sheetnames:
         if "基础信息" not in workbook.sheetnames:
@@ -83,7 +106,9 @@ def _realtime_date(workbook: Any, expected_date: date) -> date:
             )
         return detected
     sheet = workbook["新"]
-    detected = _as_date(sheet["A68"].value)
+    detected = _realtime_recap_date(sheet)
+    if detected is None:
+        detected = _as_date(sheet["A68"].value)
     if detected is None:
         for row in range(60, min(sheet.max_row, 100) + 1):
             candidate = _as_date(sheet.cell(row, 1).value)
@@ -167,9 +192,12 @@ def parse_realtime_unit_workbook(path: str | Path, expected_date: date) -> dict[
             raise ValueError(f"实时机组 Excel 缺少电厂工作表：{plant}")
         sheet = workbook[plant]
         blocks = _unit_blocks(sheet, plant)
+        optional_map = OPTIONAL_UNITS.get(plant, {})
         units: list[dict[str, Any]] = []
-        for source_unit, unit in unit_map.items():
+        for source_unit, unit in {**unit_map, **optional_map}.items():
             if source_unit not in blocks:
+                if source_unit in optional_map:
+                    continue
                 raise ValueError(f"{plant}缺少机组块：{source_unit}")
             header_row, columns = blocks[source_unit]
             units.append({
@@ -177,7 +205,7 @@ def parse_realtime_unit_workbook(path: str | Path, expected_date: date) -> dict[
                 "source_unit": source_unit,
                 "hours": _parse_unit(sheet, plant, source_unit, (header_row, columns)),
             })
-        unexpected = set(blocks) - set(unit_map)
+        unexpected = set(blocks) - set(unit_map) - set(optional_map)
         if unexpected:
             raise ValueError(f"{plant}存在未识别机组块：{sorted(unexpected)[0]}")
         plants.append({"plant": plant, "units": units})

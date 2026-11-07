@@ -265,6 +265,7 @@ def _check_realtime_detail_totals(
             "D-2表格内部实时出清电量核对不一致："
             f"分公司汇总{company_total:g}万千瓦时，"
             f"机组汇总{unit_total:g}万千瓦时。"
+            "请核对各厂机组分表是否已补齐新增机组（如海门 5、6 号机）的机组块。"
         )
 
     return company_total, unit_total

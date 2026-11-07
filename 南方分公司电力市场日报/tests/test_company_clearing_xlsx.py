@@ -407,5 +407,117 @@ class SeriesTests(unittest.TestCase):
         self.assertTrue(all(value is None for value in series["price"]))
 
 
+HAIMEN_UNITS = ("#1机组", "#2机组", "#3机组", "#4机组", "#5机组", "#6机组")
+
+
+def haimen_recap_sheet(
+    profits: dict[str, object],
+    *,
+    report_date: date = date(2026, 11, 8),
+) -> "openpyxl.worksheet.worksheet.Worksheet":
+    """Day-ahead recap with the 海门 6-unit block introduced by the layout update."""
+
+    sheet = openpyxl.Workbook().active
+    sheet.title = MODULE.SHEET_NAME
+    sheet["A4"] = "日前市场简析：竞价空间回落，价格小幅下行。"
+    sheet["A6"] = datetime(report_date.year, report_date.month, report_date.day)
+    sheet["A6"].number_format = '"分公司日前出清复盘（"yyyy/m/d")"'
+    sheet["A7"] = "单位：万千瓦,万千瓦时,元/MWh,万元"
+    sheet["A8"] = "南方分公司"
+    sheet["D8"], sheet["G8"], sheet["I8"], sheet["M8"] = "中长期", "日前出清", "日前偏差", "当日合计"
+    for cell_range in ("D8:F8", "G8:H8", "I8:K8", "M8:Q8"):
+        sheet.merge_cells(cell_range)
+    for column, label in (
+        ("D", "电量"), ("E", "电价"), ("F", "边际贡献"),
+        ("G", "电量"), ("H", "电价"),
+        ("I", "电量"), ("J", "电价"), ("K", "边际贡献"),
+        ("M", "电能电价"),
+    ):
+        sheet[f"{column}9"] = label
+    sheet["A10"], sheet["B10"] = "火电机组合计", "/"
+    sheet["A11"], sheet["B11"] = "海门", "合计"
+    last_unit_row = 11 + len(HAIMEN_UNITS)
+    sheet.merge_cells(f"A11:A{last_unit_row}")
+    for index, unit in enumerate(HAIMEN_UNITS, start=12):
+        sheet.cell(index, 2, unit)
+        sheet.cell(index, 11, profits.get(unit))
+    hour_row = last_unit_row + 3
+    for offset in range(24):
+        sheet.cell(hour_row + offset, 1, f"{offset}:00")
+        sheet.cell(hour_row + offset, 2, 100.0)
+    return sheet
+
+
+class HaimenSixUnitTests(unittest.TestCase):
+    """海门 5、6 号机加入后，出清情况表与策略盈亏都不再按 4 台机组写死。"""
+
+    def test_added_units_stay_inside_the_day_appendix(self):
+        sheet = haimen_recap_sheet({unit: 1.0 for unit in HAIMEN_UNITS})
+        day_range, _ = MODULE._appendix_ranges(sheet)
+        table = MODULE._table_model(sheet, day_range, [])
+        labels = [
+            str(cell.get("value") or "")
+            for row in table["rows"]
+            for cell in row["cells"]
+        ]
+        for unit in HAIMEN_UNITS:
+            self.assertIn(unit, labels)
+
+    def test_strategy_profits_cover_the_two_new_units(self):
+        profits = dict(zip(HAIMEN_UNITS, (-326, 441, -253, 475, 12, -7)))
+        sheet = haimen_recap_sheet(profits)
+        strategies = [{
+            "plant": "海门厂",
+            "text": "海门厂：延续低价欠发增收策略。各机组日前偏差收益分别为："
+                    "1万元、2万元、3万元、4万元、5万元与6万元。",
+        }]
+        synced = MODULE._sync_strategy_profits(strategies, sheet, date(2026, 11, 8))
+        self.assertIn(
+            "各机组日前偏差收益分别为：-326万元、441万元、-253万元、475万元、12万元与-7万元。",
+            synced[0]["text"],
+        )
+
+    def test_four_amount_sentence_still_syncs_when_new_units_have_no_clearing(self):
+        # 5、6 号机调试、无日前出清时表内为「/」：句中四条金额仍按 #1-#4 对齐。
+        profits = {"#1机组": -326, "#2机组": 441, "#3机组": -253, "#4机组": 475,
+                   "#5机组": "/", "#6机组": "/"}
+        sheet = haimen_recap_sheet(profits)
+        strategies = [{
+            "plant": "海门厂",
+            "text": "各机组日前偏差收益分别为：1万元、2万元、3万元与4万元。",
+        }]
+        synced = MODULE._sync_strategy_profits(strategies, sheet, date(2026, 11, 8))
+        self.assertIn("-326万元、441万元、-253万元与475万元", synced[0]["text"])
+
+    def test_four_amount_sentence_is_kept_when_new_units_report_profits(self):
+        profits = dict(zip(HAIMEN_UNITS, (-326, 441, -253, 475, 12, -7)))
+        sheet = haimen_recap_sheet(profits)
+        text = "各机组日前偏差收益分别为：1万元、2万元、3万元与4万元。"
+        synced = MODULE._sync_strategy_profits([{"plant": "海门厂", "text": text}], sheet, date(2026, 11, 8))
+        self.assertEqual(synced[0]["text"], text)
+
+    def test_error_values_keep_the_source_sentence(self):
+        profits = {unit: "#DIV/0!" for unit in HAIMEN_UNITS}
+        sheet = haimen_recap_sheet(profits)
+        text = "各机组日前偏差收益分别为：1万元、2万元、3万元、4万元、5万元与6万元。"
+        synced = MODULE._sync_strategy_profits([{"plant": "海门厂", "text": text}], sheet, date(2026, 11, 8))
+        self.assertEqual(synced[0]["text"], text)
+
+
+class OperationTests(unittest.TestCase):
+    def test_legacy_basic_info_rows_include_the_new_haimen_units(self):
+        sheet = openpyxl.Workbook().active
+        sheet.title = "基础信息"
+        for row, plant in ((14, "汕头"), (19, "海门"), (26, "东莞"), (32, "清远")):
+            sheet.cell(row, 1, plant)
+        for offset, status in enumerate(
+            ("运行", "备用", "供热", "备用", "调试", "调试")
+        ):
+            sheet.cell(20 + offset, 3, status)
+        workbook = sheet.parent
+        operations = MODULE._operations(workbook)
+        self.assertIn("#5、#6机组调试", operations["海门厂"])
+
+
 if __name__ == "__main__":
     unittest.main()
