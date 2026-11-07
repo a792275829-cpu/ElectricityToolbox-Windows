@@ -1,5 +1,12 @@
 # 更新日志
 
+## [0.1.35] - 2026-11-07
+
+- 把 0.1.34 的在线更新检测加固真正打进客户端：HEAD 被代理或 CDN 拦截时改用单字节 Range 读取 Content-Range 总大小，更新检查期间按钮显示「检查中…」并禁用，服务模式按平台选择更新通道，不再回落到 macOS 仓库地址。
+- Windows x64 重新构建（NSIS）：载荷按 0f7d50e 重新导出，含便携 Node v22.23.3 与全部更新检测改动，675 个受管文件；安装后 payload/manifest.json 与工作区 state/installed.json 回读为 0.1.35，实机启动窗口「电力工作工具箱」可见、toolbox-service.exe 与载荷内 Python 正常拉起。
+- 打包流程补齐增量索引：`build_updates.py` 不再强依赖 `gh` CLI（未安装时改用 GitHub REST API），历史发布与网络都读不到时改用 `dist/windows/` 里的历史安装包继续，`build.ps1` 结束前校验 `updates-X.Y.Z/windows-update-manifest.json` 确实生成；已发布版本优先占用补丁位，本地未发布包不会把已发布旧版挤出升级路径。此前缺 `gh` 会让增量目录直接空着，Release 也就没有索引，客户端只能每次下 311 MB 完整包。
+- 验证：`test_windows_update_build`＋`test_windows_delta` 22 项通过，新增 5 项覆盖 gh 缺失走 REST API、无历史时用本地安装包出补丁、历史不可用不中断、基线安装包命名校验、已发布版本保位；索引与 `.sha256` 由 `build()` 落盘并回读。
+
 ## [0.1.34] - 2026-11-07
 
 - 在线更新备用检测容错：发布索引缺少摘要、摘要写成可见文本或接口返回非 JSON 时不再直接判定失败，改为回退到发布页并继续尝试完整包；新增 70 项更新相关回归用例。

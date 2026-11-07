@@ -20,10 +20,16 @@ Windows 10 / 11 x64 使用同一套原版 Tk 页面和独立的 Windows 更新�
 时安全重下，最后必须通过完整 SHA-256 校验。
 
 构建入口 `packaging/windows/build.ps1` 会构建完整包、下载并校验历史包、
-在隔离目录安装后制作及实际还原补丁，输出 `dist/windows/updates-X.Y.Z/`。
+在隔离目录安装后制作及实际还原补丁，输出 `dist/windows/updates-X.Y.Z/`
+（含 `windows-update-manifest.json` 及其 `.sha256`）；构建结束会校验该索引
+确实生成，缺失即报错。
 完整安装包和该目录内的所有附件一起上传到对应 Release；不可只上传补丁。
-已安装基准可通过 `build_updates.py --base-root PATH` 复用；自动构建会覆盖
-最近三个同系列正式版本，显式提供的基准也必须来自完整安装包。
+历史发布列表优先走 `gh` CLI，未安装时改用 GitHub REST API；两者都不可用时
+只用本地历史安装包继续，不会中断打包。`dist/windows/` 下已有的同系列旧安装包
+会被自动当作基准（免下载），但已发布版本的补丁路径优先占位，不会被未发布的
+本地包挤掉；最近三个同系列版本仍然按 `limit` 截断。
+已安装基准可通过 `build_updates.py --base-root PATH` 复用，显式指定安装包用
+`--base-installer PATH`；显式提供的基准也必须来自完整安装包。
 制作补丁时不得使用用户日常安装目录作为输出目录。
 
 本地验证示例：

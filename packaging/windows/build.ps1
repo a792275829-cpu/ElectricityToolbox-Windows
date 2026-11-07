@@ -36,3 +36,9 @@ Write-Host "Windows installer and SHA256: $output"
 $deltaArguments = @('packaging/windows/build_updates.py', '--installer', (Join-Path $output $downloadName), '--output', $output)
 if ($FullOnly) { $deltaArguments += '--full-only' }
 Run-Native "$root/.venv/Scripts/python.exe" $deltaArguments
+
+# A release without this index silently disables the delta channel for every client.
+$manifest = Join-Path $output "updates-$version/windows-update-manifest.json"
+if (-not (Test-Path -LiteralPath $manifest)) { throw "Windows delta index was not produced: $manifest" }
+Write-Host "Windows delta index: $manifest"
+Get-ChildItem -LiteralPath (Split-Path -Parent $manifest) | Select-Object Name, Length | Format-Table -AutoSize
