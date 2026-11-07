@@ -10,6 +10,7 @@ import threading
 import time
 from pathlib import Path
 from uuid import uuid4
+from .page_contracts import PAGE_BINDINGS
 from .runtime import TaskRegistry
 from .tasks import TaskCancelled
 from .tasks.errors import RemoteTaskError
@@ -113,37 +114,20 @@ class RemoteTaskRegistry(TaskRegistry):
                 raise RemoteTaskError(snapshot["error"] or "业务任务失败", "".join(first_trace))
             time.sleep(0.15)
 
-    def prepare_page_worker(self, page, status, *, command=None, process=False):
-        name = page.__class__.__name__
-        tool_id = {
-            "OnlineEnergyPage": "online-energy", "WindForecastPage": "wind-forecast",
-            "SectionAnalysisPage": "section-analysis", "TradeAnalysisPage": "trade-analysis",
-            "MarketTableUpdatePage": "market-table", "TransactionInfoUpdatePage": "transaction-info",
-            "PowerBenefitUpdatePage": "power-benefit", "SpotPriceUpdatePage": "spot-price",
-            "DailyPdfParserPage": "daily-pdf-parser", "MarketReportPage": "market-report",
-            "ReportPage": "report", "GuangdongPricePage": "guangdong-price",
-            "GroupUploadPage": "group-upload", "SummaryUploadPage": "summary-upload",
-            "PrivateBatchUploadPage": "private-batch-upload",
-        }.get(name)
-        if tool_id is None:
-            raise ValueError(f"该页面尚未注册业务服务：{name}")
+    def prepare_page_worker(self, page, status, *, command=None, process=False, action="run"):
+        # tool_id 由页面类声明，字段清单以 page_contracts.PageBinding 为唯一来源；
+        # 这里再抄一份字段表就会在新增开关时静默漏传（服务模式收不到该参数）。
+        tool_id = getattr(page, "tool_id", None)
+        if tool_id not in PAGE_BINDINGS:
+            raise ValueError(f"该页面尚未注册业务服务：{tool_id}")
         get = lambda key: getattr(page, key).get()
         # Read every Tk variable here, before the worker thread is started.
-        fields = {
-            "online-energy": ("start_date", "end_date"), "wind-forecast": ("run_date",),
-            "section-analysis": ("output_root", "topology_path", "threshold"),
-            "trade-analysis": ("output_dir",), "market-table": ("run_date", "workbook"),
-            "transaction-info": ("workbook", "start_date", "end_date", "create_backup"),
-            "power-benefit": ("start_date", "end_date", "overwrite", "create_backup"),
-            "spot-price": ("start_date", "end_date", "overwrite", "create_backup"),
-            "daily-pdf-parser": ("pdf_path", "output_path", "mode"),
-            "market-report": ("day_report", "previous_report", "d2_report", "dongguan_operation", "realtime_maintenance", "manual_market"),
-            "report": ("report_date", "online_workbook", "day_ahead_workbook", "daily_workbook", "template_report", "fetch_data", "generate_word"),
-            "guangdong-price": ("run_date", "master_workbook", "prediction_output_dir", "training_months"),
-            "group-upload": ("force",), "summary-upload": ("input_dir", "output_file", "mode"),
-            "private-batch-upload": ("unit", "summary_type", "verify"),
-        }[tool_id]
-        values = {key: get(key) for key in fields}
+        values = {}
+        for key in PAGE_BINDINGS[tool_id].fields:
+            variable = getattr(page, key, None)
+            if variable is None:
+                continue
+            values[key] = get(key)
         if tool_id in {"section-analysis", "trade-analysis"}:
             values["files"] = [str(p) for p in page.files]
         if tool_id in {"group-upload", "private-batch-upload"}:
@@ -156,17 +140,16 @@ class RemoteTaskRegistry(TaskRegistry):
             for index, key in enumerate(("guihu", "tuolian", "haifeng")):
                 values[key + "_workbook"] = page.workbooks[index].get()
                 values[key + "_selected"] = page.selected[index].get()
-        action = "run"
-        if command and "--login" in command:
+        # 显式 action 优先；仅在调用方没写时才按命令行与文案回推，避免误判成 run。
+        if action == "run" and command and "--login" in command:
             action = "login"
-        elif tool_id == "guangdong-price":
-            action = "predict" if process else "update"
+        elif action == "run" and tool_id == "summary-upload" and "预览" in status:
+            action = "preview"
+        if tool_id == "guangdong-price" and action in {"update", "predict"}:
             if action == "predict":
                 values["master_workbook"] = page.prediction_input.get()
                 values["prediction_output_dir"] = str(page.resolve_business_path(values["prediction_output_dir"]))
             values["master_workbook"] = str(page.resolve_business_path(values["master_workbook"]))
-        elif tool_id == "summary-upload" and "预览" in status:
-            action = "preview"
         if action == "login":
             values = {}
 

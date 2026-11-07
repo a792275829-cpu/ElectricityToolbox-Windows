@@ -214,7 +214,7 @@ class SummaryUploadPage(ToolPage):
             )
 
         self.run_in_thread(
-            worker, status="正在归类并预览上传文件...",
+            worker, action="preview", status="正在归类并预览上传文件...",
         )
 
     def start_selected(self) -> None:

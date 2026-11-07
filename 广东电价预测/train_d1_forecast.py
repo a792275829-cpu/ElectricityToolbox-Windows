@@ -14,7 +14,7 @@ from gd_price_forecast.data import TARGET, load_model_data, split_labeled_predic
 from gd_price_forecast.evaluation import make_date_splits
 from gd_price_forecast.features import build_features
 from gd_price_forecast.modeling import fit_model, predict_model, run_experiments
-from gd_price_forecast.reporting import write_d1_price_workbook
+from gd_price_forecast.reporting import write_price_workbook
 from gd_price_forecast.paths import DEFAULT_MASTER_WORKBOOK as DEFAULT_INPUT, DEFAULT_OUTPUT_DIR, resolve_paths
 from gd_price_forecast.experiments import MODEL_CONFIG, training_indices
 from gd_price_forecast.future_inputs import (
@@ -159,8 +159,8 @@ def run_pipeline(
     future_snapshot: pd.DataFrame | None = None,
     snapshot_receipt: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if forecast_days != 1:
-        raise ValueError("本模块只输出 D+1 日前电价，预测天数必须为 1")
+    if not 1 <= forecast_days <= MAX_FORECAST_DAYS:
+        raise ValueError(f"预测天数必须在 1 至 {MAX_FORECAST_DAYS} 之间")
     input_path, output_dir = Path(input_path).expanduser().resolve(), Path(output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     source = load_model_data(input_path)
@@ -175,7 +175,9 @@ def run_pipeline(
     source = source.loc[source['日期'].le(data_end)].copy().reset_index(drop=True)
     target_day = data_end + pd.Timedelta(days=1)
     frame = append_prediction_days(source, forecast_days)
-    prediction_dates = [target_day]
+    prediction_dates = [
+        target_day + pd.Timedelta(days=offset) for offset in range(forecast_days)
+    ]
     fallback_reason = '未提供经过发布时间核验的完整预测日供需'
     snapshot_error_type = None
     verified_snapshot = None
@@ -206,10 +208,16 @@ def run_pipeline(
         raise ValueError('训练窗口月数必须大于0，或用0自动选择')
     if not 0 <= weight <= 1:
         raise ValueError('模型集成权重必须在0至1之间')
-    strategy = f'当日供需_{months}月' if published else f'历史供需_{months}月_{weight:.0%}模型{1-weight:.0%}D-1'
-    print(f'采用方案：{strategy}；训练窗口={months}个月；模型权重={weight:.0%}', flush=True)
+    horizon = '' if forecast_days == 1 else f'_D+1至D+{forecast_days}'
+    strategy = (
+        f'当日供需_{months}月' if published
+        else f'历史供需_{months}月_{weight:.0%}模型{1-weight:.0%}D-1'
+    ) + horizon
+    print(f'采用方案：{strategy}；训练窗口={months}个月；模型权重={weight:.0%}；预测天数={forecast_days}', flush=True)
     if not published:
         print(f'历史信息回退原因：{fallback_reason}', flush=True)
+    if forecast_days > 1:
+        print('多日预测：D+2 起没有已发布供需，供需特征由模型填补，误差随天数放大', flush=True)
     X_all, y_all, identity_all = build_features(frame, **feature_options)
     labeled = y_all.notna()
     X = X_all.loc[labeled].reset_index(drop=True)
@@ -241,8 +249,11 @@ def run_pipeline(
         frame, final_model, weight, prediction_dates=prediction_dates, feature_options=feature_options,
         prepared_features=(X_all, identity_all),
     )
-    if len(future) != 96 or not np.isfinite(future['预测日前电价']).all():
-        raise ValueError('预测结果必须包含96个有限电价值')
+    expected_points = 96 * forecast_days
+    if len(future) != expected_points or not np.isfinite(future['预测日前电价']).all():
+        raise ValueError(f'预测结果必须包含{expected_points}个有限电价值')
+    if future['日期'].nunique() != forecast_days:
+        raise ValueError(f'预测结果必须覆盖{forecast_days}个连续预测日')
     summary = {
         "mae": mae,
         'strategy': strategy,
@@ -251,6 +262,8 @@ def run_pipeline(
         'model_config': best_config,
         'as_of': str(data_end.date()),
         'target_date': str(target_day.date()),
+        'forecast_days': forecast_days,
+        'target_dates': [str(day.date()) for day in prediction_dates],
         'holdout_start': str(holdout_start.date()),
         'holdout_end': str(identity.iloc[holdout]['日期'].max().date()),
         'holdout_points': len(holdout),
@@ -261,8 +274,9 @@ def run_pipeline(
         'fallback_reason': None if published else fallback_reason,
         'snapshot_error_type': snapshot_error_type,
     }
-    operational_path = output_dir / "D+1日前电价.xlsx"
-    write_d1_price_workbook(operational_path, future)
+    name = "D+1日前电价.xlsx" if forecast_days == 1 else f"D+1至D+{forecast_days}日前电价.xlsx"
+    operational_path = output_dir / name
+    write_price_workbook(operational_path, future)
     (output_dir / "MAE.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -270,19 +284,26 @@ def run_pipeline(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="广东 D+1 日前电价预测")
+    parser = argparse.ArgumentParser(description="广东日前电价预测（D+1 至 D+15）")
     parser.add_argument("--config", type=Path, help="模块配置文件")
     parser.add_argument("--input", type=Path)
+    parser.add_argument("--update-master", action="store_true", help="预测前按运行日补齐并截断当前总表")
     parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--forecast-days", type=int, choices=[1], default=1, help="固定输出 D+1")
-    parser.add_argument("--training-months", type=int, default=0, help='0自动选择：当日供需12个月，历史回退3个月')
-    parser.add_argument('--as-of', help='预测基准日D，默认上海时区当天；预测D+1')
+    parser.add_argument("--forecast-days", type=int, choices=range(1, MAX_FORECAST_DAYS + 1), default=1,
+                        help="预测天数：1 输出 D+1，15 输出 D+1 至 D+15")
+    parser.add_argument("--training-months", type=int, default=0, help='0自动选择：当日供需12个月，历史回退3个月；手动指定最少1个月，最多24个月')
+    parser.add_argument('--as-of', help='预测基准日D，默认上海时区当天；从 D+1 起按预测天数递推')
     parser.add_argument('--compare-algorithms', action='store_true', help='执行开发期选型、独立留出期及区间实验')
     parser.add_argument('--fetch-future-inputs', action='store_true', help='实验时抓取并核验D+1供需曲线发布时间')
     parser.add_argument('--historical-only', action='store_true', help='只使用历史信息，禁用预测日供需抓取')
     args = parser.parse_args()
     paths = resolve_paths(config_path=args.config)
     as_of = args.as_of or datetime.now(ZoneInfo('Asia/Shanghai')).date().isoformat()
+    if args.update_master and args.compare_algorithms:
+        parser.error('--update-master 不适用于历史算法实验；请先单独准备历史输入表')
+    master_workbook = ensure_master_workbook(
+        paths, args.input, run_date=as_of, config_path=args.config, update=args.update_master,
+    )
     if args.compare_algorithms:
         from gd_price_forecast.experiments import run_comparison
         output=args.output_dir or paths['predictionOutputDir'] / '算法实验'
@@ -291,13 +312,13 @@ def main() -> None:
             if as_of != datetime.now(ZoneInfo('Asia/Shanghai')).date().isoformat():
                 raise ValueError('实时快照只适用于当天基准日；历史回测必须使用历史归档快照')
             snapshot,_=fetch_forecast_snapshot(str((pd.Timestamp(as_of)+pd.Timedelta(days=1)).date()),output/'预测日快照')
-        print(json.dumps(run_comparison(args.input or paths['masterWorkbook'],
+        print(json.dumps(run_comparison(master_workbook,
                                        output,as_of=as_of,future_snapshot=snapshot), ensure_ascii=False, indent=2))
         return
     print(
         json.dumps(
             run_pipeline(
-                args.input or paths["masterWorkbook"],
+                master_workbook,
                 args.output_dir or paths["predictionOutputDir"],
                 forecast_days=args.forecast_days,
                 training_months=args.training_months,

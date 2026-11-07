@@ -1,6 +1,25 @@
 # 更新日志
 
-## [0.1.36] - 2026-11-08
+## [0.1.33] - 2026-11-08
+
+- 对应 macOS v0.1.32 基线的 Windows 首个修补版：补齐 mac 版剩余功能差异（多日预测、诊断耗时摘要），并按 Windows 约束修正安装模式与右栏布局。
+- 安装包（服务模式）业务操作全部修复：widgets.run_process / run_in_thread 一直按关键字传 action 给 prepare_page_worker，而该方法在 0.1.32 移植时丢了该参数，安装版每次点「开始」都会以 TypeError: prepare_page_worker() got an unexpected keyword argument 'action' 直接失败；源码调试版走本地注册表不受影响，所以此前没暴露。现已按 mac 版签名还原 action，并新增签名回归用例。
+- 广东电价预测补齐 mac v0.1.32 的 D+1 至 D+15 递推：脚本新增 --forecast-days（1~15）与 --update-master，输出按日拆成「D+1日前电价…D+N日前电价」多个工作表（原名 write_d1_price_workbook 保留为别名），MAE.json 增加 forecast_days 与 target_dates；页面新增「预测天数」输入与提示、分组框改名「2. 使用总表预测 D+1 至 D+15」、按钮改为「运行日前预测」。保留 Windows 既有的显式两步（先补齐总表再预测），不把网络刷新塞进预测按钮。
+- 页面表单字段改为单一来源：ui_tasks 不再自抄一份字段表，统一读 page_contracts.PageBinding，并补回 market-table 的 overwrite/create_backup、summary-upload 的 output_file、market-report 的东莞运行方式与实时检修容量；此前这几项只在界面可勾，服务模式下静默不生效。
+- 训练窗口口径对齐 mac：滚动训练月数最少 1 个月（原为 2 个月），页面、工作流校验、服务表单文案三处同步。
+- 诊断中心恢复「模块切换」耗时摘要（最近 8 次中位/最慢/首次次数），Windows 侧改为固定两行槽位，文案长短不再顶动任务中心与账号面板；耗时记录改为切页后即时刷新，不必手动重新检查。
+- 广东电价预测页提示文案加换行上限（按窗口缩放换算），长文案不再把页面撑到默认窗口出现横向滚动条：页面请求尺寸 1340x996 → 982x1056，1251x1157 视口内无滚动条。
+- 验证：17 项电价预测用例（含 3 日多表输出、单月窗口、工作流 15 天/1 个月校验）、新增 5 项页面契约用例（签名、字段存在性、覆盖/备份开关透传、forecast_days 透传、登录不误判为业务动作）、平台 UI 21 项、登录/凭据/最小窗口/日报/市场表/摘要相关 48 项、其余 UI 与页面 103 项全部通过；test_toolbox 98 项与改动前同基线（4 失败 2 错误为既有 write_realtime_market_values 签名断言）；start_source_test.ps1 -Smoke 输出 TOOLBOX_SMOKE=OK。
+
+## [0.1.32] - 2026-11-08
+
+- 版本号自本版起与 macOS 版对齐：Windows 0.1.32 对应 macOS v0.1.32，后续每轮对齐直接沿用 mac 版本号；同一 mac 基线确需再次发布 Windows 专属修补时从 0.1.33 起递增，并在本文件标注对应关系。此前用于内部迭代的 0.1.33~0.1.36 号作废（内容已全部并入本版），这几个号不再指代旧迭代记录；本版之下「内部迭代记录」仅作历史保留。
+- 本版合并范围：500kV 浏览器拓扑编辑与去重修复、UI 全量对齐 mac 版、清能账号面板与在线校验、上网电量日期范围导出、市场表与交易系统信息更新的覆盖／备份开关、日报出清情况表六机与附录取表加固、在线更新检测加固与增量索引必产、私有上传便携 Node。
+- 以下「内部迭代记录」按原样保留每轮细节与验证证据，发布时可整体作为本版说明。
+
+### 内部迭代记录（未单独发布）
+
+#### 0.1.36 - 2026-11-08
 
 - 500kV 断面分析对齐 mac 版：新增浏览器拓扑编辑（导入底图与节点电价表、标点点选、核对连接、生成简图、撤销重做、草稿备份），页面新增「浏览器编辑」按钮，应用到分析的拓扑快照自动带入后续分析；关闭时提示未保存草稿。
 - 拓扑编辑配套模块以本仓库扁平 toolbox_* 命名落地，静态编辑器 index.html/app.js/style.css 纳入 Windows 载荷必需资产清单；接线图分析模式本仓库已有等价实现，未整体替换。
@@ -12,14 +31,14 @@
 - 保留 Windows 高 DPI 缩放、Rust 后端、便携 Node 与独立增量更新通道。广东电价预测 D+1~15 递推未移植：本仓库是独立演化的 D+1 单日口径，整块替换会破坏已验证逻辑，本版保留。
 - 验证：27 个 Python 文件语法检查、git diff --check 通过；9 个新模块导入、浏览器编辑服务 4 个路由均返回 200；16 个工具页面创建 0 错误；12 个模块 111 项针对性测试通过；start_source_test.ps1 -Smoke 输出 TOOLBOX_SMOKE=OK。
 
-## [0.1.35] - 2026-11-07
+#### 0.1.35 - 2026-11-07
 
 - 把 0.1.34 的在线更新检测加固真正打进客户端：HEAD 被代理或 CDN 拦截时改用单字节 Range 读取 Content-Range 总大小，更新检查期间按钮显示「检查中…」并禁用，服务模式按平台选择更新通道，不再回落到 macOS 仓库地址。
 - Windows x64 重新构建（NSIS）：载荷按 0f7d50e 重新导出，含便携 Node v22.23.3 与全部更新检测改动，675 个受管文件；安装后 payload/manifest.json 与工作区 state/installed.json 回读为 0.1.35，实机启动窗口「电力工作工具箱」可见、toolbox-service.exe 与载荷内 Python 正常拉起。
 - 打包流程补齐增量索引：`build_updates.py` 不再强依赖 `gh` CLI（未安装时改用 GitHub REST API），历史发布与网络都读不到时改用 `dist/windows/` 里的历史安装包继续，`build.ps1` 结束前校验 `updates-X.Y.Z/windows-update-manifest.json` 确实生成；已发布版本优先占用补丁位，本地未发布包不会把已发布旧版挤出升级路径。此前缺 `gh` 会让增量目录直接空着，Release 也就没有索引，客户端只能每次下 311 MB 完整包。
 - 验证：`test_windows_update_build`＋`test_windows_delta` 22 项通过，新增 5 项覆盖 gh 缺失走 REST API、无历史时用本地安装包出补丁、历史不可用不中断、基线安装包命名校验、已发布版本保位；索引与 `.sha256` 由 `build()` 落盘并回读。
 
-## [0.1.34] - 2026-11-07
+#### 0.1.34 - 2026-11-07
 
 - 在线更新备用检测容错：发布索引缺少摘要、摘要写成可见文本或接口返回非 JSON 时不再直接判定失败，改为回退到发布页并继续尝试完整包；新增 70 项更新相关回归用例。
 - 重新打包 Windows x64 安装包，覆盖 0.1.33 构建：载荷同步包含便携 Node v22.23.3 与更新检测容错，675 个受管文件；安装后 payload/manifest.json 与工作区 state/installed.json 回读为 0.1.34，实机启动窗口与 Rust 任务服务正常。
@@ -28,13 +47,13 @@
 - 服务模式的更新器按平台选择通道，Windows 下不再回落到 macOS 仓库的检测地址。
 - 验证：本次加固新增 6 项用例，覆盖可选索引容错、摘要文本渲染、非 JSON 回落、HEAD 被拦的大小探测与检测中按钮状态；test_windows_update＋test_github_update＋test_update_ui 三个模块合计 51 项通过。test_service 15 项中的 5 项为改动前既有错误（回退 HEAD 版本同样失败）。真实网络实测 api.github.com 路径 0.8 秒命中 v0.1.31；备用路径因本机出口代理拦截 github.com（CONNECT 502）未能真机复测。上述加固改动需重新构建安装包后才随客户端生效。
 
-## [0.1.33] - 2026-11-07
+#### 0.1.33 - 2026-11-07
 
 - 私有数据批量上传不再强依赖系统 Node.js：setup_windows.ps1 在缺少 runtime/node 时按 build_support.NODE_VERSION 下载官方 win-x64 包并校验 SHASUMS256 后解压到 runtime/node，npm 步骤改用便携 npm-cli.js。
 - 运行时探测补齐 Windows 常见 Node 安装位置（Program Files、%LOCALAPPDATA%\Programs、nvm-windows、fnm、Volta、scoop、chocolatey），诊断按 node_file_usable 判断可执行文件并指向 setup 自动准备，不再只依赖 PATH。/runtime/ 加入 Git 忽略，便携运行时与依赖不入库。
 - 验证：源码诊断 25 项全正常（原 Node.js 提醒消失），RuntimeTests 31 项与私有上传相关 62 项测试通过，start_source_test.ps1 -Smoke 输出 TOOLBOX_SMOKE=OK。本版本重新构建 Windows x64 安装包（310.55 MiB，675 个受管文件，内置便携 Node v22.23.3）并静默覆盖本机已安装版：安装退出码 0，`%LOCALAPPDATA%\\电力工具箱\\payload\\manifest.json` 与工作区 `state/installed.json` 均回读为 0.1.33（build 89391263011f114c），实机启动后窗口「电力工作工具箱」可见、toolbox-service.exe 与 payload Python 正常拉起。
 
-## [0.1.32] - 2026-11-07
+#### 0.1.32 基线（对齐 mac v0.1.32 起始版本） - 2026-11-07
 
 - UI 全量对齐 mac 版仓库 main：紧凑文件按钮（FileSelectButton）、分段控件（SegmentedGroup）、统一 add_date_row 日期行、各页面 tool_id 注册；页面基类移植 prepare_for_display 日志区 3~10 行自适应与描述按视口换行；主题改为平面按钮与 clam 分组框描边。
 - 右栏清能账号面板升级为 mac 版完整实现（自动验证／状态色／重试／手动登录），新增 toolbox_qingneng_login.py；保留 Windows 固定单行状态槽位与独立登录态契约。

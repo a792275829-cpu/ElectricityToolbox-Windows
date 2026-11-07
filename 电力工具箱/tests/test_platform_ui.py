@@ -421,5 +421,78 @@ class ModuleCacheTests(unittest.TestCase):
             self.assertEqual(2, third.VALUE)
 
 
+class NavigationTimingTests(unittest.TestCase):
+    """右栏诊断区要能回答「切模块到底慢在哪」，且不能把右栏顶得上下跳。"""
+
+    def setUp(self) -> None:
+        try:
+            self.root = tk.Tk()
+            self.root.withdraw()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk unavailable: {exc}")
+
+    def tearDown(self) -> None:
+        if getattr(self, "root", None) is not None:
+            try:
+                self.root.destroy()
+            except tk.TclError:
+                pass
+            gc.collect()
+
+    def build_app(self):
+        from toolbox.app import PAGE_NAMES, ToolboxApp
+
+        self.root.destroy()
+        self.root = None
+
+        def factory(_name):
+            return lambda parent, _paths, _registry: tk.Frame(parent)
+
+        app = ToolboxApp(
+            workspace=Path.cwd(),
+            page_factories={name: factory(name) for name in PAGE_NAMES},
+            lazy_pages=True,
+        )
+        app.withdraw()
+        self.root = app
+        return app
+
+    def test_navigation_summary_counts_cold_and_warm_opens(self) -> None:
+        app = self.build_app()
+        # 走 request_page 才是真实导航路径（左侧模块点击）；直接 show_page 不算一次切换。
+        app.request_page("出清结果汇总上传")
+        app.after(120, app.quit)
+        app.mainloop()
+        app.request_page("今日概览")
+        app.after(120, app.quit)
+        app.mainloop()
+        self.assertGreaterEqual(len(app.navigation_timings), 2)
+        self.assertTrue(all(float(item["ms"]) >= 0 for item in app.navigation_timings))
+        summary = app.navigation_summary()
+        self.assertIn("模块切换：最近", summary)
+        self.assertIn("中位", summary)
+        self.assertIn("最慢", summary)
+        self.assertIn("首次", summary)
+
+    def test_empty_summary_is_stable_text(self) -> None:
+        app = self.build_app()
+        self.assertEqual("模块切换：暂无记录", app.navigation_summary())
+
+    def test_diagnostic_panel_height_does_not_move_when_timing_changes(self) -> None:
+        app = self.build_app()
+        app.update_idletasks()
+        holder = app.diagnostic_center.nav_holder
+        initial = int(holder.cget("height"))
+        app.navigation_timings.extend(
+            {"module": "南方分公司电力市场日报", "cold": True, "ms": 1234.5, "window": "1920x1203"}
+            for _ in range(8)
+        )
+        app.diagnostic_center.refresh_navigation()
+        for _ in range(4):
+            app.update()
+        self.assertEqual(initial, int(holder.cget("height")))
+        self.assertEqual(initial, holder.winfo_height())
+
+
 if __name__ == "__main__":
     unittest.main()

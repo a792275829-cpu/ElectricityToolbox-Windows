@@ -177,10 +177,14 @@ def plan(paths, tool_id, action, p):
         if action == "predict":
             required_path(p, "master_workbook")
             months = number(p["training_months"], "训练月数")
-            if not months.is_integer() or (months != 0 and months < 2):
-                raise ValueError("训练窗口填 0 自动选择，或填写至少 2 个月")
+            if not months.is_integer() or (months != 0 and months < 1):
+                raise ValueError("训练窗口填 0 自动选择，或填写至少 1 个月")
+            days = number(p.get("forecast_days", 1), "预测天数")
+            if not days.is_integer() or not 1 <= days <= 15:
+                raise ValueError("预测天数必须在 1 至 15 之间")
             output = required_path(p, "prediction_output_dir", exists=False) if p["prediction_output_dir"] else paths.guangdong_prediction_output_dir
-            return [(commands.prediction(paths, master, output, 1, int(months), p["run_date"]), paths.guangdong_price_dir)]
+            return [(commands.prediction(paths, master, output, int(days), int(months), p["run_date"]),
+                     paths.guangdong_price_dir)]
     elif tool_id == "summary-upload":
         source = required_path(p, "input_dir", directory=True)
         output = required_path(p, "output_file", exists=False) if p["output_file"] else source / f"{source.name}_汇总.xlsx"

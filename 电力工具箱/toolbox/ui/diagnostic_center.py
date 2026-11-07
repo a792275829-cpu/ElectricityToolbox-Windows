@@ -23,9 +23,10 @@ _STATUS_ICON = {
 class DiagnosticCenterPanel(ttk.Frame):
     """常驻右侧的只读运行诊断摘要，不介入任何业务脚本。"""
 
-    def __init__(self, parent: tk.Misc, paths: ToolPaths) -> None:
+    def __init__(self, parent: tk.Misc, paths: ToolPaths, *, navigation_summary=None) -> None:
         super().__init__(parent, padding=(12, 10))
         self.paths = paths
+        self.navigation_summary = navigation_summary
         self.report: DiagnosticReport | None = None
         self._visible_checks: list[DiagnosticCheck] = []
 
@@ -40,6 +41,20 @@ class DiagnosticCenterPanel(ttk.Frame):
             anchor="w", pady=(8, 2)
         )
         ttk.Label(self, textvariable=self.summary_var, style="Muted.TLabel").pack(anchor="w")
+
+        self.nav_var = tk.StringVar(self, "")
+        if navigation_summary is not None:
+            # 耗时文案长度随数值变化，直接换行会让右栏上下跳：
+            # 固定两行槽位，槽位内换行，右栏任何时刻都是同一高度。
+            scale = float(getattr(self.winfo_toplevel(), "window_scale", 1.0) or 1.0)
+            self.nav_holder = ttk.Frame(self)
+            self.nav_holder.pack(fill="x", pady=(4, 0))
+            self.nav_label = ttk.Label(self.nav_holder, textvariable=self.nav_var,
+                                       style="Muted.TLabel", wraplength=int(250 * scale),
+                                       justify="left")
+            self.nav_label.pack(fill="both", expand=True)
+            self.nav_holder.configure(height=self._two_line_height())
+            self.nav_holder.pack_propagate(False)
 
         self.checks_frame = ttk.Frame(self)
         self.checks_frame.columnconfigure(0, weight=1)
@@ -83,6 +98,22 @@ class DiagnosticCenterPanel(ttk.Frame):
     def refresh(self) -> None:
         self._render(diagnose_environment(self.paths))
 
+    def _two_line_height(self) -> int:
+        """Pixel height of two Muted.TLabel lines, unaffected by current text."""
+        from tkinter import font as tkfont
+
+        spec = ttk.Style(self).lookup("Muted.TLabel", "font") or "TkDefaultFont"
+        try:
+            linespace = tkfont.Font(root=self, font=spec).metrics("linespace")
+        except tk.TclError:
+            linespace = 16
+        return max(2 * linespace + 2, 30)
+
+    def refresh_navigation(self) -> None:
+        """Update only the module-switch line; no environment scan, no repaint cost."""
+        if self.navigation_summary is not None:
+            self.nav_var.set(self.navigation_summary())
+
     def _render(self, report: DiagnosticReport) -> None:
         self.report = report
         warnings = len(report.warnings)
@@ -94,6 +125,9 @@ class DiagnosticCenterPanel(ttk.Frame):
         else:
             self.health_var.set("✓ 未发现问题")
         self.summary_var.set(f"{warnings} 提醒 · {errors} 异常  ·  {report.generated_at:%H:%M}" if warnings or errors else f"检查于 {report.generated_at:%H:%M}")
+
+        if self.navigation_summary is not None:
+            self.nav_var.set(self.navigation_summary())
 
         issues = [*report.errors, *report.warnings]
         self._visible_checks = issues
