@@ -1,5 +1,11 @@
 # 更新日志
 
+## [0.1.33] - 2026-11-07
+
+- 私有数据批量上传不再强依赖系统 Node.js：setup_windows.ps1 在缺少 runtime/node 时按 build_support.NODE_VERSION 下载官方 win-x64 包并校验 SHASUMS256 后解压到 runtime/node，npm 步骤改用便携 npm-cli.js。
+- 运行时探测补齐 Windows 常见 Node 安装位置（Program Files、%LOCALAPPDATA%\Programs、nvm-windows、fnm、Volta、scoop、chocolatey），诊断按 node_file_usable 判断可执行文件并指向 setup 自动准备，不再只依赖 PATH。/runtime/ 加入 Git 忽略，便携运行时与依赖不入库。
+- 验证：源码诊断 25 项全正常（原 Node.js 提醒消失），RuntimeTests 31 项与私有上传相关 62 项测试通过，start_source_test.ps1 -Smoke 输出 TOOLBOX_SMOKE=OK。本版本重新构建 Windows x64 安装包（310.55 MiB，675 个受管文件，内置便携 Node v22.23.3）并静默覆盖本机已安装版：安装退出码 0，`%LOCALAPPDATA%\\电力工具箱\\payload\\manifest.json` 与工作区 `state/installed.json` 均回读为 0.1.33（build 89391263011f114c），实机启动后窗口「电力工作工具箱」可见、toolbox-service.exe 与 payload Python 正常拉起。
+
 ## [0.1.32] - 2026-11-07
 
 - UI 全量对齐 mac 版仓库 main：紧凑文件按钮（FileSelectButton）、分段控件（SegmentedGroup）、统一 add_date_row 日期行、各页面 tool_id 注册；页面基类移植 prepare_for_display 日志区 3~10 行自适应与描述按视口换行；主题改为平面按钮与 clam 分组框描边。
