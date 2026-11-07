@@ -213,10 +213,30 @@ class GitHubUpdater:
     def check_public_release(self) -> Release | None:
         base = f"https://github.com/{self.repository}/releases"
 
-        def request(url, method="GET"):
-            return self.open(urllib.request.Request(url, method=method, headers={
-                "User-Agent": f"ElectricityToolbox/{self.current}", "Cache-Control": "no-cache",
-            }), timeout=CHECK_TIMEOUT)
+        def request(url, method="GET", extra=None):
+            headers = {"User-Agent": f"ElectricityToolbox/{self.current}", "Cache-Control": "no-cache"}
+            headers.update(extra or {})
+            return self.open(urllib.request.Request(url, method=method, headers=headers),
+                             timeout=CHECK_TIMEOUT)
+
+        def probe_size(url):
+            try:
+                with request(url, "HEAD") as response:
+                    size = response.headers.get("Content-Length", "")
+                    if response.status == 200 and size.isascii() and size.isdecimal() and int(size) > 0:
+                        return int(size)
+            except (OSError, http.client.HTTPException):
+                pass
+            # Some corporate proxies and CDN edges refuse HEAD; a single ranged
+            # byte still reports the exact total, which the download must verify.
+            with request(url, extra={"Range": "bytes=0-0"}) as response:
+                if response.status not in {200, 206}:
+                    raise UpdateError("GitHub 发布附件大小无效")
+                size = response.headers.get("Content-Range", "").rpartition("/")[2] or \
+                    response.headers.get("Content-Length", "")
+                if not size.isascii() or not size.isdecimal() or int(size) <= 0:
+                    raise UpdateError("GitHub 发布附件大小无效")
+                return int(size)
 
         def read_html(response):
             raw = response.read(2 * 1024 * 1024 + 1)
@@ -255,13 +275,12 @@ class GitHubUpdater:
                     raise UpdateError("GitHub 发布附件链接或摘要无效")
                 continue
             asset["browser_download_url"] = url
-            with request(url, "HEAD") as response:
-                size = response.headers.get("Content-Length", "")
-                if response.status != 200 or not size.isascii() or not size.isdecimal() or int(size) <= 0:
-                    if required:
-                        raise UpdateError("GitHub 发布附件大小无效")
-                    continue
-                asset["size"] = int(size)
+            try:
+                asset["size"] = probe_size(url)
+            except Exception:
+                if required:
+                    raise
+                continue
             selected.append(asset)
         # A changed/empty HTML layout must not silently look like a successful check.
         if not any(a["name"] == primary for a in selected):

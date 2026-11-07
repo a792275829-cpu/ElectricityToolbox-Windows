@@ -194,6 +194,16 @@ class UpdateUiTests(unittest.TestCase):
         self.assertFalse(self.service.maintenance)
         self.assertFalse(window.winfo_exists())
 
+    def test_retry_button_shows_progress_while_rechecking(self):
+        self.controller.checked(None, ValueError('offline'))
+        self.assertEqual(self.app.update_retry_button.cget('text'), '检查更新')
+        with patch.object(self.controller, 'worker'):
+            self.app.update_retry_button.invoke()
+        self.assertEqual(self.app.update_retry_button.cget('text'), '检查中…')
+        self.assertIn('disabled', self.app.update_retry_button.state())
+        self.controller.checked(None, None)
+        self.assertEqual(self.app.update_retry_button.winfo_manager(), '')
+
     def test_update_controls_stay_interactive_while_business_inputs_are_locked(self):
         self.controller.release = self.release
         self.controller.show()

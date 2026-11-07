@@ -232,6 +232,26 @@ class GitHubUpdateTests(unittest.TestCase):
         with self.assertRaisesRegex(UpdateError, "版本信息无效.*备用检测失败.*public site unreachable"):
             GitHubUpdater("0.1.3", opener=offline).check()
 
+    def test_public_fallback_sizes_asset_when_head_is_blocked(self):
+        data = release()
+        asset = data["assets"][0]
+        base = f"https://github.com/{REPO}/releases"
+        def opener(request, timeout):
+            if request.full_url.startswith("https://api.github.com/"):
+                raise urllib.error.HTTPError(request.full_url, 403, "rate limit", {}, None)
+            if request.full_url == base + "/latest":
+                return Response(b'<div class="markdown-body">notes</div>', data["html_url"])
+            if "/expanded_assets/" in request.full_url:
+                html = (f'<li><a href="/{REPO}/releases/download/v1.2.0/{asset["name"]}">dmg</a>'
+                        f'<clipboard-copy value="{asset["digest"]}"></clipboard-copy></li>')
+                return Response(html.encode())
+            if request.get_method() == "HEAD":
+                raise urllib.error.HTTPError(request.full_url, 405, "head not allowed", {}, None)
+            self.assertEqual(request.get_header("Range"), "bytes=0-0")
+            return Response(b"x", headers={"Content-Range": "bytes 0-0/456"})
+        result = GitHubUpdater("0.1.3", opener=opener).check()
+        self.assertEqual(result.asset["size"], 456)
+
     def test_publication_requires_matching_dmg_and_checksum(self):
         sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "packaging/tauri"))
         from validate_installer import validate

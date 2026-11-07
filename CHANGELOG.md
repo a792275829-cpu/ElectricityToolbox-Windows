@@ -1,5 +1,14 @@
 # 更新日志
 
+## [0.1.34] - 2026-11-07
+
+- 在线更新备用检测容错：发布索引缺少摘要、摘要写成可见文本或接口返回非 JSON 时不再直接判定失败，改为回退到发布页并继续尝试完整包；新增 70 项更新相关回归用例。
+- 重新打包 Windows x64 安装包，覆盖 0.1.33 构建：载荷同步包含便携 Node v22.23.3 与更新检测容错，675 个受管文件；安装后 payload/manifest.json 与工作区 state/installed.json 回读为 0.1.34，实机启动窗口与 Rust 任务服务正常。
+- 在线更新的附件大小探测加固：发布页 HEAD 请求被代理或 CDN 拒绝时改用单字节 Range 请求读取 Content-Range 总大小，不再因此判定检测失败。
+- 版本号旁「检查更新」在重试期间显示「检查中…」并暂时禁用，API 不通还要访问发布页（最坏数十秒）时不再是点了没反应；检测成功隐藏、失败恢复可点。
+- 服务模式的更新器按平台选择通道，Windows 下不再回落到 macOS 仓库的检测地址。
+- 验证：本次加固新增 6 项用例，覆盖可选索引容错、摘要文本渲染、非 JSON 回落、HEAD 被拦的大小探测与检测中按钮状态；test_windows_update＋test_github_update＋test_update_ui 三个模块合计 51 项通过。test_service 15 项中的 5 项为改动前既有错误（回退 HEAD 版本同样失败）。真实网络实测 api.github.com 路径 0.8 秒命中 v0.1.31；备用路径因本机出口代理拦截 github.com（CONNECT 502）未能真机复测。上述加固改动需重新构建安装包后才随客户端生效。
+
 ## [0.1.33] - 2026-11-07
 
 - 私有数据批量上传不再强依赖系统 Node.js：setup_windows.ps1 在缺少 runtime/node 时按 build_support.NODE_VERSION 下载官方 win-x64 包并校验 SHASUMS256 后解压到 runtime/node，npm 步骤改用便携 npm-cli.js。

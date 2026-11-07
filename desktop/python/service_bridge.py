@@ -16,11 +16,19 @@ from toolbox_redaction import redact
 from github_update import GitHubUpdater
 
 
+def default_updater(version):
+    """The service must poll the same release channel as the running platform."""
+    if sys.platform == "win32":
+        from windows_update import WindowsUpdater
+        return WindowsUpdater(version)
+    return GitHubUpdater(version)
+
+
 class DesktopService(ToolboxService):
     def __init__(self, workspace, emit):
         super().__init__(workspace)
         self.emit = emit
-        self.updater = GitHubUpdater(os.environ.get("TOOLBOX_APP_VERSION", "0.0.0"))
+        self.updater = default_updater(os.environ.get("TOOLBOX_APP_VERSION", "0.0.0"))
         self.release = None
         self.update_task = None
         self.update_checking = False

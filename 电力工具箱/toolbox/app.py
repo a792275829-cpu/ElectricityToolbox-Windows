@@ -232,9 +232,22 @@ class ToolboxApp(tk.Tk):
         if retry is not None:
             self.update_retry_button.configure(command=retry)
         if failed:
+            self.update_retry_button.configure(text="检查更新")
+            self.update_retry_button.state(["!disabled"])
             self.update_retry_button.grid(row=0, column=2, sticky="e", padx=(14, 0))
         else:
             self.update_retry_button.grid_remove()
+
+    def set_update_checking(self, checking: bool) -> None:
+        """Show progress on the footer retry button while a check is running."""
+        if not self.update_retry_button.winfo_manager():
+            return
+        if checking:
+            self.update_retry_button.configure(text="检查中…")
+            self.update_retry_button.state(["disabled"])
+        elif self.update_retry_button.winfo_manager():
+            self.update_retry_button.configure(text="检查更新")
+            self.update_retry_button.state(["!disabled"])
 
     def _resize_navigation(self, _event=None) -> None:
         width = self.nav_canvas.winfo_width()

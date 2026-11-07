@@ -78,10 +78,22 @@ class UpdateController:
         if not _retry:
             self._retry_count = 0
         self.checking = True
+        self._checking_state(True)
         self.worker(self.updater.check, self.checked)
+
+    def _checking_state(self, checking):
+        # The footer button also carries progress; a slow API + release-page
+        # fallback can take tens of seconds, so never leave it looking dead.
+        notify = getattr(self.app, "set_update_checking", None)
+        if callable(notify):
+            try:
+                notify(checking)
+            except Exception:
+                pass
 
     def checked(self, release, error):
         self.checking = False
+        self._checking_state(False)
         manual, self.manual = self.manual, False
         if error:
             self.app.set_update_check_failed(True)
