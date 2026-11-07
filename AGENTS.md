@@ -67,6 +67,7 @@
 
 ## 版本与更新日志
 
+- Windows 版本号跟随 macOS 版：对齐 mac 的 `x.y.z` 就直接发布同一个 `x.y.z`（如 Windows 0.1.32 ↔ macOS v0.1.32）。同一 mac 基线确需再次发布 Windows 专属修补时递增版本号，并在 `CHANGELOG.md` 标注对应关系。0.1.33~0.1.36 是历史内部迭代号，内容已并入 0.1.32，不再复用。
 - 自动维护根目录 `CHANGELOG.md`。每次更新版本时，同步记录该版本日期、用户可见的新增／修复／变更及实际验证结果，不得只改版本号或使用空泛占位内容。
 - 使用 `.venv/bin/python packaging/tauri/version.py set X.Y.Z --notes "具体变更"` 同步版本和日志；多项变更重复传入 `--notes`。日期默认采用 Asia/Shanghai，历史记录必须保留。
 - `CHANGELOG.md` 是逐版本更新内容的唯一来源；`packaging/tauri/release_notes.md` 只维护通用安装说明。发布时由版本脚本提取当前版本内容并拼接安装说明，用于 GitHub Release 与应用内更新说明。
