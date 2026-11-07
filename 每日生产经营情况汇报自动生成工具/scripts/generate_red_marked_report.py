@@ -28,7 +28,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 APP_ROOT = SCRIPT_DIR.parent if SCRIPT_DIR.name in {"scripts", "\u811a\u672c"} else SCRIPT_DIR
 if str(APP_ROOT.parent) not in sys.path:
     sys.path.insert(0, str(APP_ROOT.parent))
-from toolbox_excel_read import read_cell_snapshots
+from toolbox_clearing_layout import qingyuan_plan_values
 from toolbox_dates import normalize_date_input
 from toolbox_storage import data_path
 
@@ -639,14 +639,13 @@ def _read_clearing_values(path):
         basic = None
         unit_rows: list[tuple] = []
         if "基础信息" in workbook.sheetnames:
-            snapshots = read_cell_snapshots(workbook, [("基础信息", cell) for cell in ("AA64", "AC64")])
-            basic = {cell: snapshots[("基础信息", cell)][0] for cell in ("AA64", "AC64")}
-            unit_rows = [
-                row
-                for row in workbook["基础信息"].iter_rows(
-                    min_col=1, max_col=7, max_row=80, values_only=True
-                )
-            ]
+            basic_rows = list(
+                workbook["基础信息"].iter_rows(min_col=1, max_col=30, values_only=True)
+            )
+            # 按「清远上网电量」表头 + 「合计」标签动态定位 AA/AC 行，
+            # 兼容旧模板 64 行与插入机组行后的新模板 66 行；坐标写入审计字段。
+            basic = qingyuan_plan_values(basic_rows)
+            unit_rows = [row[:7] for row in basic_rows[:80]]
         result = (sheet_name, values, labels, basic, unit_rows)
     finally:
         workbook.close()
@@ -2196,7 +2195,7 @@ def generate(
         "weatherError": weather_error,
         "knownGaps": [
             "上网电量取 D-1 出清情况工作簿「快报」表：火电三厂与清远取 J 列，新能源取 K 列，总数为 J7＋新能源合计；D-1 尚未出数（全为 0）时整段保留模板原文并保持红字。",
-            "P14 日前出清电量和日前价格来自报告日出清情况 Excel；火电取快报（日前）F/G，新能源按表头取 G/H，清远计划电量取基础信息!AA64+AC64 后除以10，并计入分公司总电量。",
+            "P14 日前出清电量和日前价格来自报告日出清情况 Excel；火电取快报（日前）F/G，新能源按表头取 G/H，清远计划电量按「清远上网电量」表头与「合计」标签动态定位基础信息 AA/AC 行后除以10，并计入分公司总电量。",
             "P29 未来三天最高负荷来源尚未确认，暂不替换。",
             "日清分表取 D-2 日出清情况工作簿「快报」表；分公司现货偏差收益按各厂合计（汕头/东莞取现货偏差合计边际贡献，海门取三项偏差边际贡献之和）。",
             "现货偏差分析取 D-2 日出清情况工作簿「分公司」表，节点电价按各厂「实时最低价/实时最高价」跨厂取极值。",

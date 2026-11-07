@@ -103,10 +103,13 @@ def plan(paths, tool_id, action, p):
         selected_files(p)
         required_path(p, "output_dir", exists=False)
     elif tool_id == "market-table":
-        return [(commands.market_table(paths, day("run_date"), required_path(p, "workbook")), paths.market_table_update_dir)]
+        return [(commands.market_table(paths, day("run_date"), required_path(p, "workbook"),
+                overwrite=p.get("overwrite", True), create_backup=p.get("create_backup", False)),
+                paths.market_table_update_dir)]
     elif tool_id == "transaction-info":
         return [(commands.transaction_info(paths, required_path(p, "workbook"), day("end_date"),
-                start_date=optional_start, create_backup=p["create_backup"]), paths.transaction_info_update_dir)]
+                start_date=optional_start, create_backup=p["create_backup"],
+                overwrite=p.get("overwrite", True)), paths.transaction_info_update_dir)]
     elif tool_id == "power-benefit":
         workbooks = [required_path(p, key + "_workbook") for key in ("guihu", "tuolian", "haifeng") if p[key + "_selected"]]
         if not workbooks:

@@ -17,7 +17,7 @@ from typing import Any, Iterable
 from xml.etree import ElementTree
 
 import openpyxl
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.utils.datetime import from_excel, to_excel
 from playwright.sync_api import sync_playwright
 
@@ -443,7 +443,16 @@ def _replace_numeric_cell(row_xml: str, cell_ref: str, value: int | float) -> st
     pattern = _cell_pattern(cell_ref)
     match = pattern.search(row_xml)
     if match is None:
-        raise RuntimeError(f"模板行缺少单元格 {cell_ref}。")
+        # Excel 会省略无样式的空白输入单元格；按列序只插入本次需要的数值格，
+        # 保留该行其它单元格与行属性，不再因为缺格直接报错。
+        column = column_index_from_string(re.match(r"[A-Z]+", cell_ref)[0])
+        insertion = row_xml.rfind("</row>")
+        for existing in re.finditer(r'<c\b[^>]*\br="([A-Z]+)\d+"', row_xml):
+            if column_index_from_string(existing[1]) > column:
+                insertion = existing.start()
+                break
+        replacement = f'<c r="{cell_ref}"><v>{format(float(value), ".15g")}</v></c>'
+        return row_xml[:insertion] + replacement + row_xml[insertion:]
     style_match = re.search(r'\bs="([^"]+)"', match.group(0))
     style = f' s="{style_match.group(1)}"' if style_match else ""
     replacement = f'<c r="{cell_ref}"{style}><v>{format(float(value), ".15g")}</v></c>'
@@ -638,11 +647,15 @@ def verify_workbook(path: Path, prepared: PreparedWorkbook) -> None:
         workbook.close()
 
 
-def prepare_workbook(path: Path, pairs: Iterable[DailyLoadPair]) -> PreparedWorkbook:
+def prepare_workbook(path: Path, pairs: Iterable[DailyLoadPair], *, overwrite: bool = True) -> PreparedWorkbook:
     original = Path(path).expanduser().resolve()
     pair_tuple = tuple(pairs)
     if not pair_tuple:
         raise ValueError("没有可写入的日期数据。")
+    if not overwrite:
+        # Windows 侧为纯表尾接续模型，只追加新日期组、不改动已有行；
+        # --skip-existing 语义天然满足，此处显式记录，避免误以为会覆盖历史数据。
+        log("已跳过覆盖：仅从表尾接续，不改动已有非空单元格。")
     source_fingerprint = workbook_fingerprint(original)
     tail = inspect_workbook_tail(original)
     expected_start = tail.day_ahead_date + timedelta(days=1)
@@ -700,6 +713,7 @@ def update_workbook(
     *,
     config: Config | None = None,
     create_backup: bool = True,
+    overwrite: bool = True,
 ) -> PreparedWorkbook:
     start = resolve_start_date(workbook_path, start_date)
     if end_date < start:
@@ -708,7 +722,7 @@ def update_workbook(
             f"{start.isoformat()}，无需更新。"
         )
     pairs = collect_pairs(start, end_date, config=config)
-    prepared = prepare_workbook(workbook_path, pairs)
+    prepared = prepare_workbook(workbook_path, pairs, overwrite=overwrite)
     backup = commit_prepared_workbook(prepared, create_backup=create_backup)
     log(
         f"已更新 {prepared.original}：日前 {start.isoformat()} 至 "
@@ -759,6 +773,7 @@ def main() -> int:
         help="日前结束日期 YYYY-MM-DD，默认昨日",
     )
     parser.add_argument("--no-backup", action="store_true", help="不保留时间戳备份")
+    parser.add_argument("--skip-existing", action="store_true", help="已有非空单元格时跳过，不覆盖")
     parser.add_argument("--headed", action="store_true", help="显示抓取浏览器")
     parser.add_argument("--dry-run", action="store_true", help="只抓取并校验，不写入 Excel")
     parser.add_argument("--login", action="store_true", help="登录并保存本模块独立会话")
@@ -791,6 +806,7 @@ def main() -> int:
             end_date,
             config=config,
             create_backup=not args.no_backup,
+            overwrite=not args.skip_existing,
         )
         return 0
     except KeyboardInterrupt:

@@ -34,7 +34,29 @@ def _is_day_narrative(value: Any) -> bool:
     return any(marker in text for marker in DAY_NARRATIVE_MARKERS)
 
 
+def _looks_like_benefit_template(sheet: Any) -> bool:
+    """按 A6/A2 日期 + 分公司汇总行 + 日前出清电量/电价表头识别收益模板。
+
+    源表偶尔会把 A4 日前简析段落清空，但下方收益表格仍完整，因此识别不能
+    依赖简析段落（与 mac v0.1.32 的识别口径一致）。
+    """
+    summary_row = _find_company_summary_row(sheet)
+    return bool(
+        (_as_date(sheet["A6"].value) or _as_date(sheet["A2"].value))
+        and summary_row is not None
+        and all(
+            _find_header_column_by_hierarchy(
+                sheet, "日前出清", (metric,), before_row=summary_row
+            ) is not None
+            for metric in ("电量", "电价")
+        )
+    )
+
+
 def _looks_like_report_sheet(sheet: Any) -> bool:
+    if _looks_like_benefit_template(sheet):
+        return True
+    # 旧版快报没有收益汇总区，仍按日前简析 + 实时简析段落识别。
     if not _is_day_narrative(sheet["A4"].value) or int(sheet.max_column or 0) < 17:
         return False
     return _has_realtime_section(sheet)
@@ -67,6 +89,10 @@ def _missing_narrative_sheets(workbook: Any) -> list[str]:
         if int(sheet.max_column or 0) < 17:
             continue
         if _is_day_narrative(sheet["A4"].value):
+            continue
+        # 收益模板即使缺 A4 简析也能被 _looks_like_report_sheet 识别，
+        # 不应再被误报为「缺少简析段落」。
+        if _looks_like_benefit_template(sheet):
             continue
         if _has_realtime_section(sheet):
             names.append(name)

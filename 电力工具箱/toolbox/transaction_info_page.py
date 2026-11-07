@@ -43,6 +43,7 @@ class TransactionInfoUpdatePage(ToolPage):
         self.end_date = tk.StringVar(
             master=self, value=(today or date.today()).isoformat()
         )
+        self.overwrite = tk.BooleanVar(master=self, value=True)
         self.create_backup = tk.BooleanVar(master=self, value=False)
 
         form = ttk.LabelFrame(self.content, text="更新设置", padding=12)
@@ -69,6 +70,9 @@ class TransactionInfoUpdatePage(ToolPage):
         SettingCheckbutton(
             form, text="写入前生成时间戳备份", variable=self.create_backup
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(7, 0))
+        SettingCheckbutton(
+            form, text="覆盖非空单元格", variable=self.overwrite
+        ).grid(row=4, column=0, columnspan=3, sticky="w")
 
         mapping = ttk.LabelFrame(self.content, text="更新口径", padding=12)
         mapping.grid(row=1, column=0, sticky="ew", pady=(10, 0))
@@ -120,7 +124,7 @@ class TransactionInfoUpdatePage(ToolPage):
         start_date: date | None,
         create_backup: bool,
     ) -> list[str]:
-        return commands.transaction_info(self.paths, workbook, end_date, start_date=start_date, create_backup=create_backup)
+        return commands.transaction_info(self.paths, workbook, end_date, start_date=start_date, create_backup=create_backup, overwrite=self.overwrite.get())
 
     def start_update(self) -> None:
         workbook = Path(self.workbook.get().strip()).expanduser()

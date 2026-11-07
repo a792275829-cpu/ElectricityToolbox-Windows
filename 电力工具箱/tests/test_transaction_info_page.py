@@ -41,6 +41,25 @@ class TransactionInfoUpdatePageTests(unittest.TestCase):
         self.assertIn("--no-backup", command)
         page.destroy()
 
+    def test_skip_existing_option_is_forwarded(self) -> None:
+        workspace = Path(__file__).resolve().parents[2]
+        paths = ToolPaths(workspace)
+        page = TransactionInfoUpdatePage(
+            self.root, paths, TaskRegistry(), today=date(2026, 9, 18)
+        )
+        command = page.build_update_command(
+            Path("/tmp/交易系统信息.xlsx"), date(2026, 9, 17),
+            start_date=None, create_backup=True,
+        )
+        self.assertNotIn("--skip-existing", command)
+        page.overwrite.set(False)
+        command = page.build_update_command(
+            Path("/tmp/交易系统信息.xlsx"), date(2026, 9, 17),
+            start_date=None, create_backup=True,
+        )
+        self.assertIn("--skip-existing", command)
+        page.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

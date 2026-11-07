@@ -197,6 +197,15 @@ def inspect_workbook(path: Path, *, end_date: date, start_date: date | None = No
         raise ValueError("海风覆盖更新必须指定开始日期，避免覆盖未选定的历史数据。")
     layout = column_layout(station)
     headers = HAIFENG_HEADERS if station == "海风" else HEADERS
+    # 指定日期范围时只处理涉及的月份页，其余「N月」页整页跳过（含表头校验），
+    # 避免无关月份模板缺表头/缺日期块时阻断本次更新。
+    requested_months = (
+        {month % 12 + 1 for month in range(
+            start_date.year * 12 + start_date.month - 1,
+            end_date.year * 12 + end_date.month,
+        )}
+        if start_date is not None else None
+    )
     target_columns = tuple(openpyxl.utils.column_index_from_string(col) for col in layout)
     before = fingerprint(path)
     mode = os.environ.get("TOOLBOX_BENEFIT_INSPECT_BACKEND", "auto")
@@ -224,6 +233,8 @@ def inspect_workbook(path: Path, *, end_date: date, start_date: date | None = No
         for sheet in workbook:
             month_match = re.fullmatch(r"(\d{1,2})月(?:份)?", sheet.title)
             if not month_match:
+                continue
+            if requested_months is not None and int(month_match[1]) not in requested_months:
                 continue
             header_row = next((r for r in range(1, min(sheet.max_row, 20) + 1)
                                if all(re.sub(r"\s+", "", str(sheet[f"{col}{r}"].value or "")) == label

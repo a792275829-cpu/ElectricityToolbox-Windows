@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+WORKSPACE_ROOT = Path(__file__).resolve().parent
+
 
 def online_energy_output_dir(output_dir: str | Path | None = None) -> Path:
     if output_dir:
