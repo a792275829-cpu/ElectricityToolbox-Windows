@@ -178,24 +178,25 @@ class CredentialsPanelTests(unittest.TestCase):
             root = Path(directory)
             store = accounts.CredentialStore(root)
             store.save("original", "old-secret")
-            panel = CredentialsPanel(self.root, root)
+            panel = CredentialsPanel(self.root, root, auto_verify=False)
             panel.pack()
             self.assertEqual(panel.username_var.get(), "original")
             self.assertEqual(panel.password_var.get(), "old-secret")
-            self.assertEqual(panel.password_entry.cget("show"), "")
-            panel.show_password_var.set(False)
-            panel._toggle_password()
+            # 密码默认掩码显示，勾选「显示密码」后明文。
             self.assertNotEqual(panel.password_entry.cget("show"), "")
+            panel.show_password_var.set(True)
+            panel._toggle_password()
+            self.assertEqual(panel.password_entry.cget("show"), "")
             panel.username_var.set("edited")
             panel.password_var.set("new-secret")
-            self.root.after(750, self.root.quit)
+            self.root.after(CredentialsPanel.AUTOSAVE_DELAY_MS + 300, self.root.quit)
             self.root.mainloop()
             self.assertEqual(store.load()["username"], "edited")
             self.assertEqual(store.load()["password"], "new-secret")
-            self.assertEqual(panel.status_var.get(), "已保存到本机")
+            self.assertEqual(panel.status_var.get(), "已保存到本机 · 未验证")
             self.assertFalse(panel.dirty)
             panel.destroy()
-            reopened = CredentialsPanel(self.root, root)
+            reopened = CredentialsPanel(self.root, root, auto_verify=False)
             self.assertEqual(reopened.password_var.get(), "new-secret")
             reopened.destroy()
 
@@ -207,7 +208,7 @@ class CredentialsPanelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             accounts.CredentialStore(root).save("original", "old-secret")
-            panel = CredentialsPanel(self.root, root)
+            panel = CredentialsPanel(self.root, root, auto_verify=False)
             panel.pack(fill="x")
             self.root.update()
             baseline = panel.winfo_reqheight()
@@ -217,9 +218,9 @@ class CredentialsPanelTests(unittest.TestCase):
             for message in ("等待自动保存…", "账号和密码需填写完整，尚未保存", "已保存到本机",
                             "读取失败，请检查本机账号配置文件"):
                 panel.status_var.set(message)
-                if panel._save_id is not None:  # 只看文案切换，不等自动保存改写
-                    panel.after_cancel(panel._save_id)
-                    panel._save_id = None
+                if panel._autosave_id is not None:  # 只看文案切换，不等自动保存改写
+                    panel.after_cancel(panel._autosave_id)
+                    panel._autosave_id = None
                 self.root.update()
                 self.assertEqual(panel.winfo_reqheight(), baseline, message)
                 self.assertEqual(int(panel.status_holder.cget("height")), slot_height, message)

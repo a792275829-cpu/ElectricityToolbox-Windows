@@ -29,6 +29,7 @@ def _resolve_default_input(results: queue.Queue, today: date, review_root: Path 
 
 
 class SummaryUploadPage(ToolPage):
+    tool_id = 'summary-upload'
     MODE_LABELS = {"summary": "仅汇总", "upload": "仅上传", "both": "汇总并上传"}
 
     def __init__(

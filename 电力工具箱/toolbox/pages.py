@@ -11,6 +11,7 @@ import tempfile
 import threading
 import tkinter as tk
 from toolbox_choices import OptionCheckbutton, SettingCheckbutton
+from toolbox_file_button import FileSelectButton
 
 from collections.abc import Mapping
 from datetime import date, timedelta
@@ -37,7 +38,7 @@ from .power_benefit_page import PowerBenefitUpdatePage
 from .market_report_page import MarketReportPage
 from .summary_upload_page import SummaryUploadPage
 from .private_batch_upload_page import PrivateBatchUploadPage
-from .page_support import DateInput, DATE_INPUT_ERROR, DATE_INPUT_HINT, normalize_date_input, parse_date_input
+from .page_support import DateInput, DateRangeInput, DATE_INPUT_ERROR, DATE_INPUT_HINT, normalize_date_input, parse_date_input
 
 from .page_support import (
     add_path_row as _add_path_row,
@@ -61,6 +62,7 @@ def _file_dialog_state(paths: ToolPaths) -> FileDialogState:
 
 
 class OnlineEnergyPage(ToolPage):
+    tool_id = 'online-energy'
     def __init__(
         self, parent: tk.Misc, paths: ToolPaths, registry: TaskRegistry
     ) -> None:
@@ -68,20 +70,18 @@ class OnlineEnergyPage(ToolPage):
             parent,
             registry=registry,
             title="导出上网电量",
-
         )
         self.paths = paths
-        self.run_date = tk.StringVar(
-            master=self, value=(date.today() - timedelta(days=1)).isoformat()
-        )
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        self.start_date = tk.StringVar(master=self, value=yesterday)
+        self.end_date = tk.StringVar(master=self, value=yesterday)
 
         form = ttk.LabelFrame(self.content, text="导出设置", padding=14)
         form.grid(row=0, column=0, sticky="ew")
         ttk.Label(form, text="导出日期").grid(row=0, column=0, sticky="w")
-        DateInput(form, textvariable=self.run_date, width=18).grid(
-            row=0, column=1, sticky="w", padx=(8, 14)
-        )
-
+        DateRangeInput(
+            form, start_variable=self.start_date, end_variable=self.end_date
+        ).grid(row=0, column=1, sticky="w", padx=(8, 14))
 
         actions = self.actions
         self.export_button = ttk.Button(
@@ -94,25 +94,35 @@ class OnlineEnergyPage(ToolPage):
             command=lambda: _open_directory(self.paths.online_energy_output_dir),
         ).pack(side="left", padx=(8, 0))
         self.register_busy_widgets(self.export_button)
-        self.append_log("请选择日期后开始导出。")
+        self.append_log("请选择日期范围后开始导出。")
 
-    def build_export_command(self, run_date: str) -> list[str]:
-        return commands.dated_script(self.paths.online_energy, run_date)
+    def build_export_command(self, start_date: str, end_date: str) -> list[str]:
+        return commands.dated_range_script(self.paths.online_energy, start_date, end_date)
 
     def start_export(self) -> None:
-        run_date = self.run_date.get().strip()
         try:
-            run_date = normalize_date_input(run_date)
+            start_date = normalize_date_input(self.start_date.get().strip())
+            end_date = normalize_date_input(self.end_date.get().strip())
         except ValueError:
             messagebox.showerror(
                 "日期格式错误", DATE_INPUT_ERROR, parent=self
             )
             return
+        if end_date < start_date:
+            messagebox.showerror(
+                "日期范围错误", "结束日期不能早于开始日期。", parent=self
+            )
+            return
         self.clear_log()
+        status = (
+            f"正在导出 {start_date} 上网电量..."
+            if start_date == end_date
+            else f"正在导出 {start_date} 至 {end_date} 上网电量..."
+        )
         self.run_process(
-            self.build_export_command(run_date),
-            cwd=self.paths.online_energy_dir,
-            status="正在导出上网电量...",
+            self.build_export_command(start_date, end_date),
+            action='run', cwd=self.paths.online_energy_dir,
+            status=status,
             on_success=lambda _code: messagebox.showinfo(
                 "完成", "上网电量导出已完成。", parent=self
             ),
@@ -121,12 +131,13 @@ class OnlineEnergyPage(ToolPage):
     def start_login(self) -> None:
         self.run_process(
             [python_executable(), str(self.paths.online_energy), "--login"],
-            cwd=self.paths.online_energy_dir,
+            action='login', cwd=self.paths.online_energy_dir,
             status="正在打开登录窗口...",
         )
 
 
 class TradeAnalysisPage(ToolPage):
+    tool_id = 'trade-analysis'
     def __init__(
         self, parent: tk.Misc, paths: ToolPaths, registry: TaskRegistry
     ) -> None:
@@ -142,7 +153,7 @@ class TradeAnalysisPage(ToolPage):
         self.output_dir = tk.StringVar(master=self, value=str(Path.home() / "Downloads"))
 
         toolbar = self.actions
-        ttk.Button(toolbar, text="添加文件", command=self.add_files).pack(side="left")
+        FileSelectButton(toolbar, text="添加文件", command=self.add_files).pack(side="left")
         ttk.Button(toolbar, text="自动匹配D和D-2", command=self.auto_match_files).pack(
             side="left", padx=(8, 0)
         )
@@ -285,6 +296,7 @@ class TradeAnalysisPage(ToolPage):
 
 
 class ReportPage(ToolPage):
+    tool_id = 'report'
     def __init__(
         self, parent: tk.Misc, paths: ToolPaths, registry: TaskRegistry
     ) -> None:
@@ -525,6 +537,7 @@ class ReportPage(ToolPage):
 
 
 class GroupUploadPage(ToolPage):
+    tool_id = 'group-upload'
     def __init__(
         self,
         parent: tk.Misc,
@@ -558,7 +571,7 @@ class GroupUploadPage(ToolPage):
         ).pack(anchor="w", pady=(8, 0))
 
         actions = self.actions
-        self.choose_button = ttk.Button(
+        self.choose_button = FileSelectButton(
             actions, text="选择文件", command=self.choose_files
         )
         self.choose_button.pack(side="left")
@@ -686,6 +699,7 @@ class GroupUploadPage(ToolPage):
 
 
 class MarketTableUpdatePage(ToolPage):
+    tool_id = 'market-table'
     MAPPING_DESCRIPTIONS = (
         "现货运行日报 > 市场负荷信息 > 日前：来源日期为基准日期 D；写入 2026年市场情况 工作表对应日期行 B:U。",
         "现货运行日报 > 日前市场 > 发电侧申报均价起 12 项：来源日期为基准日期 D-1；写入 2026年市场情况 工作表对应日期行 V:AG。",
@@ -832,6 +846,7 @@ class MarketTableUpdatePage(ToolPage):
 
 
 class GuangdongPricePage(ToolPage):
+    tool_id = 'guangdong-price'
     def __init__(
         self,
         parent: tk.Misc,

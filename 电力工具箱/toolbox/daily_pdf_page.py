@@ -19,6 +19,7 @@ from .widgets import ToolPage
 
 
 class DailyPdfParserPage(ToolPage):
+    tool_id = 'daily-pdf-parser'
     def __init__(
         self,
         parent: tk.Misc,

@@ -10,8 +10,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .file_dialogs import FileDialogState
-from .page_support import DateRangeInput, DATE_INPUT_ERROR, DATE_INPUT_HINT, parse_date_input
-from .page_support import add_path_row
+from .page_support import DATE_INPUT_ERROR, add_date_row, add_path_row, parse_date_input
 from .runtime import TaskRegistry, ToolPaths, python_executable
 from .widgets import ToolPage
 
@@ -23,6 +22,7 @@ DEFAULT_HAIFENG_WORKBOOK = DEFAULT_WORKBOOK_DIR / "2026年现货价格分析-海
 
 
 class SpotPriceUpdatePage(ToolPage):
+    tool_id = 'spot-price'
     def __init__(
         self,
         parent: tk.Misc,
@@ -60,12 +60,9 @@ class SpotPriceUpdatePage(ToolPage):
         form = ttk.LabelFrame(self.content, text="更新设置", padding=12)
         form.grid(row=0, column=0, sticky="ew")
         form.columnconfigure(1, weight=1)
-        ttk.Label(form, text="日期范围").grid(row=0, column=0, sticky="w", pady=4)
-        DateRangeInput(form, start_variable=self.start_date, end_variable=self.end_date, width=16).grid(
-            row=0, column=1, sticky="w", pady=4
-        )
-        ttk.Label(form, text=DATE_INPUT_HINT, style="Muted.TLabel", wraplength=150).grid(
-            row=0, column=4, sticky="w", padx=(8, 0), pady=4
+        add_date_row(
+            form, row=0, start_variable=self.start_date, end_variable=self.end_date,
+            label="更新日期",
         )
 
         self.guihu_button = add_path_row(

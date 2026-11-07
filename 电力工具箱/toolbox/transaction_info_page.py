@@ -22,6 +22,7 @@ DEFAULT_WORKBOOK = (
 
 
 class TransactionInfoUpdatePage(ToolPage):
+    tool_id = 'transaction-info'
     def __init__(
         self,
         parent: tk.Misc,

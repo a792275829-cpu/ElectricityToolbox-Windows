@@ -84,9 +84,13 @@ def plan(paths, tool_id, action, p):
         return [([py, str(script), "--login", *(["--headed"] if tool_id in {"market-table", "spot-price", "transaction-info"} else [])], script.parent)]
     day = lambda k: parse_date_input(str(p.get(k, "")))
     optional_start = day("start_date") if p.get("start_date") else None
-    if tool_id in {"online-energy", "wind-forecast"}:
-        script = paths.online_energy if tool_id == "online-energy" else paths.wind_forecast
-        return [(commands.dated_script(script, normalize_date_input(str(p["run_date"]))), script.parent)]
+    if tool_id == "online-energy":
+        return [(commands.dated_range_script(paths.online_energy,
+                day("start_date").isoformat(), day("end_date").isoformat()),
+                paths.online_energy_dir)]
+    if tool_id == "wind-forecast":
+        return [(commands.dated_script(paths.wind_forecast, normalize_date_input(str(p["run_date"]))),
+                paths.wind_forecast_dir)]
     if tool_id == "section-analysis":
         files = selected_files(p)
         topology = required_path(p, "topology_path")
@@ -113,7 +117,8 @@ def plan(paths, tool_id, action, p):
         if any("海风" in path.name for path in workbooks) and optional_start is None:
             raise ValueError("海风覆盖更新必须填写开始日期")
         return [(commands.power_benefit(paths, workbooks, day("end_date"), start_date=optional_start,
-                create_backup=p["create_backup"]), paths.power_benefit_update_dir)]
+                create_backup=p["create_backup"], overwrite=p.get("overwrite", True)),
+                paths.power_benefit_update_dir)]
     elif tool_id == "spot-price":
         selected = [(k, v) for k, v in [("guihu", "归湖"), ("tuolian", "鮀莲"), ("haifeng", "海风")] if p[k + "_selected"]]
         workbooks = {label: required_path(p, key + "_workbook") for key, label in selected}

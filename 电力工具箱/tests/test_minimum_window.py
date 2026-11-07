@@ -159,7 +159,14 @@ class MinimumWindowTests(unittest.TestCase):
         app.show_page("现货价格分析表更新")
         self._settle(0.3)
         view = app.page_viewport
-        self.assertEqual(view.vertical.winfo_manager(), "grid")
+        # 日志区自适应后页面可能已完整落入视口，此时不强求滚动条；
+        # 只要求内容零压缩，且真超出时滚动条确实出现。
+        page = app.pages["现货价格分析表更新"]
+        self.assertGreaterEqual(page.winfo_height(), page.winfo_reqheight() - 2)
+        if page.winfo_reqheight() > view.canvas.winfo_height():
+            self.assertEqual(view.vertical.winfo_manager(), "grid")
+        else:
+            self.assertEqual(view.vertical.winfo_manager(), "")
         app.show_page("风力预测截图")
         self._settle(0.3)
         self.assertEqual(view.canvas.yview()[0], 0.0)

@@ -210,7 +210,7 @@ class CalendarInputTests(unittest.TestCase):
         )
 
         for page_type, expected_count in (
-            (OnlineEnergyPage, 1), (ReportPage, 1), (MarketTableUpdatePage, 1),
+            (OnlineEnergyPage, 2), (ReportPage, 1), (MarketTableUpdatePage, 1),
             (GuangdongPricePage, 1), (MarketReportPage, 0), (SpotPriceUpdatePage, 2),
             (TransactionInfoUpdatePage, 2), (WindForecastPage, 1),
 
@@ -222,16 +222,23 @@ class CalendarInputTests(unittest.TestCase):
                         return sum(isinstance(child, DateInput) + 2 * isinstance(child, DateRangeInput) + count_calendars(child)
                                    for child in widget.winfo_children())
                     self.assertEqual(count_calendars(page), expected_count)
-                    if page_type in (OnlineEnergyPage, WindForecastPage):
-                        if page_type is OnlineEnergyPage:
-                            form = next(child for child in page.content.winfo_children()
-                                        if isinstance(child, ttk.LabelFrame))
-                            labels = [child.cget("text") for child in form.winfo_children()
-                                      if isinstance(child, ttk.Label)]
-                            self.assertIn("导出日期", labels)
+                    if page_type is OnlineEnergyPage:
+                        form = next(child for child in page.content.winfo_children()
+                                    if isinstance(child, ttk.LabelFrame))
+                        labels = [child.cget("text") for child in form.winfo_children()
+                                  if isinstance(child, ttk.Label)]
+                        self.assertIn("导出日期", labels)
+                        page.start_date.set("2026-5-3")
+                        page.end_date.set("2026-5-6")
+                        with patch.object(page, "run_process") as run:
+                            page.start_export()
+                        command = run.call_args.args[0]
+                        self.assertEqual(command[-4:], ["--start-date", "2026-05-03",
+                                                        "--end-date", "2026-05-06"])
+                    elif page_type is WindForecastPage:
                         page.run_date.set("2026-5-3")
                         with patch.object(page, "run_process") as run:
-                            (page.start_export if page_type is OnlineEnergyPage else page.start_generate)()
+                            page.start_generate()
                         self.assertEqual(run.call_args.args[0][-1], "2026-05-03")
                     elif page_type is MarketReportPage:
                         # 报告日期只读展示，由 D 日收益表自动识别。

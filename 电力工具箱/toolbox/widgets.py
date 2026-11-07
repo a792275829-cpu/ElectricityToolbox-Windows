@@ -23,6 +23,22 @@ T = TypeVar("T")
 
 
 class ToolPage(ttk.Frame):
+    def start_login(self):
+        from .commands import login
+        command = login(self.paths, self.tool_id)
+        self.run_process(command, cwd=self.paths.workspace, action="login", status="正在打开登录窗口...")
+
+    def _save_login_draft(self, action):
+        from .page_contracts import requires_qingneng
+        values = {key: getattr(self, key).get() for key in ("mode", "fetch_data") if hasattr(self, key)}
+        if not requires_qingneng(getattr(self, "tool_id", None), action, values):
+            return True
+        panel = getattr(self.winfo_toplevel(), "credentials_panel", None)
+        if panel is not None and not panel.save_if_dirty():
+            messagebox.showwarning("账号尚未保存", panel.status_var.get(), parent=self)
+            return False
+        return True
+
     def __init__(
         self,
         parent: tk.Misc,
@@ -42,11 +58,14 @@ class ToolPage(ttk.Frame):
         self._completion_queue: queue.Queue[tuple[TaskSnapshot, Callable | None]] = queue.Queue()
         self._poll_after_id: str | None = None
         self._current_cancellable = True
+        self._log_fit_after_id: str | None = None
+        self._log_fit_binding: str | None = None
+        self._fitting_log = False
 
         self.columnconfigure(0, weight=1)
         # Windows 窗口比卡片内容高得多，按内容撑满会在卡片和运行日志之间
-        # 留下整片空白；改成内容贴顶、剩余高度归日志。macOS 保持原版分配。
-        # 内容本身需要撑满的页面（表格、清单）传 expand_content=True。
+        # 留下整片空白；改成内容贴顶、剩余高度归日志。内容本身需要撑满的
+        # 页面（表格、清单）传 expand_content=True。
         self._expand_content = expand_content or os.name != "nt"
         self.rowconfigure(2, weight=1)
 
@@ -104,10 +123,106 @@ class ToolPage(ttk.Frame):
         self._schedule_poll()
 
     def _resize_description(self, event) -> None:
-        wraplength = max(180, event.width - 8)
+        # Wrap against the space actually available, not the page's own width:
+        # a description wrapped to the page width feeds back into that width and
+        # leaves the page exactly one horizontal scrollbar wide.
+        viewport = getattr(self.winfo_toplevel(), "page_viewport", None)
+        available = viewport.canvas.winfo_width() if viewport is not None else event.width
+        wraplength = max(180, min(820, available - 44))
         if wraplength != self._description_wraplength:
             self._description_wraplength = wraplength
             self.description_label.configure(wraplength=wraplength)
+
+    LOG_MIN_LINES = 3
+    LOG_MAX_LINES = 10
+    LOG_PANEL_GAP = 8
+
+    def prepare_for_display(self) -> None:
+        """Size the log panel before the page is mapped.
+
+        A page taller than the viewport has to scroll, and every switch then
+        repaints the whole clipped canvas window (measured about three times
+        the cost of a page that fits). The log panel gives up lines first so
+        the form itself never has to.
+        """
+        self._fit_description()
+        self._fit_log_console(force=True)
+        # 首次适配发生在页面还没排完版的时候，描述换行和行高会再变一次；
+        # 等这一轮布局结束再收缩一遍，避免字体／主题差异留下几像素溢出。
+        self._queue_log_fit()
+        if self._log_fit_binding is None:
+            self._log_fit_binding = self.winfo_toplevel().bind(
+                "<Configure>", self._queue_log_fit, add="+")
+
+    def _fit_description(self) -> None:
+        if not hasattr(self, "description_label"):
+            return
+        viewport = getattr(self.winfo_toplevel(), "page_viewport", None)
+        if viewport is None:
+            return
+        available = viewport.canvas.winfo_width()
+        if available <= 1:
+            return
+        wraplength = max(180, min(820, available - 44))
+        if wraplength != self._description_wraplength:
+            self._description_wraplength = wraplength
+            self.description_label.configure(wraplength=wraplength)
+
+    def _queue_log_fit(self, _event=None) -> None:
+        if self._log_fit_after_id is None:
+            self._log_fit_after_id = self.after_idle(self._run_log_fit)
+
+    def _run_log_fit(self) -> None:
+        self._log_fit_after_id = None
+        # 拖拽窗口时只收缩不放大：放大需要重新排版，留到下次进入页面时再做。
+        self._fit_log_console(allow_grow=False)
+
+    def _fit_log_console(self, *, force: bool = False, allow_grow: bool = True) -> None:
+        if self._fitting_log:
+            return
+        if not force and not self.winfo_ismapped():
+            # 窗口尺寸变化时只有当前页面需要重新适配，隐藏页面进入时再算。
+            return
+        viewport = getattr(self.winfo_toplevel(), "page_viewport", None)
+        if viewport is None:
+            return
+        # 留 2 像素余量：字体回退或主题差异会让实际行高比估算略大，正好卡在
+        # 视口高度上时多余的一点高度会触发整页滚动。
+        available = viewport.canvas.winfo_height() - 2
+        if available <= 1:
+            return
+        if self.winfo_reqheight() <= 1:
+            # A fresh page reports no size until it has been laid out; a layout
+            # pass draws nothing, unlike the repaint this avoids.
+            self.update_idletasks()
+        text = self.log_text
+        lines = int(text.cget("height"))
+        text_height = text.winfo_reqheight()
+        if lines <= 0 or text_height <= 0:
+            return
+        line_height = max(1.0, text_height / lines)
+        fixed = self.winfo_reqheight() - text_height - self.LOG_PANEL_GAP
+        desired = int((available - fixed) / line_height)
+        desired = max(self.LOG_MIN_LINES, min(self.LOG_MAX_LINES, desired))
+        if desired > lines and not allow_grow:
+            return
+        if desired == lines and self.winfo_reqheight() <= available:
+            return
+        self._fitting_log = True
+        try:
+            # 逐次收敛：滚动态和日志行数会互相影响，算出来仍超出时再让一行。
+            for _ in range(6):
+                text.configure(height=desired)
+                self.update_idletasks()
+                if desired <= self.LOG_MIN_LINES:
+                    break
+                overflow = self.winfo_reqheight() - available
+                if overflow <= 0:
+                    break
+                desired = max(self.LOG_MIN_LINES,
+                              desired - max(1, int(overflow / line_height + 0.999)))
+        finally:
+            self._fitting_log = False
 
     def set_task_console_visible(self, visible: bool) -> None:
         """Show or hide this module's generic task controls and log console."""
@@ -125,12 +240,25 @@ class ToolPage(ttk.Frame):
         widget = self.master
         while widget is not None:
             if callable(getattr(widget, "refresh", None)) and hasattr(widget, "canvas"):
-                # 第一次在空闲期量，第二次留给 Tk 完成几何传播后再量一次，
-                # 否则可能赶在新表体算出请求尺寸之前。
                 self.after_idle(widget.refresh)
                 self.after(80, widget.refresh)
                 return
             widget = getattr(widget, "master", None)
+
+    def destroy(self) -> None:
+        if self._log_fit_after_id is not None:
+            try:
+                self.after_cancel(self._log_fit_after_id)
+            except tk.TclError:
+                pass
+            self._log_fit_after_id = None
+        if self._log_fit_binding is not None:
+            try:
+                self.winfo_toplevel().unbind("<Configure>", self._log_fit_binding)
+            except tk.TclError:
+                pass
+            self._log_fit_binding = None
+        super().destroy()
 
     def register_busy_widgets(self, *widgets: tk.Widget) -> None:
         self._busy_widgets.extend(widgets)
@@ -228,11 +356,14 @@ class ToolPage(ttk.Frame):
         status: str,
         on_success: Callable[[T], None] | None = None,
         cancellable: bool = True,
+        action: str = "run",
     ) -> None:
         if self.busy:
             return
+        if not self._save_login_draft(action):
+            return
         if getattr(self.registry, "remote_business", False) is True and not getattr(worker, "_remote_business", False):
-            worker = self.registry.prepare_page_worker(self, status)
+            worker = self.registry.prepare_page_worker(self, status, action=action)
         if not self.log_console._initialized or self.log_console.finished:
             self.log_console.begin(status)
         self._current_cancellable = cancellable
@@ -296,6 +427,10 @@ class ToolPage(ttk.Frame):
                        else "".join(traceback.format_exception(snapshot.error)))
             self.append_log(details)
         self.set_busy(False, "执行失败")
+        kind = getattr(snapshot.error, "kind", None) or getattr(snapshot.error, "error_detail", {}).get("login_kind")
+        panel = getattr(self.winfo_toplevel(), "credentials_panel", None)
+        if kind == "verification" and panel is not None and callable(getattr(self, "start_login", None)):
+            panel.offer_manual_login(self.start_login)
         messagebox.showerror(
             "执行失败", f"{error.summary}\n\n{error.advice}", parent=self
         )
@@ -308,13 +443,16 @@ class ToolPage(ttk.Frame):
         status: str,
         on_success: Callable[[int], None] | None = None,
         cancellable: bool = True,
+        action: str = "run",
     ) -> None:
         if self.busy:
             return
+        if not self._save_login_draft(action):
+            return
         if getattr(self.registry, "remote_business", False) is True:
-            worker = self.registry.prepare_page_worker(self, status, command=command, process=True)
+            worker = self.registry.prepare_page_worker(self, status, command=command, process=True, action=action)
             self.append_log(f"工作目录：{cwd}\n> {shlex.join(command)}")
-            self.run_in_thread(worker, status=status, on_success=on_success, cancellable=cancellable)
+            self.run_in_thread(worker, status=status, on_success=on_success, cancellable=cancellable, action=action)
             return
         if not self.log_console._initialized or self.log_console.finished:
             self.log_console.begin(status)

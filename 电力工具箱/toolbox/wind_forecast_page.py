@@ -13,6 +13,7 @@ from .widgets import ToolPage
 
 
 class WindForecastPage(ToolPage):
+    tool_id = 'wind-forecast'
     def __init__(self, parent: tk.Misc, paths: ToolPaths, registry: TaskRegistry) -> None:
         super().__init__(
             parent,

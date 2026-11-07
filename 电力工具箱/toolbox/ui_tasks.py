@@ -130,11 +130,11 @@ class RemoteTaskRegistry(TaskRegistry):
         get = lambda key: getattr(page, key).get()
         # Read every Tk variable here, before the worker thread is started.
         fields = {
-            "online-energy": ("run_date",), "wind-forecast": ("run_date",),
+            "online-energy": ("start_date", "end_date"), "wind-forecast": ("run_date",),
             "section-analysis": ("output_root", "topology_path", "threshold"),
             "trade-analysis": ("output_dir",), "market-table": ("run_date", "workbook"),
             "transaction-info": ("workbook", "start_date", "end_date", "create_backup"),
-            "power-benefit": ("start_date", "end_date", "create_backup"),
+            "power-benefit": ("start_date", "end_date", "overwrite", "create_backup"),
             "spot-price": ("start_date", "end_date", "overwrite", "create_backup"),
             "daily-pdf-parser": ("pdf_path", "output_path", "mode"),
             "market-report": ("day_report", "previous_report", "d2_report", "dongguan_operation", "realtime_maintenance", "manual_market"),

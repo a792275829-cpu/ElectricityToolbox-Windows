@@ -8,7 +8,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -690,11 +690,36 @@ def export_online_energy(run_date: str, config: Config) -> Path:
     return save_excel(run_date, detail_rows, config.output_dir)
 
 
+def range_dates(start_date: str, end_date: str) -> list[str]:
+    start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    if end < start:
+        raise ValueError("结束日期不能早于开始日期，停止导出。")
+    return [(start + timedelta(days=offset)).isoformat() for offset in range((end - start).days + 1)]
+
+
+def export_online_energy_range(start_date: str, end_date: str, config: Config) -> list[Path]:
+    """逐日导出日期范围；单日复用原有 export_online_energy，已完成日期不受后续失败影响。"""
+    paths: list[Path] = []
+    for run_date in range_dates(start_date, end_date):
+        path = export_online_energy(run_date, config)
+        paths.append(path)
+        log(f"已保存：{path}")
+    return paths
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="导出指定日期各公司各机组上网电量")
     parser.add_argument("date", nargs="?", help="运行日，格式 YYYY-MM-DD")
+    parser.add_argument("--start-date", help="开始日期，格式 YYYY-MM-DD")
+    parser.add_argument("--end-date", help="结束日期，格式 YYYY-MM-DD")
     parser.add_argument("--login", action="store_true", help="登录并保存会话")
     args = parser.parse_args()
+
+    if (args.start_date or args.end_date) and args.date:
+        parser.error("请只用 --start-date/--end-date 表达日期范围，或只给一个位置参数日期")
+    if bool(args.start_date) != bool(args.end_date):
+        parser.error("--start-date 与 --end-date 需要同时提供")
 
     config = load_config()
     try:
@@ -706,6 +731,16 @@ def main() -> int:
                         interactive_login(context, config)
                     finally:
                         context.close()
+            return 0
+
+        if args.start_date:
+            start_date = validate_date(args.start_date)
+            end_date = validate_date(args.end_date)
+            with AuthStateLock():
+                paths = export_online_energy_range(start_date, end_date, config)
+            log(f"\n完成：共 {len(paths)} 个文件")
+            for path in paths:
+                log(f"  {path}")
             return 0
 
         run_date = validate_date(args.date) if args.date else ask_date()

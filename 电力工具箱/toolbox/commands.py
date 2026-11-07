@@ -46,6 +46,11 @@ def dated_script(script: Path, run_date: str) -> list[str]:
     return [python_executable(), str(script), run_date]
 
 
+def dated_range_script(script: Path, start_date: str, end_date: str) -> list[str]:
+    return [python_executable(), str(script),
+            "--start-date", start_date, "--end-date", end_date]
+
+
 def section_analysis(paths, files, output_root, topology_path, threshold):
     return [python_executable(), str(paths.section_analysis_runner),
             "--output-root", str(output_root), "--topology", str(topology_path),
@@ -67,13 +72,15 @@ def transaction_info(paths, workbook, end_date, *, start_date, create_backup):
     return command
 
 
-def power_benefit(paths, workbooks, end_date, *, start_date, create_backup):
+def power_benefit(paths, workbooks, end_date, *, start_date, create_backup, overwrite=True):
     command = [python_executable(), str(paths.power_benefit_update),
                "--end-date", end_date.isoformat()]
     for path in workbooks:
         command.extend(("--workbook", str(path)))
     if start_date is not None:
         command.extend(("--start-date", start_date.isoformat()))
+    if not overwrite:
+        command.append("--skip-existing")
     if not create_backup:
         command.append("--no-backup")
     return command

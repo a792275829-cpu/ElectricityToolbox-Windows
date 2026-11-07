@@ -123,7 +123,17 @@ def process_workbook(
                 [_cell(row, columns["node"]), _cell(row, columns["data_item"]),
                  *[_cell(row, i) for i in columns["time_columns"]]]
                 for row in rows if not _is_empty_row(row)]))
-        native = _native_invoke("sections", "dedupe", dict(sheets=sheets, nodes=topology_nodes))
+        # v0.1.31 的母线电压筛选与「明确 500kV 优先于未标注别名」只在 Python
+        # 侧实现；Rust dedupe 尚未同步，遇到混合电压标注会算出错误的均价。
+        # 数据干净时仍交给 Rust 加速，边界数据回退到下面的 Python 完整逻辑。
+        voltages = {
+            price_node_voltage(row[0])
+            for sheet in sheets for row in sheet["rows"]
+        }
+        needs_python = (any(v not in (None, 500) for v in voltages)
+                        or (500 in voltages and None in voltages))
+        native = None if needs_python else _native_invoke(
+            "sections", "dedupe", dict(sheets=sheets, nodes=topology_nodes))
         if native is not None:
             if native["kept"] == 0:
                 raise ValueError(f"没有找到可输出的500kV节点行: {input_path}")
@@ -334,6 +344,8 @@ def _safe_sheet_title(title: str, existing_titles: list[str]) -> str:
 def main() -> None:
     import tkinter as tk
     from tkinter import filedialog, messagebox, scrolledtext
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from toolbox_file_button import FileSelectButton
 
     root = tk.Tk()
     root.title("500kV节点电价去重")
@@ -397,7 +409,7 @@ def main() -> None:
 
         status.set(f"处理完成: 成功 {success_count} / {len(selected_files)} 个文件")
 
-    choose_button = tk.Button(toolbar, text="选择Excel文件", width=16, command=choose_files)
+    choose_button = FileSelectButton(toolbar, text="选择Excel文件", command=choose_files)
     choose_button.pack(side=tk.LEFT)
 
     process_button = tk.Button(toolbar, text="开始处理", width=12, command=process_selected)

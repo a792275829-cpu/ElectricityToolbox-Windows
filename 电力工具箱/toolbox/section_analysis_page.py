@@ -21,6 +21,7 @@ def result_html_name(source: Path) -> str:
 
 
 class SectionAnalysisPage(ToolPage):
+    tool_id = 'section-analysis'
     def __init__(
         self,
         parent: tk.Misc,

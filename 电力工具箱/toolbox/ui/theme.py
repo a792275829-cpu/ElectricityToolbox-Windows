@@ -14,6 +14,22 @@ SIDEBAR = "#f7f7f5"
 BORDER = "#e8e8e5"
 
 
+
+def _flat_button_style(style: ttk.Style, name: str, background: str, foreground: str,
+                       *, hover: str, pressed: str, padding: tuple[int, int],
+                       anchor: str) -> None:
+    style.layout(name, [("Button.padding", {"sticky": "nsew", "children": [
+        ("Button.label", {"sticky": "nsew"}),
+    ]})])
+    style.configure(name, background=background, foreground=foreground, padding=padding, anchor=anchor,
+                    width=-1, borderwidth=0, relief="flat", bordercolor=background,
+                    lightcolor=background, darkcolor=background)
+    style.map(name,
+              background=[("pressed", pressed), ("active", hover), ("disabled", background),
+                          ("!disabled", background)],
+              foreground=[("disabled", "#b5b5b0"), ("!disabled", foreground)],
+              relief=[("pressed", "flat"), ("active", "flat")])
+
 def _rounded_element(style: ttk.Style, name: str, fill: str, *, outline: str | None = None,
                      states: tuple[tuple[str, str, str | None], ...] = (), radius: int = 8) -> str:
     """Nine-slice rounded surfaces retain native ttk focus and input behavior."""
@@ -61,6 +77,13 @@ def _rounded_element(style: ttk.Style, name: str, fill: str, *, outline: str | N
 def _button_style(style: ttk.Style, name: str, fill: str, foreground: str,
                   *, outline: str | None = None, hover: str, pressed: str,
                   padding: tuple[int, int] = (12, 7), anchor: str = "center") -> None:
+    background = SIDEBAR if name.startswith("Nav") else BACKGROUND
+    if outline is None and fill == background:
+        # Resting surface equals the parent colour: skip the rounded image blit
+        # and keep the highlight states as flat fills (mac-version appearance).
+        _flat_button_style(style, name, background, foreground, hover=hover,
+                           pressed=pressed, padding=padding, anchor=anchor)
+        return
     element = _rounded_element(style, name, fill, outline=outline, states=(
         ("disabled", "#f5f5f3", "#f0f0ed" if outline else None),
         ("pressed", pressed, outline),
@@ -72,7 +95,6 @@ def _button_style(style: ttk.Style, name: str, fill: str, foreground: str,
             ("Button.label", {"sticky": "nsew"}),
         ]}),
     ]})])
-    background = SIDEBAR if name.startswith("Nav") else BACKGROUND
     style.configure(name, background=background, foreground=foreground, padding=padding, anchor=anchor,
                     width=-1, borderwidth=0, relief="flat", bordercolor=background,
                     lightcolor=background, darkcolor=background)
@@ -210,7 +232,11 @@ def configure_theme(style: ttk.Style) -> None:
         ("Frame.padding", {"sticky": "nsew"}),
     ]})])
     style.configure("Card.TFrame", background=SURFACE)
-    style.layout("TLabelframe", [(card, {"sticky": "nsew"})])
+    # 分组框面积大，圆角贴图在首次绘制时要平铺；改用 clam 自带的 1 px 描边，
+    # 与 mac 版观感一致且绘制成本更低。
+    style.layout("TLabelframe", [("Labelframe.border", {"sticky": "nsew", "children": [
+        ("Frame.padding", {"sticky": "nsew"}),
+    ]})])
     style.configure("Card.TLabel", background=SURFACE)
     style.configure("CardMuted.TLabel", background=SURFACE, foreground=MUTED, font=(family, 10, "normal"))
     style.configure("CardTitle.TLabel", background=SURFACE, font=(family, 12, "normal"))

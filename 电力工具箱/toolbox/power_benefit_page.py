@@ -4,14 +4,14 @@ from . import commands
 
 import tkinter as tk
 from toolbox_choices import OptionCheckbutton, SettingCheckbutton
+from toolbox_file_button import FileSelectButton
 
 from datetime import date
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .file_dialogs import FileDialogState
-from .page_support import DateInput, DATE_INPUT_ERROR, DATE_INPUT_HINT, parse_date_input
-from .page_support import add_path_row, open_directory
+from .page_support import DATE_INPUT_ERROR, add_date_row, open_directory, parse_date_input
 from .runtime import TaskRegistry, ToolPaths, python_executable
 from .widgets import ToolPage
 
@@ -21,6 +21,7 @@ DEFAULT_NAMES = ("功率预测调整收益统计-归湖.xlsx", "功率预测调�
 
 
 class PowerBenefitUpdatePage(ToolPage):
+    tool_id = 'power-benefit'
     def __init__(self, parent: tk.Misc, paths: ToolPaths, registry: TaskRegistry,
                  *, today: date | None = None) -> None:
         super().__init__(parent, registry=registry, title="功率调整收益统计表更新")
@@ -31,37 +32,54 @@ class PowerBenefitUpdatePage(ToolPage):
         self.selected = [tk.BooleanVar(master=self, value=(index < 2)) for index, _ in enumerate(DEFAULT_NAMES)]
         self.start_date = tk.StringVar(master=self, value="")
         self.end_date = tk.StringVar(master=self, value=(today or date.today()).isoformat())
-        self.create_backup = tk.BooleanVar(master=self, value=True)
-        form = ttk.LabelFrame(self.content, text="更新设置", padding=12)
+        self.overwrite = tk.BooleanVar(master=self, value=True)
+        self.create_backup = tk.BooleanVar(master=self, value=False)
+        form = ttk.LabelFrame(self.content, text="更新设置", padding=8)
         form.grid(row=0, column=0, sticky="ew")
         form.columnconfigure(1, weight=1)
+        add_date_row(
+            form, row=0, start_variable=self.start_date, end_variable=self.end_date,
+            label="日期范围", hint="结束日期为 D", start_optional=True)
         buttons = []
         for index, station in enumerate(("归湖", "鮀莲", "海风")):
-            buttons.append(add_path_row(
-                form, row=index, label=f"{station}工作簿", variable=self.workbooks[index],
-                command=lambda i=index: self.choose_workbook(i), button_text="选择文件"))
-            OptionCheckbutton(form, text="更新", variable=self.selected[index]).grid(
-                row=index, column=3, padx=(8, 0))
-        for row, label, variable in ((3, "开始日期", self.start_date), (4, "截止日期 D", self.end_date)):
-            ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=4)
-            DateInput(form, textvariable=variable, width=16).grid(row=row, column=1, sticky="w", pady=4)
-        ttk.Label(form, text="海风覆盖必须填写开始日期；其他场站留空检查历史空白；" + DATE_INPUT_HINT,
-                  style="Muted.TLabel").grid(row=5, column=0, columnspan=4, sticky="w", pady=4)
-        SettingCheckbutton(form, text="写入前生成时间戳备份", variable=self.create_backup).grid(
-            row=6, column=0, columnspan=3, sticky="w", pady=4)
-        mapping = ttk.LabelFrame(self.content, text="更新口径", padding=12)
-        mapping.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+            ttk.Label(form, text=f"{station}工作簿").grid(row=1 + index, column=0, sticky="w", padx=(0, 8), pady=5)
+            ttk.Entry(form, textvariable=self.workbooks[index]).grid(row=1 + index, column=1, sticky="ew", pady=5)
+            button = FileSelectButton(form, text="选择文件", command=lambda i=index: self.choose_workbook(i))
+            button.grid(row=1 + index, column=2, padx=(8, 0), pady=5, sticky="w")
+            buttons.append(button)
+        stations = ttk.Frame(form)
+        stations.grid(row=4, column=0, columnspan=3, sticky="w", pady=(5, 0))
+        ttk.Label(stations, text="更新场站：").pack(side="left")
+        self.station_checkbuttons = []
+        for index, station in enumerate(("归湖", "鮀莲", "海风")):
+            button = OptionCheckbutton(stations, text=station, variable=self.selected[index])
+            button.pack(side="left", padx=(0, 12))
+            self.station_checkbuttons.append(button)
+        ttk.Label(stations, text="海风覆盖必须填写开始日期；其他场站留空检查历史空白",
+                  style="Muted.TLabel").pack(side="left", padx=(16, 0))
+        options = ttk.Frame(form)
+        options.grid(row=5, column=0, columnspan=3, sticky="w", pady=(5, 0))
+        SettingCheckbutton(options, text="覆盖非空单元格", variable=self.overwrite).pack(side="left")
+        SettingCheckbutton(options, text="写入前生成时间戳备份",
+                           variable=self.create_backup).pack(side="left", padx=(16, 0))
+        mapping = ttk.LabelFrame(self.content, text="更新口径", padding=8)
+        mapping.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         ttk.Label(mapping, text=(
             "归湖/鮀莲：C 原始功率；J 申报功率；K 日前电量；L 日前电价；M 上网电量；N 实时电价。\n"
             "海风：C 原始功率；R 申报功率；N 上网电量；M 日前电价；O 实时电价。覆盖所选日期内五列的值及公式。\n"
-            "均按运行日期匹配 0–23 点，每列 24 个数。归湖、鮀莲非空单元格（含 0、公式）跳过。\n"
+            "均按运行日期匹配 0–23 点，每列 24 个数。归湖、鮀莲默认只补空白；勾选“覆盖非空单元格”后覆盖已有数值，公式单元格仍跳过。\n"
+            "模板缺少所选日期或月份时，列出缺失日期并停止，不会仅更新部分日期。\n"
             "保留模板格式及其他收益公式；未发布字段保留原值，后续运行继续更新。"),
             justify="left").grid(row=0, column=0, sticky="w")
         self.update_button = ttk.Button(self.actions, text="抓取并更新", command=self.start_update)
         self.update_button.pack(side="left")
         ttk.Button(self.actions, text="打开工作簿目录", command=lambda: open_directory(
             Path(self.workbooks[0].get()).expanduser().parent)).pack(side="left", padx=(8, 0))
-        self.register_busy_widgets(*buttons, self.update_button)
+        # A page taller than the viewport sends every switch through Tk's
+        # clipped-canvas repaint (measured ~3x): 10 log lines push this form to
+        # 816 px against ~790 px of space. Two fewer lines keep it in view.
+        self.log_text.configure(height=8)
+        self.register_busy_widgets(*buttons, *self.station_checkbuttons, self.update_button)
 
     def choose_workbook(self, index: int) -> None:
         key = f"power_benefit_{index}"
@@ -75,7 +93,8 @@ class PowerBenefitUpdatePage(ToolPage):
 
     def build_update_command(self, workbooks: list[Path], end_date: date, *,
                              start_date: date | None, create_backup: bool) -> list[str]:
-        return commands.power_benefit(self.paths, workbooks, end_date, start_date=start_date, create_backup=create_backup)
+        return commands.power_benefit(self.paths, workbooks, end_date,
+                                      start_date=start_date, create_backup=create_backup)
 
     def start_update(self) -> None:
         workbooks = [Path(value.get().strip()).expanduser()

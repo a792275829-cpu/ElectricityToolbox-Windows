@@ -19,7 +19,8 @@ def desktop_catalog(paths):
     workbook = lambda key, label, name="": f(key, label, "file", str(work / name) if name else "", extensions=["xlsx"])
     backup = f("create_backup", "写入前生成时间戳备份", "boolean", False)
     forms = {
-        "online-energy": ([f("run_date", "导出日期", "date", yesterday)], [("run", "开始导出"), ("login", "登录")]),
+        "online-energy": ([f("start_date", "开始日期", "date", yesterday), f("end_date", "结束日期", "date", yesterday)],
+                          [("run", "开始导出"), ("login", "登录")]),
         "wind-forecast": ([f("run_date", "运行日期", "date", tomorrow)], [("run", "生成截图"), ("login", "登录")]),
         "section-analysis": ([f("files", "节点电价文件（支持批量）", "files", [], extensions=["xlsx"]),
                               f("topology_path", "拓扑名单", "file", str(paths.section_analysis_topology), extensions=["md"]),
@@ -33,7 +34,7 @@ def desktop_catalog(paths):
                            workbook("tuolian_workbook", "鮀莲工作簿", "功率预测调整收益统计-鮀莲(2)(2).xlsx"), f("tuolian_selected", "更新鮀莲", "boolean", True),
                            workbook("haifeng_workbook", "海风工作簿", "海风博弈收益统计-新.xlsx"), f("haifeng_selected", "更新海风（覆盖五列）", "boolean", False),
                            f("start_date", "开始日期（海风覆盖必填）", "date"), f("end_date", "截止日期 D", "date", day),
-                           f("create_backup", "写入前生成时间戳备份", "boolean", True)], [("run", "抓取并更新")]),
+                           f("overwrite", "覆盖非空单元格", "boolean", True), backup], [("run", "抓取并更新")]),
         "spot-price": ([f("start_date", "开始日期", "date", yesterday), f("end_date", "结束日期", "date", day),
                         *[item for key, label, name in [
                             ("guihu", "归湖", "2026年现货价格分析（2026.8.14更新）-归湖.xlsx"),
@@ -77,7 +78,7 @@ def desktop_catalog(paths):
     notes = {
         "section-analysis": "相邻节点一涨一跌＋价差严格大于阈值＋全天累计至少4个时点。",
         "transaction-info": "来源口径：日前 D、实际 D-3；目标 Sheet1，沿用现有字段顺序与接续规则。",
-        "power-benefit": "归湖/鮀莲：C 原始功率；J 申报功率；K 日前电量；L 日前电价；M 上网电量；N 实时电价。0–23 点，非空（含 0、公式）跳过。海风：C 原始功率、R 申报功率、N 上网电量、M 日前电价、O 实时电价；覆盖所选日期内五列的值及公式，开始日期必填。",
+        "power-benefit": "归湖/鮀莲：C 原始功率；J 申报功率；K 日前电量；L 日前电价；M 上网电量；N 实时电价。0–23 点，默认只补空白，勾选覆盖后覆盖已有数值（公式跳过）。海风：C 原始功率、R 申报功率、N 上网电量、M 日前电价、O 实时电价；覆盖所选日期内五列的值及公式，开始日期必填。",
         "report": "三个 Excel 来源日期依次为 D-1、D、D-2。",
         "summary-upload": "混放文件会先移入六个单元文件夹。汇总输出请放在复盘目录根目录或目录外。",
     }

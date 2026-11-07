@@ -19,6 +19,7 @@ from .market_report_dates import report_date_from_day_report
 
 
 class MarketReportPage(ToolPage):
+    tool_id = 'market-report'
     def __init__(self, parent: tk.Misc, paths: ToolPaths, registry: TaskRegistry) -> None:
         super().__init__(
             parent,

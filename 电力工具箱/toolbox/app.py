@@ -361,6 +361,11 @@ class ToolboxApp(tk.Tk):
             if hide is not None:
                 hide()
             self._visible_page.grid_remove()
+        prepare = getattr(page, "prepare_for_display", None)
+        if prepare is not None:
+            # Keep the form inside the viewport by letting the log panel give up
+            # lines first; otherwise every switch repaints a clipped canvas.
+            prepare()
         page.grid()
         page.tkraise()
         self.page_viewport.reset()
