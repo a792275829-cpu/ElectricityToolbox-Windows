@@ -1,38 +1,38 @@
-# 电力工作工具箱（macOS / Windows）
+# 电力工作工具箱 · Windows 版
 
-这里是 `development` 源码开发分支。[返回安装包下载首页](https://github.com/a792275829-cpu/ElectricityToolbox-Windows)；普通使用者下载 Windows 完整安装包后双击安装即可。
+Windows 移植与发行仓库。[安装包下载](https://github.com/a792275829-cpu/ElectricityToolbox-Windows/releases/latest)；完整源码在 `development` 分支，`main` 仅维护下载页与构建入口。源码修改和 Pull Request 均以 `development` 为目标。
 
-源码修改和 Pull Request 均以 `development` 为目标；`main` 仅维护下载页和构建入口。
+面向电力业务的桌面工具集合，统一入口为原版 Tkinter 界面，当前集成 16 个工具：上网电量导出、风力预测截图、市场表更新、现货价格分析表更新、交易系统信息更新、功率调整收益统计表更新、广东电价预测、电力交易分析、500kV断面分析、广东运行日报解析上传、南方分公司电力市场日报、出清结果汇总上传、私有数据批量上传、生产经营报告生成、集团每日数据上传和 WPS/KDocs 写入。
 
-这是一个面向 macOS 和 Windows 的电力业务桌面工具集合。统一入口为原版 Tkinter 图形界面，当前集成 16 个工具，包括上网电量导出、风力预测截图、市场表更新、现货价格分析表更新、交易系统信息更新、功率调整收益统计表更新、广东电价预测、电力交易分析、500kV断面分析、广东运行日报解析上传、南方分公司电力市场日报、出清结果汇总上传、私有数据批量上传、生产经营报告生成、集团每日数据上传和 WPS/KDocs 写入。
+Windows x64 版采用 Rust/Tauri 宿主、Rust 任务服务和业务计算后端，保留原版 Tk 界面、字段和业务规则。断面分析、交易与汇总、预测预处理、PDF 图表处理、接口数据整理、Excel 定点更新和事务提交均已接入 Rust；Python/Tk、浏览器登录、模型训练与文档引擎继续保留。迁移范围及验证口径见 [Rust 迁移说明](docs/RUST_MIGRATION.md)。
 
-Windows 移植版：[a792275829-cpu/ElectricityToolbox-Windows](https://github.com/a792275829-cpu/ElectricityToolbox-Windows) · [安装包下载](https://github.com/a792275829-cpu/ElectricityToolbox-Windows/releases/latest)
+## 维护入口
 
-原项目：[a792275829-cpu/electricity-toolbox-scripts](https://github.com/a792275829-cpu/electricity-toolbox-scripts)。本仓库保留原版 Tk 界面、业务字段和 Git 历史，在此基础上提供 Rust 后端与 Windows 安装包；macOS 的原有源码兼容路径继续保留。
-
-## Windows 版
-
-本移植仓库的 Releases 提供 Windows x64 安装包；下文保留原项目的 macOS 源码与安装说明。
-
-Windows x64 版采用 Rust/Tauri 宿主、Rust 任务服务和业务计算后端，保留原版 Tk 界面（现 16 个工具页）、字段和业务规则。断面分析、交易与汇总、预测预处理、PDF 图表处理、接口数据整理、Excel 定点更新和事务提交均已接入 Rust。Python/Tk、浏览器登录、模型训练与文档引擎继续保留；迁移范围及验证口径见 [Rust 迁移说明](docs/RUST_MIGRATION.md)。
-
-Windows 0.1.22 起支持应用内检查、下载校验、退出安装与自动重启；使用本仓库的 Windows 完整安装包更新，保留配置和数据。0.1.21 及更早版本需先手动安装一次新版。详见 [Windows 自动更新](desktop/WINDOWS.md#使用边界)。
-
-源码运行：先双击 `00_启动/Windows初始化.cmd`，完成后双击 `00_启动/Windows启动.cmd`。安装包使用方式、构建步骤和验证边界见 [Windows 使用说明](desktop/WINDOWS.md)。下面的 DMG 和 Mac 初始化说明仅适用于 macOS。
-
-源码测试版：双击 `00_启动/源码测试版.cmd`，直接用当前源码启动原版 Tk 界面，不启动桌面安装包、不复制业务源码；窗口标题显示「电力工具箱 · 源码调试版」并默认进入 WPS 写入工具页。`源码测试版-自检.cmd` 校验解释器与依赖，`源码测试版-控制台.cmd` 保留控制台便于查看异常；命令行可执行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File start_source_test.ps1 -Smoke`。解释器优先使用根目录 `.venv`，也可通过 `-Python` 指定。测试期间的登录态、配置与运行数据隔离在 `.toolbox\source-test\data\`，启动日志在 `logs\source-test\`，两者均不进入版本控制；正式安装版的数据目录不受影响。
-
-源码运行窗口右下角有「重启」按钮（版本号左侧，版本号仍保持最右）：用当前解释器和环境变量重新拉起同一个源码副本并关闭旧窗口，改完代码直接点它即可加载新代码；有任务运行或账号未保存时先确认，新进程启动失败则保留当前窗口。桌面安装包版由宿主管理 Python 进程，不显示该按钮。
-
-## DMG 桌面版
-
-macOS 14+、Apple 芯片电脑使用 DMG 桌面版，已内置 Python、Node、Chromium 与 Tcl/Tk。打开 DMG，先退出旧工具箱，再双击“安装到我的应用程序.command”，安装到 `~/Applications/电力工具箱.app` 并自动打开；也可手动拖入个人用户目录的 Applications 文件夹。
-
-后续在应用中点击“开始更新”，自动完成下载、校验、退出旧程序、安装和重新启动，无需再操作镜像或安装命令。日常优先选择下载量较小的增量升级路径，补丁不适用时自动回退完整 DMG；配置、登录态、业务数据和样例保留。0.1.12 及更早更新器仍需按旧提示完成一次升级，之后才能全自动更新。旧 PKG 版需要从 DMG 迁移一次；确认新版正常后，可手动清理 `/Applications` 的旧副本并更新 Dock 图标。详细说明见 [桌面版安装与更新](desktop/README.md)。
-
-以下环境要求和初始化步骤适用于源码运行方式。
+| 想做的事 | 看这里 |
+| --- | --- |
+| 找文件、判断某个目录能不能动 | [仓库结构地图](docs/project-structure.md) |
+| 每轮对齐 mac、打包、发布 | [常态维护模型](docs/windows-maintenance-model.md) |
+| 改动边界、验证与发布规则 | [维护约定](AGENTS.md) |
+| Windows 打包与增量更新 | [打包说明](packaging/windows/README.md) |
+| 本版改了什么 | [更新日志](CHANGELOG.md) |
+| 全部文档索引 | [文档索引](docs/README.md) |
 
 ## 目录
+
+维护与结构
+
+- [仓库结构地图](docs/project-structure.md)
+- [常态维护模型](docs/windows-maintenance-model.md)
+- [维护约定](AGENTS.md)
+- [文档索引](docs/README.md)
+
+Windows
+
+- [源码运行](#源码运行)
+- [Windows 使用说明](desktop/WINDOWS.md)
+- [Windows 打包与增量更新](packaging/windows/README.md)
+
+功能与配置（安装示例为 macOS 写法，业务说明两平台通用）
 
 - [环境要求](#环境要求)
 - [首次安装](#首次安装)
@@ -42,10 +42,29 @@ macOS 14+、Apple 芯片电脑使用 DMG 桌面版，已内置 Python、Node、C
 - [后台任务与取消](#后台任务与取消)
 - [输出位置](#输出位置)
 - [迁移到另一台 Mac](#迁移到另一台-mac)
+- [代理和网络](#代理和网络)
 - [常见问题](#常见问题)
 - [测试和自检](#测试和自检)
 
+## 源码运行
+
+先双击 `00_启动/Windows初始化.cmd`，完成后双击 `00_启动/Windows启动.cmd`；也可直接运行 `setup_windows.ps1` 与 `start_windows.ps1`。安装包使用方式、构建步骤和验证边界见 [Windows 使用说明](desktop/WINDOWS.md)。
+
+源码测试版：双击 `00_启动/源码测试版.cmd`，直接用当前源码启动原版 Tk 界面，不启动桌面外壳、不复制业务源码；窗口标题显示「电力工具箱 · 源码调试版」并默认进入 WPS 写入工具页。`源码测试版-自检.cmd` 校验解释器与依赖，`源码测试版-控制台.cmd` 保留控制台便于查看异常；命令行等价于 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File start_source_test.ps1 -Smoke`。解释器优先使用根目录 `.venv`，也可通过 `-Python` 指定。测试期间的登录态、配置与运行数据隔离在 `.toolbox\source-test\data\`，启动日志在 `logs\source-test\`，两者均不进入版本控制，正式安装版的数据目录不受影响。
+
+源码运行窗口右下角有「重启」按钮（版本号左侧，版本号仍保持最右）：用当前解释器和环境变量重新拉起同一个源码副本并关闭旧窗口，改完代码直接点它即可加载新代码；有任务运行或账号未保存时先确认，新进程启动失败则保留当前窗口。桌面安装包版由宿主管理 Python 进程，不显示该按钮。
+
+Windows 0.1.22 起支持应用内检查、下载校验、退出安装与自动重启；使用本仓库的 Windows 完整安装包更新，保留配置和数据。0.1.21 及更早版本需先手动安装一次新版。详见 [Windows 自动更新](desktop/WINDOWS.md#使用边界)。
+
+## 上游 macOS 版
+
+macOS 版在独立仓库 [a792275829-cpu/electricity-toolbox-scripts](https://github.com/a792275829-cpu/electricity-toolbox-scripts)，使用 DMG 与独立的增量通道，构建与更新实现不在本仓库。本仓库按功能逐项对齐它，但不合并它的打包流程。
+
+下面「环境要求」「首次安装」「迁移到另一台 Mac」等章节描述的是上游 macOS 源码运行方式，仅在维护 macOS 上游或核对对齐口径时参考；Windows 下按上面「源码运行」一节操作。
+
 ## 环境要求
+
+以下是 macOS 上游源码运行的要求；Windows 见上文「源码运行」。
 
 - macOS 12 或更新版本
 - Python 3.11 或更新版本

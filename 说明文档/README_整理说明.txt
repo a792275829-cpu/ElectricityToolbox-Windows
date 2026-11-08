@@ -1,13 +1,27 @@
-电力工具箱目录说明
+电力工具箱 · 目录说明（Windows 版）
 
-当前仓库仅维护 macOS 版。
+本仓库维护 Windows x64 版。macOS 上游在独立仓库
+a792275829-cpu/electricity-toolbox-scripts，本仓库只按功能逐项对齐它，
+不合并它的打包与发布流程。
 
-统一工具箱入口：
-- 双击“00_启动/电力工具箱.command”启动 Tk 工具箱。
-- 双击“00_启动/Tauri开发版.command”启动桌面开发版。
-- 首次使用运行根目录 setup_macos.command。
-- 原有 Python 业务脚本继续保留，使用根目录 .venv 执行。
-- 各页面的输入、日志和运行状态互相独立，切换页面不会中断正在运行的任务。
+日常入口（都在 00_启动/ 下）
+- Windows初始化.cmd    首次准备环境：建 .venv、装依赖
+- Windows启动.cmd      启动工具箱
+- 源码测试版.cmd       直接用当前源码启动原版 Tk 界面，不启动桌面外壳
+- 源码测试版-自检.cmd  校验解释器与依赖
 
-业务模块、模板和已有数据维持各自目录；账号配置、独立登录态、浏览器 profile、缓存和输出不进入版本控制。
-迁移和使用说明见根目录 README.md；桌面安装包构建说明见 desktop/README.md。
+打包与发布
+- Windows 打包、增量更新与发版细则：packaging/windows/README.md
+- 每轮对齐 mac → 打包 → 发布 → 安装回读的完整链路：docs/windows-maintenance-model.md
+
+文件与目录
+- 仓库结构地图，含哪些目录能动能改名：docs/project-structure.md
+- 全部文档索引：docs/README.md
+
+约定
+- 业务模块、模板和已有数据维持各自目录，不随意搬迁
+- 账号配置、独立登录态、浏览器 profile、缓存和输出不进入版本控制
+- 根目录 toolbox_*.py 是打包时平铺到载荷根的共享模块，不要移动、合并或改名
+- 00_启动 下的 .command 是 macOS 历史入口，保留但不维护
+
+改代码前先读 AGENTS.md。
