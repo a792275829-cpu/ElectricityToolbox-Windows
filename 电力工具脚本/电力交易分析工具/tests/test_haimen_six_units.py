@@ -191,5 +191,43 @@ class GenerateReportSixUnitTests(unittest.TestCase):
         book.close()
 
 
+class ShiftedBriefRowTests(unittest.TestCase):
+    def test_shifted_dongguan_capacity_and_rate_in_python_and_rust(self):
+        for backend in ("python", "rust"):
+            with self.subTest(backend=backend), tempfile.TemporaryDirectory() as folder:
+                book = southern_summary_workbook()
+                book["快报"]["A20"] = " 东 莞 "
+                book["快报"]["K19"], book["快报"]["K20"] = 0.61, 0.72
+                book["快报"]["K20"].number_format = "0.00%"
+                path = Path(folder) / "six.xlsx"
+                book.save(path)
+                book.close()
+                book = load_workbook(path)
+                try:
+                    builder = MODULE.ReportBuilder(path)
+                    builder.wb = book
+                    with mock.patch.dict(os.environ, TOOLBOX_DOMAIN_BACKEND=backend):
+                        builder._parse_summary()
+                    self.assertEqual(builder.summary["东莞"]["capacity_10mw"], 120)
+                    self.assertEqual(builder.summary["东莞"]["load_rate"], 0.72)
+                    self.assertEqual(builder.summary["海门#6机组"]["capacity_10mw"], 119)
+                    self.assertEqual(book["快报"]["K20"].number_format, "0.00%")
+                    book["快报"]["B19"] = None
+                    with mock.patch.dict(os.environ, TOOLBOX_DOMAIN_BACKEND=backend):
+                        builder._parse_summary()
+                    self.assertIsNone(builder.summary["海门#6机组"]["capacity_10mw"])
+                    book["快报"]["A21"] = "东莞"
+                    with mock.patch.dict(os.environ, TOOLBOX_DOMAIN_BACKEND=backend):
+                        with self.assertRaisesRegex((ValueError, RuntimeError), "重复标签.*东莞"):
+                            builder._parse_summary()
+                    book["快报"]["A21"] = None
+                    book["快报"]["A20"] = None
+                    with mock.patch.dict(os.environ, TOOLBOX_DOMAIN_BACKEND=backend):
+                        with self.assertRaisesRegex((ValueError, RuntimeError), "缺少标签.*东莞"):
+                            builder._parse_summary()
+                finally:
+                    book.close()
+
+
 if __name__ == "__main__":
     unittest.main()

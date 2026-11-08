@@ -332,12 +332,12 @@ class ReportBuilder:
             missing = set(summary_rows) - found.keys()
             if missing:
                 raise ValueError(f"新版交易汇总页缺少标签：{'、'.join(sorted(missing))}")
-            summary_rows = {name: (found[name], brief_row)
-                            for name, (_, brief_row) in summary_rows.items()}
-            # 海门 #5/#6 号机为可选机组：汇总页出现即纳入，快报缺行时豁免。
             brief_index = brief_row_index(
                 [(brief_value(row, 1), brief_value(row, 2)) for row in range(1, 81)]
             )
+            summary_rows = {name: (found[name], brief_index.get(name))
+                            for name in summary_rows}
+            # 海门 #5/#6 号机为可选机组：汇总页出现即纳入，快报缺行时豁免。
             for name in OPTIONAL_HAIMEN_UNITS:
                 if name in found:
                     summary_rows[name] = (found[name], brief_index.get(name))

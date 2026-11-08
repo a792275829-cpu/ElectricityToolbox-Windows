@@ -140,6 +140,8 @@ class ToolboxService:
 
     @staticmethod
     def cancellable(tool_id, action, p):
+        if tool_id == "daily-pdf-parser" and action == "run":
+            return p["mode"] == "parse"
         writable = tool_id in {"market-table", "transaction-info", "power-benefit", "spot-price",
                                "group-upload", "private-batch-upload"}
         return action not in {"run", "update"} or not (

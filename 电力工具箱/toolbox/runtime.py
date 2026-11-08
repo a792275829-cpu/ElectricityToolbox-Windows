@@ -259,7 +259,9 @@ def _restore_local_imports(
     roots: tuple[Path, ...],
 ) -> None:
     for module_name in set(before).union(sys.modules):
-        if module_name == keep_name:
+        # Business modules retain this public exception class after loading.
+        # Unloading its defining module would split LoginError class identities.
+        if module_name in {keep_name, "toolbox_qingneng_login"}:
             continue
         previous = before.get(module_name, _MISSING_MODULE)
         current = sys.modules.get(module_name, _MISSING_MODULE)

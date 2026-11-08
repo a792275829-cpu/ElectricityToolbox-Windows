@@ -548,7 +548,12 @@ def cell_is_non_empty(cell) -> bool:
 def cell_holds_formula(cell) -> bool:
     """覆盖非空也不改写公式：只换 <v> 会让公式结果与公式体不一致。"""
     value = cell.value
-    return isinstance(value, str) and value.startswith("=")
+    if cell.data_type == "f" or (isinstance(value, str) and value.startswith("=")):
+        return True
+    # Spill cells belong to the array formula even when their cached value is numeric.
+    from openpyxl.worksheet.cell_range import CellRange
+    return any(cell.coordinate in CellRange(reference)
+               for reference in cell.parent.array_formulae.values())
 
 
 def write_count_text(summary: dict[str, Any]) -> str:

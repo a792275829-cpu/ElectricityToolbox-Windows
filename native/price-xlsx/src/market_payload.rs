@@ -257,14 +257,12 @@ fn load_summary(p: &Value, transaction: bool) -> R {
     let periods = &s[txt(&p["period_key"])];
     let rows = arr(periods);
     let target = txt(&p["date"]);
-    let summary = if transaction {
-        rows.iter()
-            .find(|r| dt(&r["date"]) == target)
-            .or_else(|| if rows.len() == 1 { rows.first() } else { None })
-            .ok_or("没有返回负荷数据")?
-    } else {
-        // Mac 口径：要求恰好一条日期等于运行日的记录，绝不推断缺失日期。
-        let matching: Vec<&Value> = rows.iter().filter(|r| dt(&r["date"]) == target).collect();
+    // Both consumers require exactly one explicitly dated source record.
+    let matching: Vec<&Value> = rows.iter().filter(|r| dt(&r["date"]) == target).collect();
+    let summary = {
+        if transaction && matching.is_empty() {
+            return Err(format!("{target} loadType={kind} 没有返回对应日期数据。").into());
+        }
         if matching.len() > 1 {
             return Err(format!(
                 "{target} loadType={kind} 返回重复日期记录，无法唯一确定数据。"

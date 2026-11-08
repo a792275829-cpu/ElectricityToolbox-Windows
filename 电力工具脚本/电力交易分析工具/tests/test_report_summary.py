@@ -159,6 +159,14 @@ class ReportSummaryTests(unittest.TestCase):
             if unit: summary.cell(row, 2, unit)
             for column, value in ((3, 300 + row), (4, row), (7, row * 2), (8, 400 + row), (9, row), (10, 500 + row), (11, row / 10)):
                 summary.cell(row, column, value)
+        # The labelled company layout must also include its real 快报 labels.
+        brief_labels = {7: ("分公司", None), 8: ("汕头", None),
+                        9: (None, "#1机组"), 10: (None, "#2机组"), 11: (None, "#3机组"),
+                        13: ("海门", None), 14: (None, "#1机组"), 15: (None, "#2机组"),
+                        16: (None, "#3机组"), 17: (None, "#4机组"), 19: ("东莞", None)}
+        for row, (plant, unit) in brief_labels.items():
+            brief.cell(row, 1, plant)
+            brief.cell(row, 2, unit)
         brief["C8"] = 120
         brief["K8"] = 0.8
         builder = MODULE.ReportBuilder("unused.xlsx")

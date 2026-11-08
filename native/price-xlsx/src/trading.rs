@@ -217,13 +217,14 @@ fn pair(s: &str) -> String {
         _ => normalized,
     }
 }
-/// Locate the 快报 row for an optional 海门 unit; 0 means the row is absent.
-fn find_brief_row(rows: &Value, unit_label: &str) -> usize {
+/// Index summary and unit labels in the thermal/renewable 快报 blocks.
+fn brief_row_index(rows: &Value) -> Result<BTreeMap<String, usize>> {
+    let mut result = BTreeMap::new();
     let mut plant = String::new();
     let mut renewable = false;
-    for r in 1..81 {
-        let l = label(cell(rows, r, 1)).trim().to_owned();
-        let u = label(cell(rows, r, 2)).trim().to_owned();
+    for r in 1..=list(rows).len().min(80) {
+        let l: String = label(cell(rows, r, 1)).chars().filter(|c| !c.is_whitespace()).collect();
+        let u: String = label(cell(rows, r, 2)).chars().filter(|c| !c.is_whitespace()).collect();
         if l.starts_with("备注") || l.starts_with("日前简析") || l.starts_with("实时简析") || l == "时刻" {
             break;
         }
@@ -232,15 +233,26 @@ fn find_brief_row(rows: &Value, unit_label: &str) -> usize {
             plant.clear();
             continue;
         }
-        if ["汕头", "海门", "东莞", "清远"].contains(&l.as_str()) {
+        let numeric_unit = u.strip_prefix('#').and_then(|v| v.strip_suffix("机组"))
+            .map(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit())).unwrap_or(false);
+        let key = if l == "分公司" {
+            if renewable { "分公司新能源".to_owned() } else { "分公司火电".to_owned() }
+        } else if !renewable && ["汕头", "海门", "东莞", "清远"].contains(&l.as_str()) {
             plant = l.clone();
+            l
+        } else if !renewable && l.is_empty() && !plant.is_empty()
+            && (numeric_unit || ["一套机组", "二套机组", "三套机组", "四套机组"].contains(&u.as_str())) {
+            format!("{plant}{u}")
+        } else if ["汕头海风", "海上风电", "鮀莲光伏", "鮀莲", "归湖光伏", "归湖"].contains(&l.as_str()) {
+            l
+        } else {
             continue;
-        }
-        if !renewable && l.is_empty() && plant == "海门" && u == unit_label {
-            return r;
+        };
+        if result.insert(key.clone(), r).is_some() {
+            return Err(format!("快报汇总区存在重复标签：{key}").into());
         }
     }
-    0
+    Ok(result)
 }
 
 fn summary_parse_report(sheets: &Value) -> Result<Value> {
@@ -259,7 +271,7 @@ fn summary_parse_report(sheets: &Value) -> Result<Value> {
     ];
     let legacy = [4, 5, 8, 9, 10, 13, 16, 17, 18, 19, 21];
     let modern = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
-    let brief_rows = [7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 19];
+    let mut brief_rows = [7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 19];
     let old = sheets.get("日前").is_some();
     let ws = if old {
         &sheets["日前"]
@@ -324,11 +336,14 @@ fn summary_parse_report(sheets: &Value) -> Result<Value> {
             missing.sort();
             return Err(format!("新版交易汇总页缺少标签：{}", missing.join("、")).into());
         }
-        let brief = &sheets["快报"];
+        let indexed = brief_row_index(&sheets["快报"])?;
+        for (i, name) in names.iter().enumerate() {
+            brief_rows[i] = *indexed.get(*name)
+                .ok_or_else(|| format!("快报汇总区缺少标签：{name}"))?;
+        }
         for extra in ["海门#5机组", "海门#6机组"] {
             if let Some(row) = found.get(extra) {
-                let unit_label = extra.strip_prefix("海门").unwrap_or(extra);
-                extra_rows.push((extra.to_string(), *row, find_brief_row(brief, unit_label)));
+                extra_rows.push((extra.to_string(), *row, indexed.get(extra).copied().unwrap_or(0)));
             }
         }
     }
