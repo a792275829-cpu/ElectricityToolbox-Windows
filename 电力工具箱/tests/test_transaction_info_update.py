@@ -182,6 +182,142 @@ class TransactionInfoUpdateTests(unittest.TestCase):
             self.assertIsNotNone(backup)
             self.assertTrue(backup.is_file())
 
+    def test_auto_repairs_blanks_then_appends_without_overwriting_values_or_formulas(self):
+        for backend in ("python", "rust"):
+            with self.subTest(backend=backend), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "fixture.xlsx"
+                self._build_fixture(path)
+                book = openpyxl.load_workbook(path)
+                sheet = book["Sheet1"]
+                sheet["E1"] = None
+                sheet["F1"] = 0
+                sheet["G1"] = "=1+2"
+                sheet["L3"] = None
+                book.save(path)
+                book.close()
+                before = path.read_bytes()
+                days = (date(2026, 9, 10), date(2026, 9, 11))
+                pairs = tuple(self.module.build_daily_load_pair(
+                    day, self._payload(day), self._payload(day - timedelta(days=3))) for day in days)
+                with mock.patch.dict("os.environ", {"TOOLBOX_DOMAIN_BACKEND": backend}), mock.patch.object(
+                    self.module, "collect_pairs", return_value=pairs,
+                ) as collect:
+                    result = self.module.update_workbook(path, None, days[-1], create_backup=True)
+                collect.assert_called_once_with(*days, config=None)
+                self.assertEqual(len(result.pairs), 1)
+                book = openpyxl.load_workbook(path)
+                try:
+                    sheet = book["Sheet1"]
+                    self.assertEqual(sheet["E1"].value, 1000)
+                    self.assertEqual(sheet["E1"].number_format, "0.0000")
+                    self.assertEqual(sheet["F1"].value, 0)
+                    self.assertEqual(sheet["G1"].value, "=1+2")
+                    self.assertEqual(sheet["H1"].value, 18)
+                    self.assertEqual(sheet["L3"].value, 3000)
+                    self.assertIsNone(sheet["E3"].value)
+                    self.assertEqual(sheet["C8"].value.date(), days[-1])
+                    self.assertEqual(sheet["J8"].value.date(), date(2026, 9, 8))
+                    self.assertEqual(book["保留工作表"]["A1"].value, "不应改动")
+                finally:
+                    book.close()
+                backup, = path.parent.glob("*.备份-*.xlsx")
+                self.assertEqual(backup.read_bytes(), before)
+                self.assertFalse(list(path.parent.glob(".*.tmp.xlsx")))
+                self.assertFalse(list(path.parent.glob(".*.rollback.xlsx")))
+
+    def test_history_only_honors_explicit_overwrite_and_always_keeps_formulas(self):
+        for backend in ("python", "rust"):
+            for overwrite in (False, True):
+                with self.subTest(backend=backend, overwrite=overwrite), tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "fixture.xlsx"
+                    self._build_fixture(path)
+                    book = openpyxl.load_workbook(path)
+                    book["Sheet1"]["L3"] = None
+                    book["Sheet1"]["F1"] = "=2+3"
+                    book.save(path)
+                    book.close()
+                    day = date(2026, 9, 10)
+                    pair = self.module.build_daily_load_pair(day, self._payload(day), self._payload(day - timedelta(days=3)))
+                    with mock.patch.dict("os.environ", {"TOOLBOX_DOMAIN_BACKEND": backend}), mock.patch.object(
+                        self.module, "collect_pairs", return_value=(pair,),
+                    ):
+                        result = self.module.update_workbook(path, day, day, overwrite=overwrite, create_backup=False)
+                    self.assertEqual(result.pairs, ())
+                    book = openpyxl.load_workbook(path)
+                    try:
+                        sheet = book["Sheet1"]
+                        self.assertEqual(sheet["E1"].value, 1000 if overwrite else 15)
+                        self.assertEqual(sheet["F1"].value, "=2+3")
+                        self.assertEqual(sheet["L3"].value, 3000)
+                        self.assertEqual(sheet["L3"].number_format, "0.0000")
+                        self.assertIsNone(sheet["C8"].value)
+                    finally:
+                        book.close()
+
+    def test_history_repair_failure_rolls_back_original_workbook(self):
+        for backend in ("python", "rust"):
+            with self.subTest(backend=backend), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "fixture.xlsx"
+                self._build_fixture(path)
+                book = openpyxl.load_workbook(path)
+                book["Sheet1"]["E1"] = None
+                book.save(path)
+                book.close()
+                original = path.read_bytes()
+                day = date(2026, 9, 10)
+                pair = self.module.build_daily_load_pair(day, self._payload(day), self._payload(day - timedelta(days=3)))
+                verify = self.module.verify_workbook
+                def fail_after_install(candidate, prepared):
+                    verify(candidate, prepared)
+                    if candidate.resolve() == path.resolve():
+                        raise RuntimeError("test readback failure")
+                with mock.patch.dict("os.environ", {"TOOLBOX_DOMAIN_BACKEND": backend}), mock.patch.object(
+                    self.module, "collect_pairs", return_value=(pair,),
+                ), mock.patch.object(self.module, "verify_workbook", side_effect=fail_after_install):
+                    with self.assertRaisesRegex(RuntimeError, "test readback failure"):
+                        self.module.update_workbook(path, None, day, create_backup=False)
+                self.assertEqual(path.read_bytes(), original)
+                self.assertEqual(list(path.parent.iterdir()), [path])
+
+    def test_auto_repairs_history_even_when_end_is_not_after_tail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture.xlsx"
+            self._build_fixture(path)
+            book = openpyxl.load_workbook(path)
+            book["Sheet1"]["E1"] = None
+            book.save(path)
+            book.close()
+            day = date(2026, 9, 10)
+            self.assertEqual(self.module.resolve_start_date(path, None), day)
+            self.assertEqual(self.module._pending_dates(path, None, day, overwrite=True), (day,))
+            with mock.patch.object(self.module, "collect_pairs", side_effect=RuntimeError("network failed")):
+                original = path.read_bytes()
+                with self.assertRaisesRegex(RuntimeError, "network failed"):
+                    self.module.update_workbook(path, None, day)
+                self.assertEqual(path.read_bytes(), original)
+
+    def test_cli_repairs_history_instead_of_short_circuiting_at_tail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture.xlsx"
+            self._build_fixture(path)
+            book = openpyxl.load_workbook(path)
+            book["Sheet1"]["E1"] = None
+            book.save(path)
+            book.close()
+            day = date(2026, 9, 10)
+            pair = self.module.build_daily_load_pair(day, self._payload(day), self._payload(day - timedelta(days=3)))
+            with mock.patch.object(sys, "argv", ["update_transaction_info.py", "--workbook", str(path),
+                                                 "--end-date", str(day), "--no-backup"]), mock.patch.object(
+                self.module, "load_config", return_value=self.module.Config(),
+            ), mock.patch.object(self.module, "collect_pairs", return_value=(pair,)):
+                self.assertEqual(self.module.main(), 0)
+            book = openpyxl.load_workbook(path)
+            try:
+                self.assertEqual(book["Sheet1"]["E1"].value, 1000)
+                self.assertEqual(book["Sheet1"]["E1"].number_format, "0.0000")
+            finally:
+                book.close()
+
     def test_resolve_start_date_requires_contiguous_append(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workbook_path = Path(directory) / "fixture.xlsx"

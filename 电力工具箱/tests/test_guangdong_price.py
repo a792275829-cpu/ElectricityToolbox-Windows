@@ -32,6 +32,25 @@ class GuangdongDataUpdateTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.update = load_script("test_guangdong_update", "update_gdfire_data.py")
 
+    def test_login_encrypts_unicode_password_without_external_commands(self):
+        import base64
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import padding, rsa
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        public = base64.b64encode(key.public_key().public_bytes(
+            serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo,
+        )).decode("ascii")
+        password = "隔离测试密码-test"
+        with mock.patch.dict("os.environ", {"PATH": ""}), mock.patch("subprocess.run", side_effect=AssertionError("external command")):
+            client = self.update.GDFireClient()
+            with mock.patch.object(client, "_json_request", side_effect=[{"data": public}, {"retCode": "T200"}]) as request:
+                client.login("dummy", password)
+        login = request.call_args
+        self.assertEqual(login.args, ("/usercenter/web/login",))
+        self.assertEqual(login.kwargs["params"]["loginMode"], 2)
+        ciphertext = base64.b64decode(login.kwargs["params"]["password"])
+        self.assertEqual(key.decrypt(ciphertext, padding.PKCS1v15()).decode("utf-8"), password)
+
     def test_modeling_frame_drops_actual_and_realtime_leakage(self) -> None:
         frame = pd.DataFrame(
             {

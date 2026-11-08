@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 from copy import copy
 from datetime import date, datetime, time as datetime_time, timedelta
 import hashlib
@@ -11,9 +10,7 @@ import math
 import os
 from pathlib import Path
 import ssl
-import subprocess
 import sys
-import tempfile
 import urllib.parse
 import urllib.request
 from uuid import uuid4
@@ -142,42 +139,15 @@ class GDFireClient:
         public_key = self._json_request(
             "/usercenter/web/pf/login/info/publicKey"
         )["data"]
-        pem = (
-            "-----BEGIN PUBLIC KEY-----\n"
-            + "\n".join(
-                public_key[index : index + 64]
-                for index in range(0, len(public_key), 64)
-            )
-            + "\n-----END PUBLIC KEY-----\n"
-        )
-        with tempfile.NamedTemporaryFile("w", delete=False) as handle:
-            handle.write(pem)
-            key_path = Path(handle.name)
-        try:
-            encrypted = subprocess.run(
-                [
-                    "openssl",
-                    "pkeyutl",
-                    "-encrypt",
-                    "-pubin",
-                    "-inkey",
-                    str(key_path),
-                    "-pkeyopt",
-                    "rsa_padding_mode:pkcs1",
-                ],
-                input=password.encode("utf-8"),
-                capture_output=True,
-                check=True,
-            ).stdout
-        finally:
-            key_path.unlink(missing_ok=True)
+        from toolbox_qingneng_login import rsa_encrypt_password
+        encrypted = rsa_encrypt_password(public_key, password)
         self._json_request(
             "/usercenter/web/login",
             method="POST",
             params={
                 "loginMode": 2,
                 "username": username,
-                "password": base64.b64encode(encrypted).decode("ascii"),
+                "password": encrypted,
             },
         )
 

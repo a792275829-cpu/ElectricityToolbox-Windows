@@ -64,7 +64,7 @@ class RustServiceTests(unittest.TestCase):
         self.fail("Rust service exited without a reply")
 
     def start(self, **changes):
-        params = dict(tool_id="online-energy", action="run", request_id="request-1", values={"run_date": "2026-10-27"})
+        params = dict(tool_id="online-energy", action="run", request_id="request-1", values={"start_date": "2026-10-27", "end_date": "2026-10-27"})
         params.update(changes)
         return self.call("start", params)
 
@@ -79,7 +79,7 @@ class RustServiceTests(unittest.TestCase):
 
     def test_protocol_and_streamed_worker_results_are_native(self):
         self.assertEqual(self.call("ping")["engine"], "rust")
-        self.assertEqual(len(self.call("catalog")), 15)
+        self.assertEqual(len(self.call("catalog")), 16)
         task_id = self.start()
         self.assertEqual(self.start(), task_id)
         task = self.finish(task_id)
@@ -89,7 +89,7 @@ class RustServiceTests(unittest.TestCase):
         self.assertTrue(any("中文任务日志" in row["message"] for row in events["events"]))
         self.assertEqual(self.call("events", {"after": events["cursor"]})["events"], [])
         with self.assertRaisesRegex(ValueError, "不同参数"):
-            self.start(values={"run_date": "2026-10-28"})
+            self.start(values={"start_date": "2026-10-28", "end_date": "2026-10-28"})
 
     def test_real_cancellation_owns_worker_business_and_descendant(self):
         self.script.write_text('import os,subprocess,sys,time\nchild=subprocess.Popen([sys.executable,"-c","import time;time.sleep(60)"],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\nprint(f"owned:{os.getpid()}:{os.getppid()}:{child.pid}",flush=True)\ntime.sleep(60)\n', encoding="utf-8")
@@ -118,6 +118,28 @@ class RustServiceTests(unittest.TestCase):
         from toolbox.tasks.errors import RemoteTaskError
         streamed = "".join(row["message"] for row in events["events"] if row["kind"] == "log")
         self.assertNotIn("Traceback", RemoteTaskError(task["error"], streamed).log_details)
+
+    def test_private_batch_upload_refuses_cancellation_until_completion(self):
+        # Run a disposable Node uploader, never the real website uploader.
+        from toolbox.runtime import ToolPaths
+        uploader = ToolPaths(self.workspace).private_uploader
+        uploader.parent.mkdir(parents=True)
+        marker = self.workspace / "batch-completed.txt"
+        uploader.write_text(
+            "import fs from 'node:fs';\n"
+            "await new Promise(resolve => setTimeout(resolve, 1000));\n"
+            f"fs.writeFileSync({json.dumps(str(marker))}, 'complete');\n", encoding="utf-8")
+        file = self.workspace / "sample.xlsx"
+        file.write_bytes(b'isolated fixture')
+        task_id = self.start(tool_id='private-batch-upload', values=dict(files=[str(file)]), confirmed=True)
+        snapshot = next(task for task in self.call('tasks') if task['id'] == task_id)
+        self.assertFalse(snapshot['cancellable'])
+        self.assertFalse(self.call('cancel', dict(task_id=task_id)))
+        with self.assertRaisesRegex(ValueError, '不可安全中断'):
+            self.call('shutdown', {'cancel': True})
+        result = self.finish(task_id)
+        self.assertEqual(result['state'], 'succeeded', result)
+        self.assertEqual(marker.read_text(), 'complete')
 
     def test_uninterruptible_write_refuses_cancellation_and_shutdown(self):
         target = self.workspace / "市场表更新/update_market_table.py"

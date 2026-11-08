@@ -81,10 +81,10 @@ class TransactionInfoUpdatePage(ToolPage):
         ttk.Label(
             mapping,
             text=(
-                "日前 D，实际 D-3，按日期接续更新 Sheet1。\n"
+                "日前 D，实际 D-3，按日期更新 Sheet1；开始留空只补空值并接续。\n"
                 "左侧日前：统调、B类、A类、地方电、粤港联络线；西电行保留但数值留空。\n"
                 "日前 B 类直接取网站数值，不扣减实际西电。\n"
-                "右侧实际：写入六类数据。每类依次为最大、最小、平均、总电量。"
+                "右侧实际：写入六类数据。每类依次为最大、最小、平均、总电量。\n明确填写开始日期时按覆盖选项处理已有数值，公式始终保留。"
             ),
             justify="left",
         ).grid(row=0, column=0, sticky="w")

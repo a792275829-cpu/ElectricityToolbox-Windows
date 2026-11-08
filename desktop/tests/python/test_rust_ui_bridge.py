@@ -62,7 +62,8 @@ class RustUiBridgeTests(unittest.TestCase):
                      patch("toolbox.pages.messagebox.showinfo"), patch("toolbox.pages.messagebox.showerror"):
                     app = ToolboxApp(workspace=workspace, registry=registry)
                     page = app.pages["导出上网电量"]
-                    page.run_date.set("2026-10-27")
+                    page.start_date.set("2026-10-27")
+                    page.end_date.set("2026-10-27")
                     for _ in range(2):
                         page.start_export()
                         deadline = time.monotonic() + 15

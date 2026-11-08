@@ -17,10 +17,7 @@ def dispatch(workspace, method, params):
     if method == "__prepare_start":
         tool, action = params.get("tool_id"), params.get("action", "run")
         values = validate(ToolPaths(workspace), tool, action, params.get("values", {}))
-        writable = tool in {"market-table", "transaction-info", "power-benefit", "spot-price", "group-upload"}
-        cancellable = action not in {"run", "update"} or not (
-            writable or tool in {"wps-writer", "guangdong-price"}
-            or tool == "summary-upload" and values["mode"] != "summary")
+        cancellable = service.cancellable(tool, action, values)
         return dict(values=values, confirmation=service.confirmation(tool, action, values),
                     name=service._tools[tool]["name"], cancellable=cancellable,
                     python=python_executable(), worker=str(ROOT / "desktop/python/task_worker.py"))

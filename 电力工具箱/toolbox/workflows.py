@@ -227,6 +227,8 @@ def execute(paths, tool_id, action, p):
     for command, cwd in command_list:
         subprocess.run(command, cwd=cwd, check=True)
     if command_list:
+        if action == "login":
+            return dict(message="登录已完成", outputs=[])
         outputs = []
         if tool_id == "daily-pdf-parser":
             if not Path(p["output_path"]).is_file():

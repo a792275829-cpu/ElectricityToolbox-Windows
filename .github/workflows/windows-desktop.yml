@@ -61,11 +61,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest discover -s desktop/tests/python -p test_windows_update_build.py -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Service and original UI contract regression
+        run: |
+          foreach ($module in @('test_service.py', 'test_ui_layers.py', 'test_rust_ui_bridge.py')) {
+            python -m unittest discover -s desktop/tests/python -p $module -v
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Workbook and native backend regression
         working-directory: 电力工具箱
         run: |
           $env:PYTHONPATH = (Resolve-Path '..').Path
-          python -m unittest tests.test_native_excel tests.test_native_updates tests.test_workbook_commit tests.test_report_output_lock tests.test_date_inputs -v
+          python -m unittest tests.test_native_excel tests.test_native_updates tests.test_workbook_commit tests.test_report_output_lock tests.test_date_inputs tests.test_transaction_info_update tests.test_guangdong_price -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: npm ci
         working-directory: desktop

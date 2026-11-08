@@ -49,7 +49,7 @@ class ServiceTaskTests(unittest.TestCase):
         script.parent.mkdir()
         script.write_text('import sys\nprint("sample-output",flush=True)\n')
         self.service = ToolboxService(self.root)
-        self.params = dict(tool_id='online-energy', action='run', request_id='one', values=dict(run_date='2026-10-20'))
+        self.params = dict(tool_id='online-energy', action='run', request_id='one', values=dict(start_date='2026-10-20', end_date='2026-10-20'))
     def tearDown(self):
         self.service.registry.shutdown(timeout=5)
         self.temp.cleanup()
@@ -70,7 +70,7 @@ class ServiceTaskTests(unittest.TestCase):
         self.assertFalse(self.service.call('events', dict(after=batch['cursor']))['events'])
         self.assertEqual(self.service.call('start', self.params), task_id)
         with self.assertRaisesRegex(ValueError, '不同参数'):
-            self.service.call('start', {**self.params, 'values': {'run_date': '2026-10-21'}})
+            self.service.call('start', {**self.params, 'values': {'start_date': '2026-10-21', 'end_date': '2026-10-21'}})
     def test_business_failure_retains_first_exception_and_exit_code(self):
         self.service.paths.online_energy.write_text('raise RuntimeError("first-business-failure")\n')
         task_id = self.service.call('start', self.params)
@@ -150,7 +150,7 @@ class ServiceTaskTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.service.call('start', {**self.params, 'action': 'shell'})
         with self.assertRaises(ValueError):
-            self.service.call('start', {**self.params, 'values': {'run_date':'2026-10-20', 'command':'echo wrong'}})
+            self.service.call('start', {**self.params, 'values': {'start_date':'2026-10-20', 'end_date':'2026-10-20', 'command':'echo wrong'}})
     def test_credentials_api_never_returns_password(self):
         with patch('toolbox.service.CredentialStore') as store:
             store.return_value.load.return_value = dict(username='sample', password='private')
@@ -184,7 +184,7 @@ class ServiceTaskTests(unittest.TestCase):
                     raise TimeoutError('response lost after acceptance')
                 return result
         registry = RemoteTaskRegistry(UncertainTransport())
-        values = dict(run_date='2026-10-20')
+        values = dict(start_date='2026-10-20', end_date='2026-10-20')
         with self.assertRaises(TimeoutError):
             registry.execute_remote('online-energy', 'run', values, CancellationToken(), lambda _: None)
         task_id = service.registry.snapshots()[0].task_id
@@ -192,6 +192,27 @@ class ServiceTaskTests(unittest.TestCase):
         result = registry.execute_remote('online-energy', 'run', values, CancellationToken(), lambda _: None)
         self.assertTrue(result)
         self.assertEqual(len(service.registry.snapshots()), 1)
+    def test_login_does_not_require_business_outputs_or_overwrite_confirmation(self):
+        from toolbox.workflows import execute
+        for tool_id in ('daily-pdf-parser', 'summary-upload'):
+            with self.subTest(tool_id=tool_id):
+                values = validate(ToolPaths(ROOT), tool_id, 'login', {})
+                self.assertEqual(ToolboxService.confirmation(tool_id, 'login', values), '')
+                with patch('toolbox.workflows.subprocess.run') as run:
+                    result = execute(ToolPaths(ROOT), tool_id, 'login', values)
+                run.assert_called_once()
+                self.assertEqual(result['outputs'], [])
+
+    def test_private_upload_is_noninterruptible_in_both_services(self):
+        from desktop.python.service_compat import dispatch
+        file = self.root / 'sample.xlsx'
+        file.write_bytes(b'isolated test input')
+        params = dict(tool_id='private-batch-upload', action='run', values=dict(files=[str(file)]))
+        prepared = dispatch(ROOT, '__prepare_start', params)
+        self.assertFalse(prepared['cancellable'])
+        self.assertFalse(ToolboxService.cancellable('private-batch-upload', 'run', prepared['values']))
+        self.assertTrue(ToolboxService.cancellable('private-batch-upload', 'login', {}))
+
     def test_wps_inspection_forwards_the_original_range_requests(self):
         from toolbox.workflows import execute_wps
         from unittest.mock import Mock
@@ -217,9 +238,9 @@ class ServiceTaskTests(unittest.TestCase):
             book.save(station / f'1号机{label}交易结果查询({day}).xlsx')
             book.close()
         self.service = ToolboxService(ROOT)
-        output = source / '汇总.xlsx'
+        output = source / f'{source.name}_汇总.xlsx'
         task_id = self.service.call('start', dict(tool_id='summary-upload', action='run',
-            request_id='summary-sample', confirmed=True, values=dict(input_dir=str(source), output_file=str(output), mode='summary')))
+            request_id='summary-sample', confirmed=True, values=dict(input_dir=str(source), mode='summary')))
         snapshot = self.finish(task_id)
         self.assertEqual(snapshot.state.value, 'succeeded', snapshot.error)
         book = load_workbook(output, data_only=True)

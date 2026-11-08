@@ -98,6 +98,13 @@ class PreparedWorkbook:
     first_row: int
     last_row: int
     pairs: tuple[DailyLoadPair, ...]
+    cell_expectations: tuple[tuple[str, int | float, str], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class WorkbookGroup:
+    tail: WorkbookTail
+    cells: dict[str, tuple[Any, str]]
 
 
 def log(message: str) -> None:
@@ -329,57 +336,105 @@ def _as_date(value: Any, *, epoch) -> date | None:
     return None
 
 
-def inspect_workbook_tail(path: Path) -> WorkbookTail:
+def _read_workbook_groups(path: Path) -> dict[date, WorkbookGroup]:
     path = Path(path).expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(f"Excel 文件不存在：{path}")
     if path.suffix.lower() != ".xlsx":
         raise ValueError(f"仅支持 .xlsx 工作簿：{path}")
-    workbook = load_value_workbook(path, data_only=True, read_only=True, native_in_auto=False)
+    workbook = openpyxl.load_workbook(path, data_only=False, read_only=True)
     try:
         if SHEET_NAME not in workbook.sheetnames:
             raise RuntimeError(f"工作簿中没有工作表 {SHEET_NAME}。")
-        sheet = workbook[SHEET_NAME]
+        groups = {}
         tail = None
-        labels, right_labels = [], []
-        for row, values in enumerate(sheet.iter_rows(
-            min_row=1, max_row=sheet.max_row, min_col=3, max_col=11, values_only=True,
+        cells, labels, right_labels = {}, [], []
+
+        def finish_group():
+            if tail is None:
+                return
+            if tuple(labels) != CATEGORY_ORDER or tuple(right_labels) != CATEGORY_ORDER:
+                raise RuntimeError(f"最后一组字段顺序异常或历史组不完整：第 {tail.start_row} 行。")
+            if tail.day_ahead_date - tail.actual_date != timedelta(days=DATE_OFFSET_DAYS):
+                raise RuntimeError(f"第 {tail.start_row} 行日期不符合 D / D-{DATE_OFFSET_DAYS}。")
+            if tail.day_ahead_date in groups:
+                raise ValueError(f"工作簿存在重复日前日期：{tail.day_ahead_date}")
+            groups[tail.day_ahead_date] = WorkbookGroup(tail, dict(cells))
+
+        for row, values in enumerate(workbook[SHEET_NAME].iter_rows(
+            min_col=3, max_col=15,
         ), start=1):
-            if values[1] == "统调" and values[8] == "统调":
-                day_ahead_date = _as_date(values[0], epoch=workbook.epoch)
-                actual_date = _as_date(values[7], epoch=workbook.epoch)
-                if day_ahead_date and actual_date:
-                    tail = WorkbookTail(row, day_ahead_date, actual_date)
-                    labels, right_labels = [], []
+            if values[1].value == "统调" and values[8].value == "统调":
+                day = _as_date(values[0].value, epoch=workbook.epoch)
+                actual = _as_date(values[7].value, epoch=workbook.epoch)
+                if day and actual:
+                    finish_group()
+                    tail = WorkbookTail(row, day, actual)
+                    cells, labels, right_labels = {}, [], []
             if tail is not None and row < tail.start_row + len(CATEGORY_ORDER):
-                labels.append(values[1])
-                right_labels.append(values[8])
-        if tail is None:
+                category = CATEGORY_ORDER[row - tail.start_row]
+                labels.append(values[1].value)
+                right_labels.append(values[8].value)
+                columns = (() if category == "西电" else (5, 6, 7, 8)) + (12, 13, 14, 15)
+                for column in columns:
+                    cell = values[column - 3]
+                    # Preserve formulas regardless of the overwrite option.
+                    if cell.data_type != "f":
+                        cells[f"{get_column_letter(column)}{row}"] = (cell.value, cell.number_format or "General")
+        finish_group()
+        if not groups:
             raise RuntimeError(f"{SHEET_NAME} 中未找到可接续的日前/实际数据组。")
-        if tail.day_ahead_date - tail.actual_date != timedelta(days=DATE_OFFSET_DAYS):
-            raise RuntimeError(
-                f"最后一组日期不符合 D / D-{DATE_OFFSET_DAYS}："
-                f"日前 {tail.day_ahead_date} / 实际 {tail.actual_date}"
-            )
-        labels = tuple(labels + [None] * (len(CATEGORY_ORDER) - len(labels)))
-        right_labels = tuple(right_labels + [None] * (len(CATEGORY_ORDER) - len(right_labels)))
-        if labels != CATEGORY_ORDER or right_labels != CATEGORY_ORDER:
-            raise RuntimeError(
-                f"最后一组字段顺序异常：日前 {labels} / 实际 {right_labels}"
-            )
-        return tail
+        if list(groups) != sorted(groups):
+            raise ValueError("工作簿日期组未按日期递增，停止写入。")
+        return groups
     finally:
         workbook.close()
 
 
+def inspect_workbook_tail(path: Path) -> WorkbookTail:
+    return next(reversed(_read_workbook_groups(path).values())).tail
+
+
 def resolve_start_date(path: Path, requested: date | None) -> date:
-    expected = inspect_workbook_tail(path).day_ahead_date + timedelta(days=1)
-    if requested is not None and requested != expected:
-        raise ValueError(
-            f"为保持日期连续，开始日期必须是 {expected.isoformat()}；"
-            f"当前输入为 {requested.isoformat()}。"
-        )
-    return expected
+    groups = _read_workbook_groups(path)
+    expected = max(groups) + timedelta(days=1)
+    if requested is not None:
+        if requested not in groups and requested != expected:
+            raise ValueError(f"开始日期必须是已有日期组或待接续日期；新数据开始日期必须是 {expected.isoformat()}。")
+        return requested
+    return next((day for day, group in groups.items()
+                 if any(value in (None, "") for value, _ in group.cells.values())), expected)
+
+
+def _pending_dates(path: Path, start_date: date | None, end_date: date, *, overwrite: bool) -> tuple[date, ...]:
+    groups = _read_workbook_groups(path)
+    tail_day = max(groups)
+    if start_date is not None:
+        resolve_start_date(path, start_date)
+        if end_date < start_date:
+            raise ValueError("结束日期不能早于开始日期。")
+    history = [day for day, group in groups.items()
+               if day <= end_date and (start_date is None or day >= start_date)
+               and any(value in (None, "") or (start_date is not None and overwrite)
+                       for value, _ in group.cells.values())]
+    future = date_range(tail_day + timedelta(days=1), end_date) if end_date > tail_day else ()
+    return tuple(history) + future
+
+
+def _collect_pending_pairs(days: tuple[date, ...], *, config: Config | None) -> tuple[DailyLoadPair, ...]:
+    # Fetch only the incomplete historical dates and consecutive new intervals.
+    pairs = []
+    start = previous = None
+    for day in days:
+        if previous is not None and day != previous + timedelta(days=1):
+            pairs.extend(collect_pairs(start, previous, config=config))
+            start = None
+        if start is None:
+            start = day
+        previous = day
+    if start is not None:
+        pairs.extend(collect_pairs(start, previous, config=config))
+    return tuple(pairs)
 
 
 MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -562,7 +617,9 @@ def _write_patched_workbook(
     *,
     template_start: int,
     pairs: tuple[DailyLoadPair, ...],
+    changes: dict[str, int | float] | None = None,
 ) -> tuple[int, int]:
+    changes = changes or {}
     sheet_part = xlsx_sheet_paths(original).get(SHEET_NAME)
     if not sheet_part:
         raise RuntimeError(f"XLSX 包内未找到工作表：{SHEET_NAME}")
@@ -571,22 +628,40 @@ def _write_patched_workbook(
         epoch = workbook.epoch
     finally:
         workbook.close()
-    if native_workbook.patch_package(original, temporary, {},
-            append={SHEET_NAME: _native_append_rows(template_start, pairs, epoch)}) is not None:
+    if native_workbook.patch_package(original, temporary, {SHEET_NAME: changes},
+            append={SHEET_NAME: _native_append_rows(template_start, pairs, epoch)} if pairs else {}) is not None:
         verify_package_preservation(original, temporary, sheet_part)
-        first_row = template_start + GROUP_HEIGHT
-        return first_row, first_row + (len(pairs) - 1) * GROUP_HEIGHT + 5
+        first_row = template_start + GROUP_HEIGHT if pairs else template_start
+        return first_row, first_row + (len(pairs) - 1) * GROUP_HEIGHT + 5 if pairs else first_row + 5
     bounds: tuple[int, int] | None = None
     with zipfile.ZipFile(original, "r") as source, zipfile.ZipFile(temporary, "w") as output:
+        output.comment = source.comment
         for info in source.infolist():
             data = source.read(info.filename)
             if info.filename == sheet_part:
-                data, first_row, last_row = patch_sheet_xml(
-                    data,
-                    template_start=template_start,
-                    pairs=pairs,
-                    epoch=epoch,
-                )
+                if changes:
+                    row_changes = {}
+                    for reference, number in changes.items():
+                        row_changes.setdefault(int(re.search(r"\d+$", reference)[0]), {})[reference] = number
+                    found = set()
+                    def patch_row(match):
+                        row = int(match[1])
+                        text = match[0]
+                        for reference, number in row_changes.get(row, {}).items():
+                            text = _replace_numeric_cell(text, reference, number)
+                            found.add(reference)
+                        return text
+                    text = re.sub(r'<row\b(?=[^>]*\br="(\d+)")[^>]*>.*?</row>',
+                                  patch_row, data.decode("utf-8"), flags=re.DOTALL)
+                    if found != set(changes):
+                        raise RuntimeError("工作表缺少待补录行，停止写入。")
+                    data = text.encode("utf-8")
+                if pairs:
+                    data, first_row, last_row = patch_sheet_xml(
+                        data, template_start=template_start, pairs=pairs, epoch=epoch,
+                    )
+                else:
+                    first_row, last_row = template_start, template_start + 5
                 bounds = (first_row, last_row)
             output.writestr(info, data)
     if bounds is None:
@@ -606,11 +681,15 @@ def verify_workbook(path: Path, prepared: PreparedWorkbook) -> None:
     workbook = load_value_workbook(path, data_only=True, read_only=True, native_in_auto=False)
     try:
         columns = (3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15)
-        snapshots = read_cell_snapshots(workbook, (
+        snapshots = read_cell_snapshots(workbook, [
             (SHEET_NAME, f"{get_column_letter(column)}{row}")
             for row in range(prepared.first_row, prepared.first_row + len(prepared.pairs) * GROUP_HEIGHT)
             for column in columns
-        ))
+        ] + [(SHEET_NAME, reference) for reference, _, _ in prepared.cell_expectations])
+        for reference, expected, expected_format in prepared.cell_expectations:
+            actual, number_format = snapshots[(SHEET_NAME, reference)]
+            if not _values_equal(actual, expected) or number_format != expected_format:
+                raise RuntimeError(f"历史补录数值或格式回读失败：{SHEET_NAME}!{reference}")
 
         def value(row, column):
             return snapshots[(SHEET_NAME, f"{get_column_letter(column)}{row}")][0]
@@ -652,44 +731,52 @@ def prepare_workbook(path: Path, pairs: Iterable[DailyLoadPair], *, overwrite: b
     pair_tuple = tuple(pairs)
     if not pair_tuple:
         raise ValueError("没有可写入的日期数据。")
-    if not overwrite:
-        # Windows 侧为纯表尾接续模型，只追加新日期组、不改动已有行；
-        # --skip-existing 语义天然满足，此处显式记录，避免误以为会覆盖历史数据。
-        log("已跳过覆盖：仅从表尾接续，不改动已有非空单元格。")
     source_fingerprint = workbook_fingerprint(original)
-    tail = inspect_workbook_tail(original)
-    expected_start = tail.day_ahead_date + timedelta(days=1)
-    if pair_tuple[0].day_ahead_date != expected_start:
-        raise ValueError(
-            f"新数据必须从 {expected_start.isoformat()} 开始，"
-            f"实际为 {pair_tuple[0].day_ahead_date.isoformat()}。"
-        )
-    for previous, current in zip(pair_tuple, pair_tuple[1:]):
-        if current.day_ahead_date != previous.day_ahead_date + timedelta(days=1):
-            raise ValueError("待写入的日前日期必须连续。")
+    groups = _read_workbook_groups(original)
+    tail = next(reversed(groups.values())).tail
+    days = [pair.day_ahead_date for pair in pair_tuple]
+    if days != sorted(set(days)):
+        raise ValueError("待写入日期必须递增且不重复。")
+    appended = tuple(pair for pair in pair_tuple if pair.day_ahead_date > tail.day_ahead_date)
+    expected = tail.day_ahead_date + timedelta(days=1)
+    for pair in appended:
+        if pair.day_ahead_date != expected:
+            raise ValueError(f"新数据必须从 {expected.isoformat()} 开始并保持日期连续。")
+        expected += timedelta(days=1)
+    changes, expectations = {}, []
     for pair in pair_tuple:
         if pair.day_ahead_date - pair.actual_date != timedelta(days=DATE_OFFSET_DAYS):
             raise ValueError("每组数据必须满足日前 D、实际 D-3。")
+        if pair in appended:
+            continue
+        group = groups.get(pair.day_ahead_date)
+        if group is None:
+            raise ValueError(f"工作簿中没有日期组：{pair.day_ahead_date}")
+        for offset, category in enumerate(CATEGORY_ORDER):
+            row = group.tail.start_row + offset
+            values = dict(zip(("L", "M", "N", "O"), pair.actual[category]))
+            if category != "西电":
+                values.update(zip(("E", "F", "G", "H"), pair.day_ahead[category]))
+            for column, value in values.items():
+                reference = f"{column}{row}"
+                if reference not in group.cells:
+                    continue  # Existing formulas are always read-only.
+                old, number_format = group.cells[reference]
+                if old in (None, "") or overwrite:
+                    changes[reference] = value
+                    expectations.append((reference, value, number_format))
     temporary = original.with_name(f".{original.stem}.{uuid.uuid4().hex}.tmp.xlsx")
     try:
         first_row, last_row = _write_patched_workbook(
-            original,
-            temporary,
-            template_start=tail.start_row,
-            pairs=pair_tuple,
+            original, temporary, template_start=tail.start_row, pairs=appended, changes=changes,
         )
         prepared = PreparedWorkbook(
-            original=original,
-            temporary=temporary,
-            source_fingerprint=source_fingerprint,
-            first_row=first_row,
-            last_row=last_row,
-            pairs=pair_tuple,
+            original, temporary, source_fingerprint, first_row, last_row, appended, tuple(expectations),
         )
         verify_workbook(temporary, prepared)
         assert_workbook_unchanged(original, source_fingerprint)
         return prepared
-    except Exception:
+    except BaseException:
         temporary.unlink(missing_ok=True)
         raise
 
@@ -714,21 +801,22 @@ def update_workbook(
     config: Config | None = None,
     create_backup: bool = True,
     overwrite: bool = True,
-) -> PreparedWorkbook:
-    start = resolve_start_date(workbook_path, start_date)
-    if end_date < start:
-        raise ValueError(
-            f"结束日期 {end_date.isoformat()} 早于待接续日期 "
-            f"{start.isoformat()}，无需更新。"
-        )
-    pairs = collect_pairs(start, end_date, config=config)
-    prepared = prepare_workbook(workbook_path, pairs, overwrite=overwrite)
+) -> PreparedWorkbook | None:
+    original = Path(workbook_path).expanduser().resolve()
+    source_fingerprint = workbook_fingerprint(original)
+    days = _pending_dates(original, start_date, end_date, overwrite=overwrite)
+    if not days:
+        log("无需更新：所选日期范围没有待补空值或新日期。")
+        return None
+    pairs = _collect_pending_pairs(days, config=config)
+    if tuple(pair.day_ahead_date for pair in pairs) != days:
+        raise RuntimeError("抓取日期与待更新日期不一致，停止写入。")
+    assert_workbook_unchanged(original, source_fingerprint)
+    # With no explicit range, preserve all populated historical values.
+    prepared = prepare_workbook(original, pairs, overwrite=overwrite and start_date is not None)
     backup = commit_prepared_workbook(prepared, create_backup=create_backup)
-    log(
-        f"已更新 {prepared.original}：日前 {start.isoformat()} 至 "
-        f"{end_date.isoformat()}，实际 {(start - timedelta(days=3)).isoformat()} 至 "
-        f"{(end_date - timedelta(days=3)).isoformat()}；写入第 {prepared.first_row}-{prepared.last_row} 行。"
-    )
+    log(f"已更新 {prepared.original}：日前 {days[0]} 至 {days[-1]}，实际日期为日前 D-3；"
+        f"历史写入 {len(prepared.cell_expectations)} 格，新增 {len(prepared.pairs)} 组。")
     if backup:
         log(f"备份：{backup}")
     return prepared
@@ -766,7 +854,7 @@ def main() -> int:
         description="抓取现货运行日报市场负荷信息并接续更新交易系统信息收集表"
     )
     parser.add_argument("--workbook", type=Path, default=DEFAULT_WORKBOOK)
-    parser.add_argument("--start-date", help="日前开始日期；不填时自动从工作簿最后日期+1接续")
+    parser.add_argument("--start-date", help="日前开始日期；留空先补历史空值，再从表尾接续（保留已有值与公式）")
     parser.add_argument(
         "--end-date",
         default=(date.today() - timedelta(days=1)).isoformat(),
@@ -784,25 +872,15 @@ def main() -> int:
             interactive_login(config)
             return 0
         requested_start = validate_date(args.start_date) if args.start_date else None
-        start_date = resolve_start_date(args.workbook, requested_start)
         end_date = validate_date(args.end_date)
-        if end_date < start_date:
-            log(
-                f"无需更新：工作簿已接续至日前 "
-                f"{(start_date - timedelta(days=1)).isoformat()}，"
-                f"所选结束日期为 {end_date.isoformat()}。"
-            )
-            return 0
         if args.dry_run:
-            pairs = collect_pairs(start_date, end_date, config=config)
-            log(
-                f"校验通过：{len(pairs)} 组，日前 {start_date} 至 {end_date}，"
-                f"实际 {start_date - timedelta(days=3)} 至 {end_date - timedelta(days=3)}。"
-            )
+            days = _pending_dates(args.workbook, requested_start, end_date, overwrite=not args.skip_existing)
+            pairs = _collect_pending_pairs(days, config=config)
+            log(f"校验通过：{len(pairs)} 组；仅抓取校验，未写入 Excel。")
             return 0
         update_workbook(
             args.workbook,
-            start_date,
+            requested_start,
             end_date,
             config=config,
             create_backup=not args.no_backup,
