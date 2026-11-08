@@ -109,6 +109,7 @@ Start-Process -Wait -FilePath "dist\windows\ElectricityToolbox_<版本>_windows_
 | --- | --- |
 | `.venv/`、`runtime/`、`dist/`、`desktop/src-tauri/target/`、`native/price-xlsx/target/` | 本机保留，Git 忽略 |
 | `.toolbox/`（源码调试数据、独立 Python 运行时） | 本机保留，Git 忽略 |
+| `.toolbox/standalone-python/` | `.venv` 的基础解释器（`.venv/pyvenv.cfg` 的 `home` 指向它），**删掉会让整个虚拟环境立即失效**，也用作打包 `-PythonRoot` |
 | `dist/windows/` 历史安装包 | 只保留最近几个版本作为补丁基准，其余可回收 |
 | 登录态、`.browser-profile`、`config.json`、真实工作簿 | 保留在 Git 忽略的本地路径，绝不入库、不写入日志 |
 
@@ -123,6 +124,7 @@ Start-Process -Wait -FilePath "dist\windows\ElectricityToolbox_<版本>_windows_
 ### 运行态卫生
 
 - 同一份源码不要同时开两个工具箱实例（一个 `.venv`、一个安装包 runtime 会互抢配置与锁）。
+- 清理前先确认 `.venv/pyvenv.cfg` 的 `home` 指向哪个目录：若指向某个待删目录，先把它迁到 `.toolbox/standalone-python` 再改 `pyvenv.cfg`，否则删完虚拟环境就废了。
 - 自动化浏览器用完即退，避免 headless Chrome 长期占用 `9222` 端口与 profile 目录。
 - 调试版与正式安装版的数据目录不同，排查问题时先确认当前实例用的是哪一个。
 
