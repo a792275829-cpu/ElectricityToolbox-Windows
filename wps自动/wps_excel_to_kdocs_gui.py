@@ -2288,6 +2288,9 @@ class WpsWriterFrame(ttk.Frame):
         self.configs: list[DocumentConfig] = []
         self._drain_after_id: str | None = None
         self._login_poll_after_id: str | None = None
+        self._pending_login = False
+        self._pending_login_url: str | None = None
+        self._browser_worker_starts_login = False
 
         self.recent_urls: list[str] = []
         self.document_titles: dict[str, str] = {}
@@ -2673,7 +2676,12 @@ class WpsWriterFrame(ttk.Frame):
 
     def start_wps_browser(self, initial_url: str | None = None) -> None:
         self.browser_mode.set("managed_cdp")
-        self.save_current_config()
+        try:
+            self.save_current_config()
+        except OSError as exc:
+            # 配置写不进去（安装目录只读、文件被占用）时仍然必须打开登录浏览器，
+            # 否则点击「登录 WPS」会整段回调中断、看不出任何反应。
+            self.log(f"配置未能保存，仍继续打开登录浏览器：{exc}")
         self._run_browser_action(start=True, initial_url=initial_url)
 
     def check_wps_browser(self, *, quiet: bool = False) -> None:
@@ -2693,8 +2701,9 @@ class WpsWriterFrame(ttk.Frame):
             self._login_poll_after_id = self.after(750, self._poll_login_status)
 
     def _has_pending_work(self) -> bool:
-        return any(thread is not None and thread.is_alive()
-                   for thread in (self.worker, self.browser_worker)) or any(
+        return self._pending_login or any(
+            thread is not None and thread.is_alive()
+            for thread in (self.worker, self.browser_worker)) or any(
             not pending.empty() for pending in (
                 self.log_queue, self.login_event_queue,
                 self.browser_event_queue, self._remote_messages,
@@ -2715,21 +2724,66 @@ class WpsWriterFrame(ttk.Frame):
         self._login_poll_after_id = None
         if not self.winfo_ismapped():
             return
-        if not (self.worker and self.worker.is_alive()):
+        # 登录请求（排队中或正在打开浏览器）优先：此时再起一次状态轮询只会
+        # 抢走浏览器进程，让登录窗口迟迟不出现。
+        if not self._login_in_progress() and not (self.worker and self.worker.is_alive()):
             self.check_wps_browser(quiet=True)
         self._login_poll_after_id = self.after(LOGIN_STATUS_POLL_MS, self._poll_login_status)
+
+    def _login_in_progress(self) -> bool:
+        if self._pending_login:
+            return True
+        return bool(
+            self._browser_worker_starts_login
+            and self.browser_worker is not None
+            and self.browser_worker.is_alive()
+        )
+
+    def _queue_login(self, initial_url: str | None) -> None:
+        """Remember a click that arrived while a background check was running."""
+        if self._pending_login:
+            # 重复点击只更新目标地址，不重复排队，也不重复写日志。
+            if initial_url:
+                self._pending_login_url = initial_url
+            return
+        self._pending_login = True
+        self._pending_login_url = initial_url
+        self.browser_status.set("等待登录状态检查完成…")
+        self.login_status.set("即将打开登录浏览器，请稍候…")
+        self.login_status_label.configure(foreground="#666666")
+        self.log("登录请求已排队：正在等待本次登录状态检查结束，随后立即打开浏览器。")
+        self.schedule_drain_logs()
+
+    def _run_queued_login(self) -> None:
+        """Start a queued login once the earlier browser probe has finished."""
+        if not self._pending_login:
+            return
+        if self.browser_worker is not None and self.browser_worker.is_alive():
+            return
+        initial_url = self._pending_login_url
+        self._pending_login = False
+        self._pending_login_url = None
+        self.log("登录状态检查已结束，正在打开登录浏览器…")
+        self._run_browser_action(start=True, initial_url=initial_url)
 
     def _run_browser_action(
         self, *, start: bool, initial_url: str | None = None, quiet: bool = False
     ) -> None:
         if self.browser_worker and self.browser_worker.is_alive():
+            if not start:
+                return
+            # 后台登录状态轮询（每 15 秒一次，单次可能持续数秒到十几秒）与
+            # 用户点击共用同一个 worker。此前这里直接 return，点击「登录 WPS」
+            # 会被静默丢弃：既不打开浏览器，也没有任何提示。改为排队执行。
+            self._queue_login(initial_url)
             return
         self.start_browser_button.configure(state="disabled")
         self.check_browser_button.configure(state="disabled")
+        self._browser_worker_starts_login = start
         if not quiet:
-            self.browser_status.set("正在启动…" if start else "正在检查…")
+            self.browser_status.set("正在打开登录窗口…" if start else "正在检查…")
         if not quiet or self.login_status.get() == "尚未检查":
-            self.login_status.set("正在检查…")
+            self.login_status.set("正在打开登录浏览器…" if start else "正在检查…")
         cdp_url = self.cdp_url.get().strip()
         browser_mode = self.browser_mode.get()
         remote_config = self.current_runtime_config() if getattr(getattr(self, "task_registry", None), "remote_business", False) is True else None
@@ -2884,6 +2938,9 @@ class WpsWriterFrame(ttk.Frame):
                 break
         if chunks:
             self.log_console.append("".join(chunks))
+        # 排队中的登录必须在前一个浏览器探测线程结束后立刻执行；这里运行在
+        # Tk 主线程，才能安全地再起线程并刷新按钮状态。
+        self._run_queued_login()
         if self.winfo_ismapped() or self._has_pending_work():
             self.schedule_drain_logs()
 

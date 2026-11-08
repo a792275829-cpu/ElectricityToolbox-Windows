@@ -224,6 +224,70 @@ class WpsLoginStatusUiTests(unittest.TestCase):
         self.assertTrue(launch.call_args.kwargs["preload_url"])
         self.assertNotIn("headless", launch.call_args.kwargs)
 
+    def test_login_click_during_status_probe_opens_browser_afterwards(self):
+        import threading
+
+        release = threading.Event()
+        self.frame.browser_worker = self.frame._start_tracked_thread(
+            lambda: release.wait(5), name="wps-status-probe"
+        )
+        try:
+            with (
+                mock.patch.object(self.frame, "save_current_config"),
+                mock.patch.object(self.module, "ensure_wps_dedicated_chrome", return_value={"started": True}) as launch,
+                mock.patch.object(self.module, "check_wps_login_status", return_value=self.module.WpsLoginStatus("logged_out", "请登录")),
+            ):
+                self.frame.start_wps_browser()
+                # 点击不能被静默丢弃：即使探测线程仍在跑，也要立刻给出反馈。
+                self.frame.drain_logs()
+                self.assertEqual(launch.call_count, 0)
+                self.assertTrue(self.frame._pending_login)
+                self.assertIn("即将打开登录浏览器", self.frame.login_status.get())
+                self.assertIn("登录请求已排队", self.frame.log_console.contents())
+
+                release.set()
+                self.frame.browser_worker.join(3)
+                self.frame.drain_logs()
+                self.frame.browser_worker.join(3)
+                self.frame.drain_logs()
+            self.assertFalse(self.frame._pending_login)
+            self.assertEqual(launch.call_count, 1)
+            self.assertEqual(launch.call_args.kwargs["initial_url"], "https://www.kdocs.cn/latest")
+            self.assertTrue(launch.call_args.kwargs["preload_url"])
+            self.assertNotIn("headless", launch.call_args.kwargs)
+        finally:
+            release.set()
+
+    def test_login_progress_suppresses_periodic_status_probe(self):
+        import threading
+
+        release = threading.Event()
+        original = self.frame.winfo_ismapped
+        self.frame.winfo_ismapped = lambda: True
+        try:
+            thread = self.frame._start_tracked_thread(
+                lambda: release.wait(5), name="wps-login-worker"
+            )
+            self.frame.browser_worker = thread
+            self.frame._browser_worker_starts_login = True
+            with mock.patch.object(self.frame, "check_wps_browser") as check:
+                self.frame._poll_login_status()
+            check.assert_not_called()
+            self.assertTrue(self.frame._login_in_progress())
+
+            release.set()
+            thread.join(2)
+            self.assertFalse(self.frame._login_in_progress())
+
+            self.frame._pending_login = True
+            with mock.patch.object(self.frame, "check_wps_browser") as check:
+                self.frame._poll_login_status()
+            check.assert_not_called()
+        finally:
+            self.frame._pending_login = False
+            release.set()
+            self.frame.winfo_ismapped = original
+
     def test_hidden_page_does_not_poll_or_start_browser(self):
         with mock.patch.object(self.frame, "check_wps_browser") as check:
             self.frame._poll_login_status()
