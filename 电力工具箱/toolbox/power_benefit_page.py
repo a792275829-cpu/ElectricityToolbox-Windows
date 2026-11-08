@@ -4,14 +4,13 @@ from . import commands
 
 import tkinter as tk
 from toolbox_choices import OptionCheckbutton, SettingCheckbutton
-from toolbox_file_button import FileSelectButton
 
 from datetime import date
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .file_dialogs import FileDialogState
-from .page_support import DATE_INPUT_ERROR, add_date_row, open_directory, parse_date_input
+from .page_support import DATE_INPUT_ERROR, add_date_row, add_path_row, open_directory, parse_date_input
 from .runtime import TaskRegistry, ToolPaths, python_executable
 from .widgets import ToolPage
 
@@ -29,7 +28,7 @@ class PowerBenefitUpdatePage(ToolPage):
         self.file_dialogs = FileDialogState(paths.file_dialog_settings)
         self.workbooks = [tk.StringVar(master=self, value=str(DEFAULT_DIRECTORY / name))
                           for name in DEFAULT_NAMES]
-        self.selected = [tk.BooleanVar(master=self, value=(index < 2)) for index, _ in enumerate(DEFAULT_NAMES)]
+        self.selected = [tk.BooleanVar(master=self, value=False) for _ in DEFAULT_NAMES]
         self.start_date = tk.StringVar(master=self, value="")
         self.end_date = tk.StringVar(master=self, value=(today or date.today()).isoformat())
         self.overwrite = tk.BooleanVar(master=self, value=True)
@@ -42,11 +41,9 @@ class PowerBenefitUpdatePage(ToolPage):
             label="日期范围", hint="结束日期为 D", start_optional=True)
         buttons = []
         for index, station in enumerate(("归湖", "鮀莲", "海风")):
-            ttk.Label(form, text=f"{station}工作簿").grid(row=1 + index, column=0, sticky="w", padx=(0, 8), pady=5)
-            ttk.Entry(form, textvariable=self.workbooks[index]).grid(row=1 + index, column=1, sticky="ew", pady=5)
-            button = FileSelectButton(form, text="选择文件", command=lambda i=index: self.choose_workbook(i))
-            button.grid(row=1 + index, column=2, padx=(8, 0), pady=5, sticky="w")
-            buttons.append(button)
+            buttons.append(add_path_row(
+                form, row=1 + index, label=f"{station}工作簿", variable=self.workbooks[index],
+                command=lambda i=index: self.choose_workbook(i), button_text="选择文件"))
         stations = ttk.Frame(form)
         stations.grid(row=4, column=0, columnspan=3, sticky="w", pady=(5, 0))
         ttk.Label(stations, text="更新场站：").pack(side="left")
@@ -93,8 +90,10 @@ class PowerBenefitUpdatePage(ToolPage):
 
     def build_update_command(self, workbooks: list[Path], end_date: date, *,
                              start_date: date | None, create_backup: bool) -> list[str]:
-        return commands.power_benefit(self.paths, workbooks, end_date,
-                                      start_date=start_date, create_backup=create_backup)
+        return commands.power_benefit(
+            self.paths, workbooks, end_date, start_date=start_date,
+            create_backup=create_backup, overwrite=self.overwrite.get(),
+        )
 
     def start_update(self) -> None:
         workbooks = [Path(value.get().strip()).expanduser()
@@ -122,6 +121,6 @@ class PowerBenefitUpdatePage(ToolPage):
         self.clear_log()
         self.run_process(self.build_update_command(
             workbooks, end, start_date=start, create_backup=self.create_backup.get()),
-            cwd=self.paths.power_benefit_update_dir, status="正在补齐功率调整收益统计表...",
+            action='run', cwd=self.paths.power_benefit_update_dir, status="正在补齐功率调整收益统计表...",
             cancellable=False,
             on_success=lambda _: messagebox.showinfo("完成", "任务已完成，请查看日志中的写入及待发布数据。", parent=self))

@@ -251,14 +251,14 @@ class ManualUiTests(unittest.TestCase):
                 yield from descendants(child)
 
         from tkinter import ttk
+        # 与 mac 版统一：页面不再暴露东莞运行方式修正与实时检修容量字段，
+        # 这两项只从「手动填写数据」的 36 格补录进入命令。
+        self.assertFalse(hasattr(self.page, "dongguan_operation"))
+        self.assertFalse(hasattr(self.page, "realtime_maintenance"))
         widgets = list(descendants(self.page))
         labels = {str(widget.cget("text")) for widget in widgets if isinstance(widget, ttk.Label)}
         self.assertNotIn("实时检修容量（可选，万千瓦）", labels)
-        self.assertFalse(any(
-            isinstance(widget, ttk.Entry)
-            and str(widget.cget("textvariable")) == str(self.page.realtime_maintenance)
-            for widget in widgets
-        ))
+        self.assertNotIn("东莞运行方式修正（可选）", labels)
         self.page.open_market_editor()
         editor = self.page.market_editor
         editor.values["realtime"]["maintenance"]["value"].set("0")
@@ -284,7 +284,8 @@ class ManualUiTests(unittest.TestCase):
         editor.refresh()
         self.assertEqual(editor.deltas["realtime"]["price"].get(), "-50")
         editor.save()
-        self.assertIn("2/36", self.page.manual_status.get())
+        self.assertEqual(json.loads(self.page.manual_market.get())["realtime"]["price"],
+                         {"value": -50.0, "comparison": 0.0})
         self.page.open_market_editor()
         self.page.report_date.set("2026-10-16")
         self.assertFalse(self.page.market_editor.winfo_exists())
@@ -301,7 +302,7 @@ class ManualUiTests(unittest.TestCase):
                 var.set(str(path.resolve()))
             command = self.page.build_command()
             values = {key: getattr(self.page, key).get() for key in (
-                "day_report", "previous_report", "d2_report", "dongguan_operation", "realtime_maintenance", "manual_market")}
+                "day_report", "previous_report", "d2_report", "manual_market")}
 
             validated = workflows.validate(ToolPaths(ROOT), "market-report", "run", values)
             service_command = workflows.plan(ToolPaths(ROOT), "market-report", "run", validated)[0][0]

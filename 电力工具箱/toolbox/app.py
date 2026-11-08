@@ -112,7 +112,9 @@ class ToolboxApp(tk.Tk):
         if render_prototype:
             from .ui.surface_cache import SurfaceCache
             self.surface_cache = SurfaceCache(self)
-            self.surface_cache.prepare_styles({"Nav.TButton": 2, "NavSelected.TButton": 2,
+            # Nav.TButton 是扁平按钮（布局里没有圆角贴图元素），预登记只会取不到
+            # 规格表条目；只登记真正带贴图的选中态，与 mac 版一致。
+            self.surface_cache.prepare_styles({"NavSelected.TButton": 2,
                                                "TLabelframe": 2, "TEntry": 3,
                                                "TButton": 6, "Primary.TButton": 2})
         # Keep startup limited to the shell and dashboard. Business pages are

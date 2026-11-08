@@ -195,5 +195,5 @@ class PrivateBatchUploadPage(ToolPage):
     def start_login(self) -> None:
         self.run_process(
             commands.login(self.paths, self.tool_id), cwd=self.paths.private_uploader_dir,
-            status="正在打开登录窗口...",
+            status="正在打开登录窗口...", action="login",
         )

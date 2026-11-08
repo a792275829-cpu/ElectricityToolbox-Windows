@@ -61,12 +61,14 @@ fn identity(file: &File) -> Result<Vec<Value>> {
         }
     }
     let nanos = |time: i64| (time - 116444736000000000) * 100;
+    // 卷序列号只取低 32 位、时间戳取创建时间：与 Python 侧 os.stat 的
+    // st_dev / st_ctime_ns 口径一致，两种后端算出的指纹才能直接互相校验。
     Ok(vec![
-        json!(id.volume),
+        json!(id.volume as u32),
         json!(u64::from_le_bytes(id.id[..8].try_into()?)),
         json!(file.metadata()?.len()),
         json!(nanos(basic.write)),
-        json!(nanos(basic.change)),
+        json!(nanos(basic.creation)),
     ])
 }
 #[cfg(unix)]

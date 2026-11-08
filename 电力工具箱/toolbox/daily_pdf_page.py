@@ -44,11 +44,17 @@ class DailyPdfParserPage(ToolPage):
         )
         self.open_button.pack(side="left", padx=(8, 0))
 
-        settings = ttk.LabelFrame(self.content, text="文件与解析设置", padding=12)
+        settings = ttk.LabelFrame(self.content, padding=12)
         settings.grid(row=0, column=0, sticky="ew")
+        ttk.Label(settings, text="执行功能").grid(row=0, column=0, sticky="w", pady=8)
+        modes = SegmentedGroup(settings, variable=self.mode, choices=(("both", "解析并上传"), ("parse", "仅解析"), ("upload", "仅上传")))
+        modes.grid(row=0, column=1, columnspan=2, sticky="w")
+        mode_buttons = modes.buttons
+        self.mode.trace_add("write", self._update_mode)
+
         pdf_button = add_path_row(
             settings,
-            row=0,
+            row=1,
             label="运行日报 PDF",
             variable=self.pdf_path,
             command=self.choose_pdf,
@@ -56,31 +62,53 @@ class DailyPdfParserPage(ToolPage):
         )
         output_button = add_path_row(
             settings,
-            row=1,
+            row=2,
             label="输出 Excel",
             variable=self.output_path,
             command=self.choose_output,
             button_text="选择位置",
         )
-        ttk.Label(settings, text="执行功能").grid(row=2, column=0, sticky="w", pady=8)
-        modes = SegmentedGroup(settings, variable=self.mode, choices=(("both", "解析并上传"), ("parse", "仅解析"), ("upload", "仅上传")))
-        modes.grid(row=2, column=1, columnspan=2, sticky="w")
-        mode_buttons = modes.buttons
-        self.mode.trace_add("write", self._update_mode)
-
         notes = ttk.LabelFrame(self.content, text="输出说明", padding=10)
         notes.grid(row=1, column=0, sticky="ew", pady=(10, 0))
-        ttk.Label(
+        # A fixed wraplength wider than the viewport adds a horizontal scrollbar,
+        # and any scrollbar puts every switch on Tk's clipped-canvas repaint
+        # (measured ~3x). Track the real width instead.
+        self._notes_wraplength = 700
+        self._notes_label = ttk.Label(
             notes,
             text=(
                 "容量按图像估算，细小分段可能有误差。\n"
                 "PDF → 现货交易日报；Excel → 报价容量数据，均按 PDF 报告日期匹配。"
             ),
-            wraplength=820,
-        ).pack(anchor="w")
+            wraplength=self._notes_wraplength,
+        )
+        self._notes_label.pack(anchor="w")
+        notes.bind("<Configure>", lambda event: self._resize_notes(event))
 
         self.register_busy_widgets(self.run_button, pdf_button, output_button, *mode_buttons)
         self.append_log("请选择广东运行日报 PDF。")
+
+    def prepare_for_display(self) -> None:
+        super().prepare_for_display()
+        # 复用缓存页面时窗口宽度可能已变，先按当前视口重算换行宽度。
+        viewport = getattr(self.winfo_toplevel(), "page_viewport", None)
+        if viewport is not None and viewport.canvas.winfo_width() > 1:
+            self._apply_notes_wraplength(viewport.canvas.winfo_width() - 100)
+
+    def _resize_notes(self, event) -> None:
+        # 与 prepare_for_display 用同一个宽度来源，否则两者会互相改来改去，
+        # 每次进入页面都要重新排版一遍。
+        viewport = getattr(self.winfo_toplevel(), "page_viewport", None)
+        width = event.width
+        if viewport is not None and viewport.canvas.winfo_width() > 1:
+            width = viewport.canvas.winfo_width()
+        self._apply_notes_wraplength(width - 100)
+
+    def _apply_notes_wraplength(self, wraplength: int) -> None:
+        wraplength = max(240, wraplength)
+        if abs(wraplength - self._notes_wraplength) > 8:
+            self._notes_wraplength = wraplength
+            self._notes_label.configure(wraplength=wraplength)
 
     def _update_mode(self, *_args) -> None:
         self.run_button.configure(text={"both": "解析并上传", "parse": "开始解析", "upload": "上传已有文件"}[self.mode.get()])
@@ -160,7 +188,7 @@ class DailyPdfParserPage(ToolPage):
 
         self.run_process(
             self.build_command(source, output),
-            cwd=self.paths.daily_pdf_parser_dir,
+            action='run', cwd=self.paths.daily_pdf_parser_dir,
             status={"both": "正在解析运行日报并上传 PDF、Excel...", "parse": "正在解析运行日报并生成 Excel...", "upload": "正在上传源 PDF 和报价容量 Excel..."}[mode],
             on_success=on_success,
         )

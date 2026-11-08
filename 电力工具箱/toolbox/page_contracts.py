@@ -26,19 +26,19 @@ class PageBinding:
 PAGE_BINDINGS = MappingProxyType({
     'online-energy': PageBinding('online-energy', ('start_date', 'end_date')),
     'wind-forecast': PageBinding('wind-forecast', ('run_date',)),
-    'section-analysis': PageBinding('section-analysis', ('output_root', 'topology_path', 'threshold')),
+    # 与 mac 版一致：GUI 不提供价差阈值输入，服务表单里的阈值有默认值 80，
+    # 页面字段契约只登记页面上真实存在的变量。
+    'section-analysis': PageBinding('section-analysis', ('output_root', 'topology_path')),
     'trade-analysis': PageBinding('trade-analysis', ('output_dir',)),
     'market-table': PageBinding('market-table', ('run_date', 'workbook', 'overwrite', 'create_backup')),
     'transaction-info': PageBinding('transaction-info', ('workbook', 'start_date', 'end_date', 'overwrite', 'create_backup')),
     'power-benefit': PageBinding('power-benefit', ('start_date', 'end_date', 'overwrite', 'create_backup')),
     'spot-price': PageBinding('spot-price', ('start_date', 'end_date', 'overwrite', 'create_backup')),
     'daily-pdf-parser': PageBinding('daily-pdf-parser', ('pdf_path', 'output_path', 'mode')),
-    'market-report': PageBinding('market-report', ('day_report', 'previous_report', 'd2_report',
-                                                   'dongguan_operation', 'realtime_maintenance',
-                                                   'manual_market')),
+    'market-report': PageBinding('market-report', ('day_report', 'previous_report', 'd2_report', 'manual_market')),
     'report': PageBinding('report', ('report_date', 'online_workbook', 'day_ahead_workbook', 'daily_workbook', 'template_report', 'fetch_data', 'generate_word')),
     'guangdong-price': PageBinding('guangdong-price', ('run_date', 'master_workbook', 'prediction_output_dir', 'training_months', 'forecast_days')),
     'group-upload': PageBinding('group-upload', ('force',)),
     'private-batch-upload': PageBinding('private-batch-upload', ('unit', 'summary_type', 'verify')),
-    'summary-upload': PageBinding('summary-upload', ('input_dir', 'output_file', 'mode')),
+    'summary-upload': PageBinding('summary-upload', ('input_dir', 'mode')),
 })

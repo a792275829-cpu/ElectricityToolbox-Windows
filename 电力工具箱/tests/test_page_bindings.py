@@ -47,6 +47,39 @@ class PageContractTests(unittest.TestCase):
         self.assertIn("action", parameters)
         self.assertIs(parameters["action"].kind, inspect.Parameter.KEYWORD_ONLY)
 
+    def test_every_login_override_marks_the_action_explicitly(self) -> None:
+        # 只靠 ui_tasks 从 "--login" 回推 action 不够：widgets._save_login_draft
+        # 在 run_process 之前就会用 action 判断是否需要先保存账号草稿，
+        # action 缺省为 "run" 时，仅解析／仅汇总等模式会跳过账号保存。
+        import ast
+
+        toolbox = ROOT / "电力工具箱" / "toolbox"
+        overrides = 0
+        for source_path in sorted(toolbox.glob("*.py")):
+            tree = ast.parse(source_path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.FunctionDef) or node.name != "start_login":
+                    continue
+                overrides += 1
+                calls = [
+                    call for call in ast.walk(node)
+                    if isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "run_process"
+                ]
+                self.assertEqual(
+                    1, len(calls), f"{source_path.name} 的 start_login 调用不唯一"
+                )
+                keywords = {kw.arg: kw.value for kw in calls[0].keywords}
+                self.assertIn(
+                    "action", keywords, f"{source_path.name} 的 start_login 缺少显式 action"
+                )
+                self.assertEqual(
+                    "login", ast.literal_eval(keywords["action"]),
+                    f"{source_path.name} 的 start_login action 不正确",
+                )
+        self.assertGreaterEqual(overrides, 8)
+
     def test_registered_fields_exist_on_their_pages(self) -> None:
         from toolbox.page_contracts import PAGE_BINDINGS
 

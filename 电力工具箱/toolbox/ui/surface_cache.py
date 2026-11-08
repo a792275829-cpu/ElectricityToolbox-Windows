@@ -87,10 +87,18 @@ class SurfaceCache:
             for _ in range(count):
                 if len(self._slots) >= self.max_entries:
                     break
-                self._spares[base].append(self._new_slot(base))
+                slot = self._new_slot(base)
+                if slot is None:
+                    # 扁平样式（如 TLabelframe 的 1px 描边）没有圆角贴图元素，
+                    # 预登记时直接跳过，否则原型模式会在启动阶段 KeyError。
+                    self._spares.pop(base, None)
+                    break
+                self._spares[base].append(slot)
 
-    def _new_slot(self, base: str) -> _Entry:
+    def _new_slot(self, base: str) -> _Entry | None:
         layout = self.style.layout(base)
+        if not layout or layout[0][0] not in getattr(self.root, "_toolbox_surface_specs", {}):
+            return None
         spec = self.root._toolbox_surface_specs[layout[0][0]]
         photos = tuple(ImageTk.PhotoImage(Image.new(bitmap.mode, (1, 1)), master=self.root)
                        for bitmap in spec.bitmaps)
@@ -166,7 +174,11 @@ class SurfaceCache:
         if key in self.entries:
             return self.entries[key]
         layout = self.style.layout(base)
-        spec = self.root._toolbox_surface_specs[layout[0][0]]
+        specs = getattr(self.root, "_toolbox_surface_specs", {})
+        if not layout or layout[0][0] not in specs:
+            # 扁平样式（导航按钮等）没有圆角贴图，直接用原样式绘制。
+            return None
+        spec = specs[layout[0][0]]
         if min(width, height) < spec.minimum:
             return None
         pixels = (width + 1) * (height + 1) * len(spec.bitmaps)

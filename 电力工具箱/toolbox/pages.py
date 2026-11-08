@@ -38,8 +38,7 @@ from .power_benefit_page import PowerBenefitUpdatePage
 from .market_report_page import MarketReportPage
 from .summary_upload_page import SummaryUploadPage
 from .private_batch_upload_page import PrivateBatchUploadPage
-from .page_support import DateInput, DateRangeInput, DATE_INPUT_ERROR, DATE_INPUT_HINT, normalize_date_input, parse_date_input
-
+from .page_support import DateInput, DateRangeInput, DATE_INPUT_ERROR, normalize_date_input, parse_date_input
 from .page_support import (
     add_path_row as _add_path_row,
     clearing_file_date,
@@ -288,7 +287,7 @@ class TradeAnalysisPage(ToolPage):
 
         self.run_in_thread(
             worker,
-            status="正在生成分析报告...",
+            action="run", status="正在生成分析报告...",
             on_success=lambda outputs: messagebox.showinfo(
                 "完成", f"已生成 {len(outputs)} 个报告。", parent=self
             ),
@@ -529,7 +528,7 @@ class ReportPage(ToolPage):
 
         self.run_in_thread(
             worker,
-            status="正在生成报告...",
+            action="run", status="正在生成报告...",
             on_success=lambda count: messagebox.showinfo(
                 "完成", f"已完成 {count} 个任务。", parent=self
             ),
@@ -686,14 +685,14 @@ class GroupUploadPage(ToolPage):
 
         self.run_in_thread(
             upload,
-            status="正在上传集团每日数据...",
+            action="run", status="正在上传集团每日数据...",
             cancellable=False,
         )
 
     def start_login(self) -> None:
         self.run_process(
             [python_executable(), str(self.paths.group_upload), "--login"],
-            cwd=self.paths.group_upload_dir,
+            action="login", cwd=self.paths.group_upload_dir,
             status="正在打开登录窗口...",
         )
 
@@ -773,6 +772,7 @@ class MarketTableUpdatePage(ToolPage):
 
         self.mapping_text = tk.Text(
             mapping,
+            width=1,
             height=8,
             wrap="word",
             font="TkTextFont",
@@ -834,7 +834,7 @@ class MarketTableUpdatePage(ToolPage):
         self.clear_log()
         self.run_process(
             self.build_update_command(run_date, workbook),
-            cwd=self.paths.market_table_update_dir,
+            action="run", cwd=self.paths.market_table_update_dir,
             status="正在更新市场表...",
             cancellable=False,
             on_success=lambda _code: messagebox.showinfo(
@@ -850,7 +850,7 @@ class MarketTableUpdatePage(ToolPage):
                 "--login",
                 "--headed",
             ],
-            cwd=self.paths.market_table_update_dir,
+            action="login", cwd=self.paths.market_table_update_dir,
             status="正在打开登录窗口...",
         )
 
@@ -869,7 +869,6 @@ class GuangdongPricePage(ToolPage):
             parent,
             registry=registry,
             title="广东电价预测",
-
         )
         self.paths = paths
         self.file_dialogs = _file_dialog_state(paths)
@@ -886,14 +885,13 @@ class GuangdongPricePage(ToolPage):
         self.training_months = tk.IntVar(master=self, value=0)
         self.forecast_days = tk.IntVar(master=self, value=1)
 
-        form = ttk.LabelFrame(self.content, text="1. 补齐历史数据总表", padding=12)
+        form = ttk.LabelFrame(self.content, text="1. 补齐历史数据总表", padding=10)
         form.grid(row=0, column=0, sticky="ew")
         form.columnconfigure(1, weight=1)
-        ttk.Label(form, text="运行日 D").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Label(form, text="运行日 D").grid(row=0, column=0, sticky="w", pady=3)
         DateInput(form, textvariable=self.run_date, width=16).grid(
-            row=0, column=1, sticky="w", pady=4
+            row=0, column=1, sticky="w", pady=3
         )
-
         master_button = _add_path_row(
             form,
             row=1,
@@ -904,20 +902,18 @@ class GuangdongPricePage(ToolPage):
         )
         ttk.Label(
             form,
-            text="自动检查并补齐截至 D 日缺少 96 个时点的日期；账号密码读取本地配置。",
+            text="仅保留并补齐截至 D 日的近一年数据，范围外日期截断；每天 96 个时点。",
             style="Muted.TLabel",
         ).grid(row=2, column=0, columnspan=5, sticky="w", pady=(4, 0))
 
-        prediction = ttk.LabelFrame(self.content, text="2. 使用总表预测 D+1 至 D+15", padding=12)
-        prediction.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        prediction = ttk.LabelFrame(self.content, text="2. 使用总表预测 D+1 至 D+15", padding=10)
+        prediction.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         prediction.columnconfigure(1, weight=1)
-        # 长路径与长提示一旦不设上限，会把页面撑到默认窗口出现横向滚动条；
-        # Windows 高 DPI 下按窗口缩放换算，否则 150% 屏一行只放下小半条路径。
-        wrap = int(520 * getattr(self.winfo_toplevel(), "window_scale", 1.0))
-        ttk.Label(prediction, text="建模输入表").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Label(prediction, text="建模输入表").grid(row=0, column=0, sticky="w", pady=3)
+        # 建模输入表路径可能很长：限制换行宽度，避免把页面撑到需要横向滚动条
         ttk.Label(prediction, textvariable=self.prediction_input,
-                  wraplength=wrap, justify="left").grid(
-            row=0, column=1, columnspan=4, sticky="w", pady=4
+                  wraplength=520, justify="left").grid(
+            row=0, column=1, columnspan=4, sticky="w", pady=3
         )
         prediction_dir_button = _add_path_row(
             prediction,
@@ -928,30 +924,27 @@ class GuangdongPricePage(ToolPage):
             button_text="选择目录",
         )
         ttk.Label(prediction, text="滚动训练月数").grid(
-            row=3, column=0, sticky="w", pady=4
+            row=3, column=0, sticky="w", pady=3
         )
         ttk.Spinbox(
             prediction, from_=0, to=24, textvariable=self.training_months, width=8
-        ).grid(row=3, column=1, sticky="w", pady=4)
+        ).grid(row=3, column=1, sticky="w", pady=3)
         ttk.Label(
             prediction,
             text="0 为自动：当日供需齐全用 12 个月，否则用 3 个月历史信息回退；手工填写最少 1 个月。",
             style="Muted.TLabel",
-            wraplength=wrap,
-        ).grid(row=3, column=2, columnspan=3, sticky="w", padx=(8, 0), pady=4)
+        ).grid(row=3, column=2, columnspan=3, sticky="w", padx=(8, 0), pady=3)
         ttk.Label(prediction, text="预测天数").grid(
-            row=4, column=0, sticky="w", pady=4
+            row=4, column=0, sticky="w", pady=3
         )
         ttk.Spinbox(
             prediction, from_=1, to=15, textvariable=self.forecast_days, width=8
-        ).grid(row=4, column=1, sticky="w", pady=4)
+        ).grid(row=4, column=1, sticky="w", pady=3)
         ttk.Label(
             prediction,
             text="1 只输出 D+1，15 输出 D+1 至 D+15；D+2 起没有已发布供需，误差随天数放大。",
             style="Muted.TLabel",
-            wraplength=wrap,
-        ).grid(row=4, column=2, columnspan=3, sticky="w", padx=(8, 0), pady=4)
-
+        ).grid(row=4, column=2, columnspan=3, sticky="w", padx=(8, 0), pady=3)
 
         self.update_button = ttk.Button(
             self.actions, text="补齐数据总表", command=self.start_update
@@ -972,7 +965,7 @@ class GuangdongPricePage(ToolPage):
             master_button,
             prediction_dir_button,
         )
-        self.append_log("先补齐总表，再按设定的预测天数运行日前预测；账号使用右侧统一账号。")
+        self.append_log("运行预测前会先按运行日补齐近一年总表，再按设定的预测天数生成每日 96 点电价；账号使用右侧统一账号。")
 
     def resolve_business_path(self, text: str) -> Path:
         if not text.strip():
@@ -1094,6 +1087,7 @@ class GuangdongPricePage(ToolPage):
 
 
 class WpsWriterPage(ToolPage):
+    tool_id = "wps-writer"
     def __init__(
         self, parent: tk.Misc, paths: ToolPaths, registry: TaskRegistry
     ) -> None:

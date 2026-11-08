@@ -52,12 +52,12 @@ class SpotPriceUpdatePage(ToolPage):
             "海风": self.haifeng_workbook,
         }
         self.selected_stations = {
-            label: tk.BooleanVar(master=self, value=True) for label in self.station_workbooks
+            label: tk.BooleanVar(master=self, value=False) for label in self.station_workbooks
         }
         self.overwrite = tk.BooleanVar(master=self, value=True)
         self.create_backup = tk.BooleanVar(master=self, value=False)
 
-        form = ttk.LabelFrame(self.content, text="更新设置", padding=12)
+        form = ttk.LabelFrame(self.content, text="更新设置", padding=8)
         form.grid(row=0, column=0, sticky="ew")
         form.columnconfigure(1, weight=1)
         add_date_row(
@@ -91,7 +91,7 @@ class SpotPriceUpdatePage(ToolPage):
         )
 
         stations = ttk.Frame(form)
-        stations.grid(row=4, column=0, columnspan=5, sticky="w", pady=(7, 0))
+        stations.grid(row=4, column=0, columnspan=5, sticky="w", pady=(5, 0))
         ttk.Label(stations, text="更新场站：").pack(side="left")
         self.station_checkbuttons = []
         for label, variable in self.selected_stations.items():
@@ -100,14 +100,15 @@ class SpotPriceUpdatePage(ToolPage):
             self.station_checkbuttons.append(button)
 
         options = ttk.Frame(form)
-        options.grid(row=5, column=0, columnspan=5, sticky="w", pady=(7, 0))
-        SettingCheckbutton(options, text="覆盖已有非空价格", variable=self.overwrite).pack(anchor="w")
+        options.grid(row=5, column=0, columnspan=5, sticky="w", pady=(5, 0))
+        # 并排显示，避免多占一行把页面顶出视口（超出后每次切换都要整幅重绘）
+        SettingCheckbutton(options, text="覆盖非空单元格", variable=self.overwrite).pack(side="left")
         SettingCheckbutton(options, text="写入前生成时间戳备份", variable=self.create_backup).pack(
-            anchor="w", pady=(4, 0)
+            side="left", padx=(16, 0)
         )
 
-        mapping = ttk.LabelFrame(self.content, text="固定映射", padding=12)
-        mapping.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        mapping = ttk.LabelFrame(self.content, text="固定映射", padding=8)
+        mapping.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         ttk.Label(
             mapping,
             text=(
@@ -121,6 +122,9 @@ class SpotPriceUpdatePage(ToolPage):
             justify="left",
         ).grid(row=0, column=0, sticky="w")
 
+        # Keep the form inside the viewport: a page taller than the canvas sends
+        # every switch through Tk's clipped-canvas repaint (measured ~3x).
+        self.log_text.configure(height=8)
         self.update_button = ttk.Button(self.actions, text="抓取并更新", command=self.start_update)
         self.update_button.pack(side="left")
         self.register_busy_widgets(
@@ -205,7 +209,7 @@ class SpotPriceUpdatePage(ToolPage):
                 create_backup=self.create_backup.get(),
                 selected_stations=tuple(workbooks),
             ),
-            cwd=self.paths.spot_price_update_dir,
+            action='run', cwd=self.paths.spot_price_update_dir,
             status="正在抓取并更新现货价格工作簿...",
             cancellable=False,
             on_success=lambda _code: messagebox.showinfo(
@@ -219,6 +223,6 @@ class SpotPriceUpdatePage(ToolPage):
     def start_login(self) -> None:
         self.run_process(
             [python_executable(), str(self.paths.spot_price_update), "--login", "--headed"],
-            cwd=self.paths.spot_price_update_dir,
+            action='login', cwd=self.paths.spot_price_update_dir,
             status="正在打开现货价格登录窗口...",
         )

@@ -57,7 +57,14 @@ class PerformanceBoundaryTests(unittest.TestCase):
             for row, label in [(20, "海上风电"), (25, "鮀莲"), (30, "归湖")]:
                 sheet.cell(row, 1, label)
             basic = book.create_sheet("基础信息")
-            basic["AA64"], basic["AC64"] = 12.5, 0
+            # 清远计划电量按「清远上网电量」表头 + 「时刻」+「计划发电量」+「合计」定位，
+            # 不再依赖固定行号；列位与真实模板一致（Z=区段名，AA/AC=计划发电量）。
+            basic["Z63"] = "清远上网电量"
+            basic["Z64"] = "时刻"
+            basic["AA64"] = "计划发电量"
+            basic["AC64"] = "计划发电量"
+            basic["Z65"] = "合计"
+            basic["AA65"], basic["AC65"] = 12.5, 0
             book.save(path)
             original = path.read_bytes()
             from openpyxl.worksheet._read_only import ReadOnlyWorksheet

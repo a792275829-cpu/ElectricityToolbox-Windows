@@ -63,6 +63,7 @@ class GuangdongDataUpdateTests(unittest.TestCase):
                     {
                         "日期": day,
                         "时刻": f"{slot // 4:02d}:{slot % 4 * 15:02d}",
+                        "全省日前平均电价": 300.0,
                     }
                 )
 
@@ -92,8 +93,8 @@ class GuangdongDataUpdateTests(unittest.TestCase):
             initial = root / "输入" / "初始.xlsx"
             initial.parent.mkdir()
             frame = pd.DataFrame({
-                "日期": pd.Timestamp("2026-07-11"),
-                "时刻": pd.date_range("2026-07-11", periods=96, freq="15min").strftime("%H:%M"),
+                "日期": pd.date_range("2025-07-12", "2026-07-11").repeat(96),
+                "时刻": list(pd.date_range("2026-07-11", periods=96, freq="15min").strftime("%H:%M")) * 365,
                 "全省日前平均电价": 300.0,
             })
             frame.to_excel(initial, index=False, sheet_name="整合数据")
@@ -115,7 +116,7 @@ class GuangdongDataUpdateTests(unittest.TestCase):
                 self.assertEqual(["整合数据"], book.sheet_names)
                 readback = pd.read_excel(book)
             self.assertEqual(list(frame.columns), list(readback.columns))
-            self.assertEqual(96, len(readback))
+            self.assertEqual(365 * 96, len(readback))
             self.assertEqual(300, readback.iloc[-1]["全省日前平均电价"])
 
 
@@ -485,6 +486,136 @@ class GuangdongWorkflowTests(unittest.TestCase):
                 workflows.validate(
                     paths, "guangdong-price", "predict", {**values, "training_months": 0.5}
                 )
+
+
+class ForecastMasterBootstrapTests(unittest.TestCase):
+    """首次安装不再内置总表，预测入口要在缺失时自动生成/补齐。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        sys.path.insert(0, str(PROJECT))
+        cls.train = load_script("test_guangdong_train", "train_d1_forecast.py")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if sys.path and sys.path[0] == str(PROJECT):
+            sys.path.pop(0)
+
+    def test_missing_master_is_generated_from_grid_api(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            master = Path(folder) / "输出/广东电价数据总表.xlsx"
+            calls = []
+
+            def fake_update(*, master_workbook=None):
+                calls.append(Path(master_workbook))
+                Path(master_workbook).parent.mkdir(parents=True, exist_ok=True)
+                Path(master_workbook).write_bytes(b"generated")
+                return {"master": str(master_workbook)}
+
+            stub = mock.Mock(update_master_workbook=fake_update)
+            with mock.patch.dict(sys.modules, {"update_gdfire_data": stub}):
+                result = self.train.ensure_master_workbook({"masterWorkbook": master})
+            self.assertEqual(master, result)
+            self.assertTrue(master.is_file())
+            self.assertEqual([master], calls)
+
+    def test_existing_master_is_used_without_generating(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            master = Path(folder) / "总表.xlsx"
+            master.write_bytes(b"local")
+            stub = mock.Mock()
+            with mock.patch.dict(sys.modules, {"update_gdfire_data": stub}):
+                result = self.train.ensure_master_workbook({"masterWorkbook": master})
+            self.assertEqual(master, result)
+            stub.update_master_workbook.assert_not_called()
+
+    def test_gui_prediction_creates_missing_selected_master_before_training(self) -> None:
+        from toolbox import workflows
+        from toolbox.runtime import ToolPaths
+
+        with tempfile.TemporaryDirectory() as folder:
+            master = (Path(folder) / "new/总表.xlsx").resolve()
+            values = workflows.validate(ToolPaths(ROOT), "guangdong-price", "predict", {
+                "run_date": "2026-11-06", "master_workbook": str(master),
+                "prediction_output_dir": folder,
+            })
+            ((command, _),) = workflows.plan(ToolPaths(ROOT), "guangdong-price", "predict", values)
+
+            def create_master(**options):
+                self.assertEqual(options, {"master_workbook": master, "run_date": "2026-11-06"})
+                master.write_bytes(b"generated")
+                return {"master": master}
+
+            stub = mock.Mock(update_master_workbook=mock.Mock(side_effect=create_master))
+            with (
+                mock.patch.dict(sys.modules, {"update_gdfire_data": stub}),
+                mock.patch.object(sys, "argv", command[1:]),
+                mock.patch.object(self.train, "run_pipeline", return_value={}) as pipeline,
+            ):
+                self.train.main()
+            stub.update_master_workbook.assert_called_once()
+            self.assertEqual(pipeline.call_args.args[0], master)
+            self.assertEqual(master.read_bytes(), b"generated")
+
+    def test_prediction_refreshes_selected_master_with_exact_run_date_and_config(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            master = Path(folder) / "总表.xlsx"
+            master.write_bytes(b"old master")
+            config = Path(folder) / "config.json"
+            stub = mock.Mock()
+            stub.update_master_workbook.return_value = {"master": master}
+            with mock.patch.dict(sys.modules, {"update_gdfire_data": stub}):
+                actual = self.train.ensure_master_workbook(
+                    {"masterWorkbook": Path(folder) / "other.xlsx"}, master,
+                    run_date="2026-11-04", config_path=config, update=True,
+                )
+            self.assertEqual(actual, master)
+            stub.update_master_workbook.assert_called_once_with(
+                master_workbook=master, run_date="2026-11-04", config_path=config,
+            )
+
+    def test_prediction_update_failure_does_not_start_training(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            master = Path(folder) / "总表.xlsx"
+            master.write_bytes(b"old master")
+            stub = mock.Mock()
+            stub.update_master_workbook.side_effect = RuntimeError("更新失败")
+            with (
+                mock.patch.dict(sys.modules, {"update_gdfire_data": stub}),
+                mock.patch.object(sys, "argv", ["train_d1_forecast.py", "--input", str(master),
+                    "--as-of", "2026-11-04", "--update-master"]),
+                mock.patch.object(self.train, "run_pipeline") as pipeline,
+                self.assertRaisesRegex(RuntimeError, "更新失败"),
+            ):
+                self.train.main()
+            pipeline.assert_not_called()
+            self.assertEqual(master.read_bytes(), b"old master")
+
+    def test_stale_labels_are_still_rejected_before_training(self) -> None:
+        frame = pd.DataFrame({
+            "日期": pd.Timestamp("2026-10-11"),
+            "时刻": pd.date_range("2026-10-11", periods=96, freq="15min").strftime("%H:%M"),
+            "全省日前平均电价": 300.,
+        })
+        with tempfile.TemporaryDirectory() as folder:
+            with (
+                mock.patch.object(self.train, "load_model_data", return_value=frame),
+                mock.patch.object(self.train, "fit_model") as fit,
+                self.assertRaisesRegex(ValueError, "要求截至2026-11-04.*2026-10-11"),
+            ):
+                self.train.run_pipeline(Path(folder) / "总表.xlsx", folder, as_of="2026-11-04")
+            fit.assert_not_called()
+
+    def test_explicit_missing_input_is_not_silently_replaced(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            missing = Path(folder) / "指定输入.xlsx"
+            stub = mock.Mock()
+            with mock.patch.dict(sys.modules, {"update_gdfire_data": stub}):
+                with self.assertRaisesRegex(FileNotFoundError, "指定的预测输入工作簿不存在"):
+                    self.train.ensure_master_workbook(
+                        {"masterWorkbook": Path(folder) / "总表.xlsx"}, missing
+                    )
+            stub.update_master_workbook.assert_not_called()
 
 
 if __name__ == "__main__":

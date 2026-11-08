@@ -16,6 +16,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 APP_ROOT = SCRIPT_DIR.parent if SCRIPT_DIR.name in {"scripts", "\u811a\u672c"} else SCRIPT_DIR
 if str(APP_ROOT.parent) not in sys.path:
     sys.path.insert(0, str(APP_ROOT.parent))
+from toolbox_file_button import FileSelectButton
 from toolbox_storage import data_path
 from toolbox_dates import DATE_INPUT_ERROR, clearing_file_date, normalize_date_input, parse_date_input
 from toolbox_date_input import DateInput
@@ -117,7 +118,8 @@ class ReportTool(tk.Tk):
     ) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky=tk.W, padx=(10, 6), pady=6)
         ttk.Entry(parent, textvariable=variable).grid(row=row, column=1, sticky=tk.EW, pady=6)
-        ttk.Button(parent, text="浏览", command=command or (lambda: self.choose_workbook(variable))).grid(row=row, column=2, padx=8, pady=6)
+        FileSelectButton(parent, text="选择工作簿", command=command or (lambda: self.choose_workbook(variable))).grid(
+            row=row, column=2, padx=(8, 0), pady=6, sticky="w")
         parent.columnconfigure(1, weight=1)
 
     def choose_workbook(self, variable: tk.StringVar) -> None:

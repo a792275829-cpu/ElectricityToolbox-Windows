@@ -285,13 +285,15 @@ class PrivateBatchPageTests(unittest.TestCase):
         self.assertNotIn("action", runner.call_args.kwargs)
         self.assertIn("--batch", runner.call_args.args[0])
 
-    def test_start_login_reaches_run_process_without_action(self) -> None:
+    def test_start_login_marks_action_as_login(self) -> None:
         from unittest.mock import patch
 
+        # 与 mac 版一致：显式传 action="login"，让 _save_login_draft 在
+        # run_process 之前就按登录动作校验账号草稿，而不是等 ui_tasks 回推。
         with patch.object(self.page, "run_process") as runner:
             self.page.start_login()
         runner.assert_called_once()
-        self.assertNotIn("action", runner.call_args.kwargs)
+        self.assertEqual("login", runner.call_args.kwargs["action"])
         self.assertIn("--login", runner.call_args.args[0])
 
     def test_page_has_no_power_source_selector(self) -> None:

@@ -657,6 +657,16 @@ fn summary_parse(payload: &Value) -> Result<Value> {
             let price = numeric(row.get(pc).unwrap_or(&Value::Null));
             match (energy, price) {
                 (Ok(e), Ok(p)) => {
+                    // 重复时段必须报错：静默覆盖会让汇总表少一行数据而不留痕迹。
+                    if by_hour.contains_key(&slot) {
+                        return Err(format!(
+                            "{} / {}：时段重复 {}，停止汇总",
+                            label(&payload["filename"]),
+                            label(&sheet["name"]),
+                            slot
+                        )
+                        .into());
+                    }
                     by_hour.insert(slot, (e, p));
                 }
                 _ => {

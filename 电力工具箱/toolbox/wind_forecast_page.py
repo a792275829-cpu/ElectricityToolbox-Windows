@@ -79,6 +79,6 @@ class WindForecastPage(ToolPage):
     def start_login(self) -> None:
         self.run_process(
             [python_executable(), str(self.paths.wind_forecast), "--login"],
-            cwd=self.paths.wind_forecast_dir,
+            action="login", cwd=self.paths.wind_forecast_dir,
             status="正在打开风力预测登录窗口...",
         )

@@ -15,6 +15,7 @@ if str(WORKSPACE) not in sys.path:
 from .file_rules import clearing_file_date
 from toolbox_dates import DATE_INPUT_ERROR, DATE_INPUT_HINT, normalize_date_input, parse_date_input
 from toolbox_date_input import DateInput, DateRangeInput
+from toolbox_file_button import FileSelectButton
 from toolbox_platform import open_path
 
 
@@ -72,7 +73,9 @@ def add_date_row(parent: ttk.Frame, *, row: int, start_variable: tk.StringVar,
 def add_path_row(parent: ttk.Frame, *, row: int, label: str, variable: tk.StringVar, command, button_text: str = "浏览") -> ttk.Button:
     ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=5)
     ttk.Entry(parent, textvariable=variable).grid(row=row, column=1, sticky="ew", pady=5)
-    button = ttk.Button(parent, text=button_text, command=command)
-    button.grid(row=row, column=2, padx=(8, 0), pady=5)
+    # 与 mac 版一致：路径行右侧只放一个紧凑的“+”按钮，完整说明放在悬停提示里，
+    # 避免每行都占掉 100 多像素的文字按钮宽度。
+    button = FileSelectButton(parent, text=button_text, command=command)
+    button.grid(row=row, column=2, padx=(8, 0), pady=5, sticky="w")
     parent.columnconfigure(1, weight=1)
     return button

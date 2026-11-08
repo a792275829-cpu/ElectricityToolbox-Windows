@@ -61,6 +61,8 @@ class ToolPage(ttk.Frame):
         self._log_fit_after_id: str | None = None
         self._log_fit_binding: str | None = None
         self._fitting_log = False
+        self._content_wraplength = 0
+        self._auto_wrapped_labels: set[tk.Widget] = set()
 
         self.columnconfigure(0, weight=1)
         # Windows 窗口比卡片内容高得多，按内容撑满会在卡片和运行日志之间
@@ -146,6 +148,7 @@ class ToolPage(ttk.Frame):
         the form itself never has to.
         """
         self._fit_description()
+        self._fit_content_labels()
         self._fit_log_console(force=True)
         # 首次适配发生在页面还没排完版的时候，描述换行和行高会再变一次；
         # 等这一轮布局结束再收缩一遍，避免字体／主题差异留下几像素溢出。
@@ -168,12 +171,51 @@ class ToolPage(ttk.Frame):
             self._description_wraplength = wraplength
             self.description_label.configure(wraplength=wraplength)
 
+    def _fit_content_labels(self) -> None:
+        """Windows 字体比 mac 宽，mac 版未设 wraplength 的长说明会把页面撑出横向滚动条。
+
+        只在页面基类里给 content 区域尚未显式换行的 Label 补一个视口宽度上限，
+        页面文件本身保持与 mac 版一致；上限取自视口 canvas，避免「改换行 →
+        改宽度 → 再改换行」的反馈循环。已有 wraplength 的标签（日期提示、
+        固定说明）一律不动。
+        """
+        viewport = getattr(self.winfo_toplevel(), "page_viewport", None)
+        if viewport is None:
+            return
+        width = viewport.canvas.winfo_width()
+        if width <= 1:
+            return
+        wraplength = max(240, min(700, width - 100))
+        if wraplength == self._content_wraplength:
+            return
+        self._content_wraplength = wraplength
+        for label in list(self._auto_wrapped_labels):
+            try:
+                label.configure(wraplength=wraplength)
+            except tk.TclError:
+                self._auto_wrapped_labels.discard(label)
+        pending = [self.content]
+        while pending:
+            widget = pending.pop()
+            for child in widget.winfo_children():
+                pending.append(child)
+                if not isinstance(child, (ttk.Label, tk.Label)) or child in self._auto_wrapped_labels:
+                    continue
+                try:
+                    # ttk.Label 未设换行时 cget 返回空字符串，tk.Label 返回 "0"。
+                    if str(child.cget("wraplength")).strip() in ("", "0"):
+                        child.configure(wraplength=wraplength)
+                        self._auto_wrapped_labels.add(child)
+                except tk.TclError:
+                    continue
+
     def _queue_log_fit(self, _event=None) -> None:
         if self._log_fit_after_id is None:
             self._log_fit_after_id = self.after_idle(self._run_log_fit)
 
     def _run_log_fit(self) -> None:
         self._log_fit_after_id = None
+        self._fit_content_labels()
         # 拖拽窗口时只收缩不放大：放大需要重新排版，留到下次进入页面时再做。
         self._fit_log_console(allow_grow=False)
 

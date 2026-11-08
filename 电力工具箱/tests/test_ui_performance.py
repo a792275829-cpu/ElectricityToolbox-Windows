@@ -72,13 +72,18 @@ class UiRefreshTests(unittest.TestCase):
         from toolbox.widgets import ToolPage
 
         page = ToolPage(self.root, registry=self.registry, description="页面说明")
+        # 没有视口时退回事件宽度；换行宽度比控件宽度小一圈，避免说明文字自己
+        # 把页面撑到需要横向滚动条。
         with patch.object(page.description_label, "configure", wraps=page.description_label.configure) as configure:
             page._resize_description(SimpleNamespace(width=608))
             page._resize_description(SimpleNamespace(width=608))
-            configure.assert_called_once_with(wraplength=600)
+            configure.assert_called_once_with(wraplength=564)
             page._resize_description(SimpleNamespace(width=508))
             self.assertEqual(2, configure.call_count)
-        self.assertEqual(500, int(page.description_label.cget("wraplength")))
+            self.assertEqual(464, int(page.description_label.cget("wraplength")))
+            page._resize_description(SimpleNamespace(width=2000))
+        # 宽窗口不再继续放宽，避免说明文字把页面撑得比设计宽度更大。
+        self.assertEqual(820, int(page.description_label.cget("wraplength")))
 
         label = ttk.Label(self.root, wraplength=250)
         with patch.object(label, "configure", wraps=label.configure) as configure:
@@ -453,6 +458,50 @@ class UiRefreshTests(unittest.TestCase):
             self.assertNotIn(callback, self.root.tk.call("after", "info"))
             self.root.update()
         load.assert_not_called()
+
+
+class ContentLabelWrapTests(unittest.TestCase):
+    """Windows 字体较宽：mac 版未设 wraplength 的长说明不能撑出横向滚动条。"""
+
+    def setUp(self) -> None:
+        try:
+            self.root = tk.Tk()
+            self.root.withdraw()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk unavailable: {exc}")
+        self.width = 900
+        self.root.page_viewport = SimpleNamespace(
+            canvas=SimpleNamespace(winfo_width=lambda: self.width)
+        )
+        from toolbox.widgets import ToolPage
+        self.page = ToolPage(self.root, registry=TaskRegistry(), title="长说明换行")
+        self.plain = ttk.Label(self.page.content, text="一" * 200)
+        self.plain.grid(row=0, column=0, sticky="w")
+        self.fixed = ttk.Label(self.page.content, text="二" * 200, wraplength=520)
+        self.fixed.grid(row=1, column=0, sticky="w")
+
+    def tearDown(self) -> None:
+        self.page.destroy()
+        self.root.destroy()
+
+    def test_unwrapped_labels_follow_viewport_with_floor_and_cap(self) -> None:
+        self.page._fit_content_labels()
+        self.assertEqual(700, int(self.plain.cget("wraplength")))
+        self.assertEqual(520, int(self.fixed.cget("wraplength")))
+        self.width = 500
+        self.page._fit_content_labels()
+        self.assertEqual(400, int(self.plain.cget("wraplength")))
+        self.width = 200
+        self.page._fit_content_labels()
+        self.assertEqual(240, int(self.plain.cget("wraplength")))
+        self.assertEqual(520, int(self.fixed.cget("wraplength")))
+
+    def test_repeated_fit_does_not_reconfigure_without_a_width_change(self) -> None:
+        self.page._fit_content_labels()
+        with patch.object(self.plain, "configure", wraps=self.plain.configure) as configure:
+            self.page._fit_content_labels()
+            self.page._fit_content_labels()
+        configure.assert_not_called()
 
 
 if __name__ == "__main__":

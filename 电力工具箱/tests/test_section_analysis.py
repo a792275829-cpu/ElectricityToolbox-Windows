@@ -107,11 +107,16 @@ class SectionAnalysisPageTests(unittest.TestCase):
             [Path("/tmp/prices.xlsx")],
             Path("/tmp/results"),
             self.paths.section_analysis_topology,
-            80.0,
         )
 
-        self.assertEqual(page.threshold.get(), "80")
-        self.assertIn("全天累计至少4个时点", page.rule_summary.get())
+        # 与 mac 版一致：价差阈值固定 80、不再有输入行与判定规则框，
+        # 「打开结果目录」移到操作栏，分析完成后自动打开网页。
+        actions = [widget.cget("text") for widget in page.actions.winfo_children()]
+        self.assertIn("浏览器编辑", actions)
+        self.assertEqual(actions[-2:], ["开始分析", "打开结果目录"])
+        self.assertFalse(hasattr(page, "open_latest_button"))
+        self.assertFalse(hasattr(page, "threshold"))
+        self.assertFalse(hasattr(page, "rule_summary"))
         self.assertEqual(Path(page.output_root.get()), Path.home() / "Downloads")
         self.assertEqual(Path(command[1]), self.paths.section_analysis_runner)
         self.assertIn("--threshold", command)

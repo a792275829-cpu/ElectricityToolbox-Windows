@@ -74,10 +74,14 @@ def number(value, label, minimum=0):
 def plan(paths, tool_id, action, p):
     """Return existing CLI invocations, or validate an existing Python workflow."""
     py = python_executable()
-    if action == "login" and tool_id in {"summary-upload", "private-batch-upload"}:
-        # 两个上传工具共用 Node 上传器，登录命令不是 Python 脚本的 --login。
-        return [(commands.login(paths, tool_id), paths.private_uploader_dir)]
     if action == "login" and tool_id != "wps-writer":
+        if tool_id in {"summary-upload", "private-batch-upload"}:
+            # 两个上传工具共用 Node 上传器，登录命令不是 Python 脚本的 --login。
+            return [(commands.login(paths, tool_id), paths.private_uploader_dir)]
+        # 与 mac 版一致：除六个自带 --login 的脚本外，其余工具统一走
+        # toolbox_login_tools 的独立登录态，服务表单因而都能提供「登录」。
+        if tool_id not in {"online-energy", "wind-forecast", "market-table", "group-upload", "spot-price", "transaction-info"}:
+            return [(commands.login(paths, tool_id), paths.workspace)]
         script = {"online-energy": paths.online_energy, "wind-forecast": paths.wind_forecast,
                   "market-table": paths.market_table_update, "group-upload": paths.group_upload,
                   "spot-price": paths.spot_price_update, "transaction-info": paths.transaction_info_update}[tool_id]
@@ -147,10 +151,6 @@ def plan(paths, tool_id, action, p):
         report_day = report_date_from_day_report(sources[0])
         command = [py, str(paths.market_report_runner), report_day.isoformat(),
                    "--day-report", str(sources[0]), "--previous-report", str(sources[1]), "--d2-report", str(sources[2])]
-        if str(p["dongguan_operation"]).strip():
-            command.extend(("--dongguan-operation", str(p["dongguan_operation"]).strip()))
-        if str(p["realtime_maintenance"]).strip():
-            command.extend(("--realtime-maintenance", str(number(p["realtime_maintenance"], "实时检修容量"))))
         if str(p.get("manual_market", "")).strip():
             from .market_editor import market_module
             data = market_module().normalize_manual_market(json.loads(p["manual_market"]), report_day)
@@ -175,19 +175,22 @@ def plan(paths, tool_id, action, p):
         if master.suffix.lower() != ".xlsx":
             raise ValueError("数据总表必须是 .xlsx 文件")
         if action == "predict":
-            required_path(p, "master_workbook")
+            # 首次安装不再内置总表：缺失时由预测流程按账号配置自动生成/补齐。
             months = number(p["training_months"], "训练月数")
             if not months.is_integer() or (months != 0 and months < 1):
                 raise ValueError("训练窗口填 0 自动选择，或填写至少 1 个月")
-            days = number(p.get("forecast_days", 1), "预测天数")
+            days_value = p.get("forecast_days", 1)
+            if days_value in (None, ""):
+                days_value = 1
+            days = number(days_value, "预测天数")
             if not days.is_integer() or not 1 <= days <= 15:
                 raise ValueError("预测天数必须在 1 至 15 之间")
             output = required_path(p, "prediction_output_dir", exists=False) if p["prediction_output_dir"] else paths.guangdong_prediction_output_dir
-            return [(commands.prediction(paths, master, output, int(days), int(months), p["run_date"]),
-                     paths.guangdong_price_dir)]
+            return [(commands.prediction(paths, master, output, int(days), int(months), p["run_date"]), paths.guangdong_price_dir)]
     elif tool_id == "summary-upload":
         source = required_path(p, "input_dir", directory=True)
-        output = required_path(p, "output_file", exists=False) if p["output_file"] else source / f"{source.name}_汇总.xlsx"
+        # 与 mac 版一致：汇总输出固定落在复盘目录根，不再由表单指定路径。
+        output = source / f"{source.name}_汇总.xlsx"
         if output.suffix.lower() != ".xlsx":
             raise ValueError("汇总输出必须是 .xlsx 文件")
         if p["mode"] == "both" and source in output.parents and output.parent != source:

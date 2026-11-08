@@ -1000,9 +1000,10 @@ class PageAdapterTests(unittest.TestCase):
         trade = TradeAnalysisPage(self.root, self.paths, self.registry)
         summary = SummaryUploadPage(self.root, self.paths, self.registry)
 
-        export_command = online.build_export_command("2026-06-09")
+        export_command = online.build_export_command("2026-06-01", "2026-06-09")
         self.assertEqual(export_command[-1], "2026-06-09")
-        self.assertEqual(Path(export_command[-2]), self.paths.online_energy)
+        self.assertEqual(export_command[-3], "2026-06-01")
+        self.assertEqual(Path(export_command[-5]), self.paths.online_energy)
         self.assertTrue(trade.output_dir.get())
         self.assertEqual(summary.default_output_for(Path("C:/data")).suffix, ".xlsx")
 
@@ -1010,9 +1011,11 @@ class PageAdapterTests(unittest.TestCase):
         from toolbox.pages import OnlineEnergyPage
 
         page = OnlineEnergyPage(self.root, self.paths, self.registry)
-        expected = date.today() - timedelta(days=1)
+        expected = (date.today() - timedelta(days=1)).isoformat()
 
-        self.assertEqual(page.run_date.get(), expected.isoformat())
+        # 上网电量已改为开始/结束日期范围导出，两个端点默认都取前一天。
+        self.assertEqual(page.start_date.get(), expected)
+        self.assertEqual(page.end_date.get(), expected)
 
     def test_trade_auto_match_finds_latest_d_and_d_minus_two_files(self) -> None:
         from toolbox.pages import TradeAnalysisPage
@@ -2529,12 +2532,14 @@ class PageAdapterTests(unittest.TestCase):
             Path("market.xlsx"),
             date(2026, 7, 6),
             [473, 2985.6],
+            overwrite=True,
         )
         fetch_spot_clearing.assert_called_once_with(context, date(2026, 7, 6))
         write_spot_clearing.assert_called_once_with(
             Path("market.xlsx"),
             date(2026, 7, 6),
             [121, 46],
+            overwrite=True,
         )
         write_day_ahead_load.assert_not_called()
         ensure_login.assert_called_once()
@@ -2616,7 +2621,8 @@ class PageAdapterTests(unittest.TestCase):
 
         self.assertEqual(result["realtimeMarket"]["range"], "BB5:BE5")
         fetch_realtime_market.assert_called_once_with(context, date(2026, 7, 4))
-        write_realtime_market.assert_called_once_with(Path("market.xlsx"), date(2026, 7, 4), [3] * 4)
+        write_realtime_market.assert_called_once_with(
+            Path("market.xlsx"), date(2026, 7, 4), [3] * 4, overwrite=True)
 
     def test_market_table_update_uses_base_date_minus_six_for_generation_settlement(self) -> None:
         from types import SimpleNamespace
@@ -2669,7 +2675,8 @@ class PageAdapterTests(unittest.TestCase):
 
         self.assertEqual(result["generationSettlement"]["range"], "BF1:BQ1")
         fetch_generation_settlement.assert_called_once_with(context, date(2026, 6, 30))
-        write_generation_settlement.assert_called_once_with(Path("market.xlsx"), date(2026, 6, 30), [4] * 12)
+        write_generation_settlement.assert_called_once_with(
+            Path("market.xlsx"), date(2026, 6, 30), [4] * 12, overwrite=True)
 
     def test_market_table_update_uses_base_date_minus_six_for_user_settlement(self) -> None:
         from types import SimpleNamespace
@@ -2722,7 +2729,8 @@ class PageAdapterTests(unittest.TestCase):
 
         self.assertEqual(result["userSettlement"]["range"], "BR1:BX1")
         fetch_user_settlement.assert_called_once_with(context, date(2026, 6, 30))
-        write_user_settlement.assert_called_once_with(Path("market.xlsx"), date(2026, 6, 30), [5] * 7)
+        write_user_settlement.assert_called_once_with(
+            Path("market.xlsx"), date(2026, 6, 30), [5] * 7, overwrite=True)
 
     def test_market_table_update_uses_base_date_minus_two_for_actual_load(self) -> None:
         from toolbox.runtime import load_module
@@ -2868,8 +2876,11 @@ class LauncherTests(unittest.TestCase):
         readme = next(self.script_root.glob("*/README_*.txt"))
         content = readme.read_text(encoding="utf-8")
 
-        self.assertIn("00_启动/电力工具箱.command", content)
-        self.assertIn("原有", content)
+        # 目录说明已收敛为 Windows 版：重点是当前入口（.cmd）写清楚，
+        # 同时保留“macOS 的 .command 只是历史入口、不再维护”的说明。
+        self.assertIn("00_启动", content)
+        self.assertIn("Windows启动.cmd", content)
+        self.assertIn(".command", content)
         self.assertIn("保留", content)
 
 

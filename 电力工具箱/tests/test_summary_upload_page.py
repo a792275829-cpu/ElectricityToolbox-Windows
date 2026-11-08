@@ -168,7 +168,9 @@ class SummaryUploadPageTests(unittest.TestCase):
     def test_modes_show_only_relevant_controls_and_keep_shared_input(self) -> None:
         for mode, summary, upload in (("summary", True, False), ("upload", False, True), ("both", True, True)):
             self.page.mode.set(mode)
-            self.assertEqual(bool(self.page.summary_form.winfo_manager()), summary)
+            # 与 mac 版一致：汇总输出固定按复盘目录自动命名，不再有独立的
+            # 「输出文件」输入行，因此页面不该再暴露 summary_form。
+            self.assertFalse(hasattr(self.page, "summary_form"))
             self.assertEqual(bool(self.page.preview_button.winfo_manager()), upload)
             self.assertEqual(bool(self.page.open_button.winfo_manager()), summary)
             self.assertEqual(Path(self.page.input_dir.get()), self.folder)

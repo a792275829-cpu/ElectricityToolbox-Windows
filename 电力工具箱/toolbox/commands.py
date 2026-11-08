@@ -123,13 +123,9 @@ def word_report(paths, report_date, online, day_ahead, daily, template):
     return command
 
 
-def prediction(paths, input_path, output_dir, forecast_days, training_months, run_date, *,
-               update_master: bool = False):
+def prediction(paths, input_path, output_dir, forecast_days, training_months, run_date):
     if not 1 <= forecast_days <= 15:
         raise ValueError("预测天数必须在 1 至 15 之间")
-    command = [python_executable(), str(paths.guangdong_price_forecast), "--input", str(input_path),
-               "--output-dir", str(output_dir), "--as-of", run_date, "--forecast-days",
-               str(forecast_days), "--training-months", str(training_months)]
-    if update_master:
-        command.insert(2, "--update-master")
-    return command
+    return [python_executable(), str(paths.guangdong_price_forecast), "--update-master", "--input", str(input_path),
+            "--output-dir", str(output_dir), "--as-of", run_date, "--forecast-days",
+            str(forecast_days), "--training-months", str(training_months)]

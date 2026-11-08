@@ -3,10 +3,11 @@ from __future__ import annotations
 import argparse
 import base64
 from copy import copy
-from datetime import date
+from datetime import date, datetime, time as datetime_time, timedelta
 import hashlib
 import http.cookiejar
 import json
+import math
 import os
 from pathlib import Path
 import ssl
@@ -15,12 +16,15 @@ import sys
 import tempfile
 import urllib.parse
 import urllib.request
+from uuid import uuid4
 
+import numpy as np
 import pandas as pd
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.cell import WriteOnlyCell
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.datetime import to_excel, time_to_days, timedelta_to_days
 
 
 BASE_URL = "https://xhxt.chng.com.cn"
@@ -30,6 +34,7 @@ if str(SCRIPT_DIR.parent) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR.parent))
 from toolbox_credentials import read_login_config
 from toolbox_dates import normalize_date_input
+from toolbox_excel_read import read_cell_snapshots
 from toolbox_native_excel import read_model_frame
 from toolbox_native_write import apply_table_style, read_table_layout, save_frame
 
@@ -92,6 +97,14 @@ class GDFireClient:
             urllib.request.HTTPCookieProcessor(self.cookies),
             urllib.request.HTTPSHandler(context=context),
         )
+
+    # Windows 客户端只有 urllib 的 cookiejar，没有浏览器进程需要释放；
+    # 保留上下管理器接口，让更新流程与 mac 版共用同一个调用形状。
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
 
     def _json_request(
         self,
@@ -260,7 +273,7 @@ def build_increment(
             )
 
     frame["日前西电东送电力与B类竞价空间总加(MW)"] = (
-        frame.get("日前西电东送电力(MW)") + frame.get("日前B类竞价空间(MW)")
+        frame.get("日前西电东送电力(MW)", np.nan) + frame.get("日前B类竞价空间(MW)", np.nan)
     )
 
     price_data = price_payload["data"]
@@ -308,6 +321,9 @@ def deduplicate_columns(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[tuple[s
     """Keep the first repeated header/value column and report what was removed."""
     cleaned = frame.loc[:, ~frame.columns.duplicated(keep="first")].copy()
     duplicates = duplicate_data_columns(cleaned)
+    protected = {*FORECAST_LOAD_COLUMNS.values(), *ACTUAL_LOAD_COLUMNS.values(),
+                 "全省日前平均电价", "全省实时平均电价", "日前西电东送电力与B类竞价空间总加(MW)"}
+    duplicates = [(first, duplicate) for first, duplicate in duplicates if duplicate not in protected]
     if duplicates:
         cleaned = cleaned.drop(columns=[duplicate for _, duplicate in duplicates])
     return cleaned, duplicates
@@ -350,7 +366,7 @@ def merge_data_frames(base: pd.DataFrame, increment: pd.DataFrame) -> pd.DataFra
     base, _ = deduplicate_columns(base)
     base["日期"] = pd.to_datetime(base["日期"]).dt.normalize()
     increment["日期"] = pd.to_datetime(increment["日期"]).dt.normalize()
-    all_columns = list(base.columns)
+    all_columns = list(base.columns) + [column for column in increment.columns if column not in base.columns]
     base = base.reindex(columns=all_columns)
     increment = increment.reindex(columns=all_columns)
     value_columns = [column for column in all_columns if column not in ["日期", "时刻"]]
@@ -373,23 +389,31 @@ def merge_data_frames(base: pd.DataFrame, increment: pd.DataFrame) -> pd.DataFra
 
 
 def missing_dates(frame: pd.DataFrame, end_date: str) -> list[date]:
-    """Return dates through D that do not have all 96 quarter-hour rows."""
+    """Retry missing canonical slots, price labels and partially published curves."""
     if frame.empty:
         return []
     normalized = frame.copy()
     normalized["日期"] = pd.to_datetime(normalized["日期"], errors="raise").dt.normalize()
     end = pd.Timestamp(end_date).normalize()
     start = normalized["日期"].min()
-    if start > end:
-        return []
-    counts = (
-        normalized.loc[normalized["日期"].le(end)]
-        .drop_duplicates(["日期", "时刻"])
-        .groupby("日期", observed=True)["时刻"]
-        .nunique()
-    )
-    expected = pd.date_range(start, end, freq="D")
-    return [value.date() for value in expected if int(counts.get(value, 0)) != 96]
+    slots = {f"{hour:02d}:{minute:02d}" for hour in range(24) for minute in (0, 15, 30, 45)}
+    # Optional curves may have no publication at all. Once a field has appeared,
+    # retry holes in it as well as the mandatory DA price label. Recent dates are
+    # refreshed separately so newly published optional fields can be discovered.
+    known = {*FORECAST_LOAD_COLUMNS.values(), *ACTUAL_LOAD_COLUMNS.values(), "全省实时平均电价"}
+    required = ["全省日前平均电价"] + [column for column in normalized.columns
+        if column in known and normalized[column].notna().any()]
+    groups = dict(tuple(normalized.groupby("日期", sort=False)))
+    missing = []
+    for day in pd.date_range(start, end, freq="D"):
+        rows = groups.get(day)
+        if rows is None or len(rows) != 96 or set(rows["时刻"]) != slots:
+            missing.append(day.date())
+            continue
+        values = rows.reindex(columns=required).apply(pd.to_numeric, errors="coerce")
+        if not np.isfinite(values.to_numpy(dtype=float)).all():
+            missing.append(day.date())
+    return missing
 
 
 def workbook_layout(path: Path, sheet_name: str = "整合数据") -> dict[str, dict[str, object]]:
@@ -397,19 +421,71 @@ def workbook_layout(path: Path, sheet_name: str = "整合数据") -> dict[str, d
     return read_table_layout(path, sheet_name)
 
 
-def write_large_xlsx(
+def write_large_xlsx(frame, path, sheet_name, *, format_source=None):
+    """Verify representative values/formats before atomically publishing the table."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.stem}.{uuid4().hex}.tmp.xlsx")
+    try:
+        _write_large_xlsx(frame, temporary, sheet_name, format_source=format_source)
+        book = load_workbook(temporary, read_only=True, data_only=False)
+        try:
+            sheet = book[sheet_name]
+            if [cell.value for cell in next(sheet.iter_rows(max_row=1))] != list(frame.columns):
+                raise RuntimeError("总表保存后表头回读不一致")
+            indexes = {0, len(frame) - 1} if len(frame) else set()
+            references = [(sheet_name, f"{get_column_letter(column + 1)}{index + 2}")
+                          for index in indexes for column in range(len(frame.columns))]
+            snapshots = read_cell_snapshots(book, references)
+            layout = workbook_layout(format_source) if format_source and Path(format_source).is_file() else {}
+            def excel_value(value):
+                if isinstance(value, datetime_time):
+                    return time_to_days(value)
+                if isinstance(value, timedelta):
+                    return timedelta_to_days(value)
+                if isinstance(value, (date, datetime)) and not pd.isna(value):
+                    return to_excel(value, book.epoch)
+                if isinstance(value, str):
+                    return ILLEGAL_CHARACTERS_RE.sub("", value)[:32767] or None
+                return value
+
+            for index in indexes:
+                for column, name in enumerate(frame.columns):
+                    expected = frame.iloc[index, column]
+                    actual, number_format = snapshots[(sheet_name, f"{get_column_letter(column + 1)}{index + 2}")]
+                    # Streaming writers omit unstyled blank cells. openpyxl
+                    # returns EmptyCell.number_format=None for these; Excel's
+                    # effective format is still General, not a lost custom style.
+                    if actual is None and number_format is None:
+                        number_format = "General"
+                    expected, actual = excel_value(expected), excel_value(actual)
+                    if pd.isna(expected):
+                        matches = actual is None
+                    elif isinstance(expected, (int, float, np.number)) and not isinstance(expected, (bool, np.bool_)):
+                        matches = isinstance(actual, (int, float)) and math.isclose(float(expected), float(actual), rel_tol=1e-12, abs_tol=1e-12)
+                    else:
+                        matches = actual == expected
+                    if not matches or (str(name) in layout and number_format != layout[str(name)]["data_style"]["number_format"]):
+                        raise RuntimeError(f"总表保存后数值或格式回读不一致：{name}，第{index + 2}行")
+        finally:
+            book.close()
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _write_large_xlsx(
     frame: pd.DataFrame,
     path: Path,
     sheet_name: str,
     *,
     format_source: Path | None = None,
 ) -> None:
-    """Stream a large data frame to a temporary XLSX, then replace atomically."""
+    """Serialize to the caller-owned temporary path through the selected backend."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    temporary_path = path
     layout = workbook_layout(format_source) if format_source and format_source.is_file() else {}
     if save_frame(frame, temporary_path, sheet_name, layout):
-        temporary_path.replace(path)
         return
     workbook = Workbook(write_only=True)
     sheet = workbook.create_sheet(title=sheet_name)
@@ -449,7 +525,6 @@ def write_large_xlsx(
             cleaned.append(cell)
         sheet.append(cleaned)
     workbook.save(temporary_path)
-    temporary_path.replace(path)
 
 
 def build_modeling_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -471,13 +546,40 @@ def build_modeling_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return result.drop(columns=empty)
 
 
+def fetch_increment(client: GDFireClient, start: str, end: str) -> pd.DataFrame:
+    """Bound API response size while sharing one tool-local authenticated session."""
+    frames = []
+    for batch_start in pd.date_range(start, end, freq="31D"):
+        batch_end = min(batch_start + pd.Timedelta(days=30), pd.Timestamp(end))
+        first, last = str(batch_start.date()), str(batch_end.date())
+        print(f"补抓总表数据：{first} 至 {last}", flush=True)
+        common = {"startDate": first, "endDate": last, "provinceAreaId": PROVINCE_AREA_ID}
+        load_payload = client.get("/gdfire/api/data/net/load", common)
+        price_payload = client.get(
+            "/gdfire/api/data/price/avg/node/price", {"startDate": first, "endDate": last},
+        )
+        frames.append(build_increment(first, last, load_payload, price_payload))
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+
+def master_date_window(run_date: str) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Keep the last calendar year, with D included and its anniversary excluded."""
+    end = pd.Timestamp(normalize_date_input(run_date))
+    return end - pd.DateOffset(years=1) + pd.Timedelta(days=1), end
+
+
+def trim_master_frame(frame: pd.DataFrame, start, end) -> pd.DataFrame:
+    dates = pd.to_datetime(frame["日期"], errors="raise").dt.normalize()
+    return frame.loc[dates.between(start, end)].copy()
+
+
 def update_master_workbook(
     *,
     run_date: str | None = None,
     config_path: Path = CONFIG_PATH,
     master_workbook: Path | None = None,
 ) -> dict[str, object]:
-    """Fill missing dates through D into one persistent master workbook."""
+    """Fill gaps within the last calendar year and atomically discard other dates."""
     config = load_config(config_path)
     paths = resolve_paths(SCRIPT_DIR, config_path)
     master_path = (
@@ -486,45 +588,55 @@ def update_master_workbook(
     )
     base_path = paths["initialWorkbook"]
     end_date = normalize_date_input(run_date) if run_date is not None else date.today().isoformat()
+    window_start, window_end = master_date_window(end_date)
 
     if master_path.is_file():
         current = read_data_workbook(master_path)
     elif base_path.is_file():
         current = read_data_workbook(base_path)
     else:
-        initial_date = str(config.get("initialDate") or end_date)
-        current = empty_time_frame(initial_date, initial_date).drop(columns=["时点序号"])
+        current = empty_time_frame(str(window_start.date()), str(window_start.date())).drop(columns=["时点序号"]).iloc[:0]
 
+    original_rows = len(current)
+    current = trim_master_frame(current, window_start, window_end)
+    truncated = len(current) != original_rows
     gaps = missing_dates(current, end_date)
-    if not master_path.is_file() and not base_path.is_file():
-        gaps = [value.date() for value in pd.date_range(initial_date, end_date, freq="D")]
+    present_dates = set(pd.to_datetime(current["日期"]).dt.date)
+    gaps = sorted(set(gaps) | {
+        day.date() for day in pd.date_range(window_start, window_end, freq="D")
+        if day.date() not in present_dates
+    })
+    refresh_days = config.get("refreshDays", 7)
+    if type(refresh_days) is not int or refresh_days < 0:
+        raise ValueError("refreshDays 必须是大于或等于0的整数")
+    if master_path.is_file() and refresh_days and not current.empty:
+        end = pd.Timestamp(end_date)
+        start = max(window_start, end - pd.Timedelta(days=refresh_days - 1))
+        gaps = sorted(set(gaps) | {day.date() for day in pd.date_range(start, end, freq="D")})
     if not gaps:
-        if not master_path.is_file():
-            write_large_xlsx(current, master_path, "整合数据")
+        if not master_path.is_file() or truncated:
+            write_large_xlsx(current, master_path, "整合数据", format_source=master_path if master_path.is_file() else base_path)
         return {
             "master": master_path.resolve(),
             "requested_dates": [],
-            "updated": False,
+            "updated": truncated,
         }
 
-    # One API interval keeps the update path simple. Existing values survive because
-    # merge_data_frames takes the latest non-empty value per field.
+    # Fetch bounded intervals in one session, then publish once. Existing values
+    # survive because merge_data_frames takes the latest non-empty value per field.
     start = min(gaps).isoformat()
     end = max(gaps).isoformat()
-    client = GDFireClient()
-    client.login(str(config["username"]), str(config["password"]))
-    common = {"startDate": start, "endDate": end, "provinceAreaId": PROVINCE_AREA_ID}
-    load_payload = client.get("/gdfire/api/data/net/load", common)
-    price_payload = client.get(
-        "/gdfire/api/data/price/avg/node/price",
-        {"startDate": start, "endDate": end},
-    )
-    increment = build_increment(start, end, load_payload, price_payload)
-    increment = increment.reindex(columns=current.columns)
+    with GDFireClient() as client:
+        client.login(str(config["username"]), str(config["password"]))
+        increment = fetch_increment(client, start, end)
 
-    merged = merge_data_frames(current, increment)
+    merged = trim_master_frame(merge_data_frames(current, increment), window_start, window_end)
     write_large_xlsx(merged, master_path, "整合数据", format_source=master_path)
-    remaining = missing_dates(merged, end_date)
+    present_dates = set(pd.to_datetime(merged["日期"]).dt.date)
+    remaining = sorted(set(missing_dates(merged, end_date)) | {
+        day.date() for day in pd.date_range(window_start, window_end, freq="D")
+        if day.date() not in present_dates
+    })
     return {
         "master": master_path.resolve(),
         "requested_dates": [value.isoformat() for value in gaps],

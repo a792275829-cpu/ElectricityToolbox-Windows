@@ -250,9 +250,30 @@ class PowerBenefitPageTests(unittest.TestCase):
             self.assertNotIn("--start-date",command)
             self.assertEqual(len(page.workbooks),3)
             self.assertIn("海风博弈收益统计-新.xlsx",page.workbooks[2].get())
-            self.assertFalse(page.selected[2].get())
+            # 与 mac 版一致：三个场站默认都不勾选，由用户显式选择。
+            self.assertEqual([variable.get() for variable in page.selected], [False, False, False])
             page.destroy()
         finally: root.destroy()
+
+    def test_overwrite_switch_reaches_the_command(self):
+        # 界面上的勾选框此前只影响显示：命令拼装没有把它交给
+        # commands.power_benefit，取消勾选后依然会覆盖已有数值。
+        from toolbox.runtime import TaskRegistry
+        from toolbox.power_benefit_page import PowerBenefitUpdatePage
+
+        root = tk.Tk(); root.withdraw()
+        try:
+            paths = ToolPaths(Path(__file__).resolve().parents[2])
+            page = PowerBenefitUpdatePage(root, paths, TaskRegistry())
+            args = ([Path("/tmp/归湖.xlsx")], date(2026, 10, 12))
+            kwargs = dict(start_date=None, create_backup=False)
+            self.assertNotIn("--skip-existing", page.build_update_command(*args, **kwargs))
+            page.overwrite.set(False)
+            command = page.build_update_command(*args, **kwargs)
+            self.assertIn("--skip-existing", command)
+            page.destroy()
+        finally:
+            root.destroy()
 
 
 class PowerBenefitDesktopTests(unittest.TestCase):

@@ -119,21 +119,26 @@ class SurfaceCacheTests(unittest.TestCase):
         self.assertEqual(builds, self.cache.build_count)
         self.assertEqual(geometry, (button.winfo_reqwidth(), button.winfo_reqheight()))
 
-    def test_labelframe_uses_border_parcel_and_destroy_cancels_resize(self) -> None:
+    def test_labelframe_keeps_flat_border_and_destroy_cancels_resize(self) -> None:
+        # 分组框已改为 clam 自带的 1px 描边（mac 版同一口径），没有圆角贴图，
+        # 因此不进表面缓存；用带贴图的按钮覆盖「销毁时撤销待执行的回调」。
         frame = ttk.LabelFrame(self.root, text="运行日志")
         frame.place(x=0, y=0, width=300, height=160)
         self.cache.track(frame)
         self.root.update()
         self.cache.flush()
-        key = self.cache.widgets[frame].assigned
-        self.assertLess(key[2], frame.winfo_height())
-        self.assertTrue(frame.identify(150, 160 - key[2]))
-        frame.place_configure(width=320)
-        self.root.update()
-        callback = self.cache.widgets[frame].after_id
-        frame.destroy()
         self.assertNotIn(frame, self.cache.widgets)
-        self.assertNotIn(callback, self.root.tk.call("after", "info"))
+        self.assertEqual("Labelframe.border", ttk.Style(self.root).layout("TLabelframe")[0][0])
+
+        button = ttk.Button(self.root, text="模块", style="NavSelected.TButton")
+        button.place(x=0, y=0, width=120, height=40)
+        self.cache.track(button)
+        self.root.update()
+        callback = self.cache.widgets[button].after_id
+        button.destroy()
+        self.assertNotIn(button, self.cache.widgets)
+        if callback is not None:
+            self.assertNotIn(callback, self.root.tk.call("after", "info"))
 
     def test_prototype_only_caches_navigation_and_summary_and_keeps_mode_inputs(self) -> None:
         from toolbox.app import ToolboxApp
@@ -158,7 +163,7 @@ class SurfaceCacheTests(unittest.TestCase):
             self.assertEqual("/示例/复盘", summary.input_dir.get())
             self.assertEqual("upload", summary.mode.get())
             self.assertEqual("开始上传", summary.run_button.cget("text"))
-            self.assertEqual("", summary.summary_form.winfo_manager())
+            self.assertFalse(hasattr(summary, "summary_form"))
         finally:
             app.destroy()
 

@@ -1,5 +1,32 @@
 # 更新日志
 
+## [未发布] - 按 mac v0.1.32 统一 UI 与功能（等待确认构建，版本号保持 0.1.32）
+
+> 本轮只改源码与测试，未执行 `packaging/windows/build.ps1`，未生成新安装包；版本文件仍为 0.1.32。按用户要求，等待明确确认后再递增版本并发布。
+
+- **移除所有「Windows 有意保留」的页面级能力，按 mac 版统一**（用户明确要求「Windows 有意保留的能力不要，和mac版统一」）：
+  - `500kV断面分析/src/run_500kv_blockage_gui.py`、`toolbox/section_analysis_page.py`：删除价差阈值输入、阈值回算、规则摘要框与「打开最新结果」结果操作区；阈值固定为 mac 的 80 元/MWh 默认值，仅服务表单保留可调项。
+  - `toolbox/market_report_page.py`：删除「东莞运行方式」「实时检修容量」补录字段与单独补录分组框，字段契约、服务表单、工作流三层同步移除。
+  - `toolbox/summary_upload_page.py`：删除 Windows 显式「输出文件」输入行与 `output_file` 表单字段，汇总输出固定落在复盘目录根 `目录名_汇总.xlsx`。
+  - `toolbox/daily_pdf_page.py`、`spot_price_page.py`、`transaction_info_page.py`、`power_benefit_page.py`：整体替换为 mac 版（仅把 `toolbox_shared.*` 映射为本仓库扁平 `toolbox_*` 模块）。移除 Windows 自造的 `ToolPage.register_viewport_wrap()` 页面级换行接口，恢复 mac 的按页实现；现货页、功率收益页三个场站默认勾选全部改为 `False`；交易系统信息页去掉额外的 `DATE_INPUT_HINT` 提示标签。页面文件与 mac 版逐行一致（仅导入名不同）。
+  - 广东数据总表更新器移植 mac 的「近一年窗口截断 + `refreshDays` 重刷」：`master_date_window()` / `trim_master_frame()` 只保留截至 D 日的一年窗口、范围外日期原子丢弃；`fetch_increment()` 按 31 天分批请求避免超大响应；`missing_dates()` 除 96 时点外还校验已出现关键曲线的空洞；`write_large_xlsx()` 增加表头与首尾行数值/格式回读校验后才替换文件。Windows 版仍使用 `urllib + openssl + cookiejar` 登录客户端，仅补齐上下文管理器接口以复用 mac 的调用形状。
+  - 预测入口按 mac 统一：`commands.prediction` 恒带 `--update-master`，`workflows.plan` 不再要求总表文件已存在；首次使用时由 `ensure_master_workbook()` 按运行日自动生成/补齐，不再保留 Windows 的「必须先点补齐总表再预测」显式两步。
+- 文件选择按钮统一为紧凑「+」：`page_support.add_path_row` 改用 `FileSelectButton`，工具箱内各路径行与独立 GUI（500kV 断面分析、WPS 写入、早报生成、出力受限分析、电量汇总）同步替换。
+- 服务表单三层对齐：`page_contracts.py` 删除页面上已不存在的 `threshold` / `output_file` / 补录字段；`service_catalog.py` 统一默认值与文案、为更多工具补「登录」动作；`workflows.py` 统一登录命令与汇总输出路径。
+- 功能修复：功率调整收益统计表更新的「覆盖非空单元格」此前只影响界面，`build_update_command` 未把 `overwrite` 传给 `commands.power_benefit`，取消勾选仍会覆盖已有数值；现接通并新增回归用例。
+- 功能修复：`pages.py`、`spot_price_page.py`、`transaction_info_page.py`、`private_batch_upload_page.py`、`wind_forecast_page.py` 共 6 处 `start_login` 覆写漏传 `action="login"`；`widgets._save_login_draft` 在 `run_process` 之前就按 action 判断是否需要保存账号草稿，现全部显式标注并新增 AST 静态用例覆盖全部 8 处覆写。
+- 渲染与后端修补：`SurfaceCache` 对无圆角贴图的扁平样式返回 `None`，修复 `Nav.TButton` / `TLabelframe` 的 `KeyError`；Rust `summary_parse` 对重复时段改为报错而非静默覆盖；Rust workbook fingerprint 对齐 Windows Python（卷号取低 32 位、改用创建时间）。
+- 测试基线：新增 `tests/test_guangdong_retention.py`（mac 的近一年窗口 9 项回归）与 `ForecastMasterBootstrapTests`（7 项总表自动生成/补齐回归）；更新广东预测、现货页、功率收益页、市场日报、断面分析、汇总上传、页面契约等旧断言到 mac 口径。全量验证继续使用本地逐模块运行器 `logs/run_module_tests.py`（单模块超时 240s，结果写 `logs/module-tests.json`；`logs/` 按仓库约定不入库）。
+- 新增 `.gitattributes`：为以 CRLF 存库的 `wps_excel_to_kdocs_gui.py` 声明 `whitespace=cr-at-eol`，消除 `git diff --check` 对行尾 `\r` 的误报。
+- **仅保留平台运行必需的 Windows 适配**（不是页面能力，移除后 Windows 版无法正常运行）：高 DPI 窗口尺寸换算、`page_support.open_directory` 走 `toolbox_platform.open_path`、`ToolPage.expand_content` 高窗口布局与 `refresh_viewport()` 延迟装配重测、`ToolPage._fit_content_labels()` 统一给 mac 版未设 `wraplength` 的长说明补视口宽度上限（Windows 字体更宽，不处理会撑出横向滚动条；适配器放在页面基类，页面文件不动）、扁平 `toolbox_*` 模块命名、`urllib` 登录客户端、Rust 原生后端、便携 Node、独立增量更新通道、`script_command` 之外的 Windows 命令形态（逗号路径需 `--files` 重复传参）。
+- 验证：
+  - 逐模块全量回归 `logs/run_module_tests.py` 两轮均为 `TOTAL 74 PROBLEM 0`（74 个 `tests.test_*` 模块，含新增 `test_guangdong_retention` 9 项、`ForecastMasterBootstrapTests` 7 项、`ContentLabelWrapTests` 2 项）。
+  - 定向复跑：`test_guangdong_price` 24 项、`test_native_updates` 8 项、`test_ui_performance` 21 项、`test_spot_price_page` 4 项、`test_toolbox` 98 项（5 跳过）均通过。
+  - 真实 Tk 窗口逐页实测 8 张页面（广东运行日报解析上传、出清结果汇总上传、交易系统信息更新、现货价格分析表更新、功率调整收益统计表更新、南方分公司电力市场日报、500kV 断面分析、广东电价预测）：请求宽度 864~1038，视口 1251，横向／纵向滚动条均为 0；截图复核「+」按钮、默认不勾选与长说明换行正常。
+  - `start_source_test.ps1 -Smoke` 输出 `TOOLBOX_SMOKE=OK`；`version.py check --tag v0.1.32 --require-notes` 返回 `v0.1.32`（exit 0）；`git diff --check` exit 0；改动涉及 36 个 Python 文件 `py_compile` 全通过。
+  - Rust `cargo test --release` 跳过 2 项受沙箱 `reg.exe` 限制写注册表的 `windows_update` 用例后为 `7 passed` + `5 passed`、`0 failed`；该 2 项仍需在允许环境或用户本机复验。
+  - 未执行任何安装包构建，未生成新的 0.1.33/0.1.34 安装包。
+
 ## [0.1.32] - 2026-11-08
 
 - 版本号自本版起与 macOS 版对齐：Windows 0.1.32 对应 macOS v0.1.32，后续每轮对齐直接沿用 mac 版本号；同一 mac 基线确需再次发布 Windows 专属修补时从 0.1.33 起递增，并在本文件标注对应关系。此前用于内部迭代的 0.1.33~0.1.36 号作废（内容已全部并入本版），这几个号不再指代旧迭代记录；本版之下「内部迭代记录」仅作历史保留。

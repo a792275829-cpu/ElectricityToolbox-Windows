@@ -20,6 +20,9 @@ DEFAULT_OUTPUT_DIR = Path.home() / "Downloads"
 
 
 def main() -> None:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from toolbox_file_button import FileSelectButton
+
     root = tk.Tk()
     root.title("500kV 断面分析")
     root.geometry("860x560")
@@ -27,7 +30,6 @@ def main() -> None:
     topology_var = tk.StringVar(value=str(DEFAULT_TOPOLOGY))
     DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output_dir_var = tk.StringVar(value=str(DEFAULT_OUTPUT_DIR))
-    threshold_var = tk.StringVar(value="80")
     selected_files: list[Path] = []
     running = tk.BooleanVar(value=False)
     ui_queue: queue.Queue[tuple[str, str, str | None]] = queue.Queue()
@@ -43,19 +45,19 @@ def main() -> None:
 
     frame.columnconfigure(1, weight=1)
 
-    topology_entry = row("拓扑 Markdown", 0)
+    topology_entry = row("拓扑文件", 0)
     topology_entry.configure(textvariable=topology_var)
 
     def choose_topology() -> None:
         path = filedialog.askopenfilename(
-            title="选择拓扑 Markdown",
+            title="选择拓扑 Markdown 或编辑器 JSON",
             initialfile=topology_var.get(),
-            filetypes=[("Markdown", "*.md"), ("All files", "*.*")],
+            filetypes=[("拓扑文件", "*.md *.json"), ("All files", "*.*")],
         )
         if path:
             topology_var.set(path)
 
-    tk.Button(frame, text="选择", command=choose_topology).grid(row=0, column=2, sticky="ew", pady=5)
+    FileSelectButton(frame, text="选择拓扑文件", command=choose_topology).grid(row=0, column=2, pady=5, sticky="w")
 
     output_entry = row("输出目录", 1)
     output_entry.configure(textvariable=output_dir_var)
@@ -65,14 +67,10 @@ def main() -> None:
         if path:
             output_dir_var.set(path)
 
-    tk.Button(frame, text="选择", command=choose_output_dir).grid(row=1, column=2, sticky="ew", pady=5)
-
-    tk.Label(frame, text="价差阈值", anchor="w").grid(row=2, column=0, sticky="w", pady=5)
-    threshold_entry = tk.Entry(frame, textvariable=threshold_var, width=12)
-    threshold_entry.grid(row=2, column=1, sticky="w", padx=(8, 8), pady=5)
+    FileSelectButton(frame, text="选择输出目录", command=choose_output_dir).grid(row=1, column=2, pady=5, sticky="w")
 
     files_label = tk.StringVar(value="未选择原始电价 Excel")
-    tk.Label(frame, textvariable=files_label, anchor="w").grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 5))
+    tk.Label(frame, textvariable=files_label, anchor="w").grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 5))
 
     def choose_files() -> None:
         paths = filedialog.askopenfilenames(
@@ -88,11 +86,11 @@ def main() -> None:
         for path in selected_files:
             write_log(f"已选择: {path}")
 
-    tk.Button(frame, text="选择原始数据", command=choose_files).grid(row=3, column=2, sticky="ew", pady=(10, 5))
+    FileSelectButton(frame, text="选择原始数据", command=choose_files).grid(row=2, column=2, pady=(10, 5))
 
     log = scrolledtext.ScrolledText(frame, height=20, wrap=tk.WORD)
-    log.grid(row=4, column=0, columnspan=3, sticky="nsew", pady=(8, 8))
-    frame.rowconfigure(4, weight=1)
+    log.grid(row=3, column=0, columnspan=3, sticky="nsew", pady=(8, 8))
+    frame.rowconfigure(3, weight=1)
 
     def write_log(message: str) -> None:
         log.insert(tk.END, message + "\n")
@@ -133,11 +131,10 @@ def main() -> None:
     def set_buttons_state(state: str) -> None:
         start_button.configure(state=state)
 
-    def run_batch(topology_text: str, output_dir_text: str, threshold_text: str, raw_files: list[Path]) -> None:
+    def run_batch(topology_text: str, output_dir_text: str, raw_files: list[Path]) -> None:
         try:
             topology_path = Path(topology_text).expanduser()
             output_dir = Path(output_dir_text).expanduser()
-            threshold = float(threshold_text)
             if not topology_path.exists():
                 raise FileNotFoundError(f"拓扑文件不存在: {topology_path}")
             if not raw_files:
@@ -155,7 +152,6 @@ def main() -> None:
                         topology_path=topology_path,
                         raw_price_path=raw_path,
                         output_dir=output_dir,
-                        threshold=threshold,
                     )
                 except Exception as exc:
                     error_text = traceback.format_exc()
@@ -187,18 +183,17 @@ def main() -> None:
             return
         topology_text = topology_var.get()
         output_dir_text = output_dir_var.get()
-        threshold_text = threshold_var.get()
         raw_files = list(selected_files)
         running.set(True)
         set_buttons_state(tk.DISABLED)
         threading.Thread(
             target=run_batch,
-            args=(topology_text, output_dir_text, threshold_text, raw_files),
+            args=(topology_text, output_dir_text, raw_files),
             daemon=True,
         ).start()
 
     start_button = tk.Button(frame, text="开始分析", height=2, command=start)
-    start_button.grid(row=5, column=0, columnspan=3, sticky="ew")
+    start_button.grid(row=4, column=0, columnspan=3, sticky="ew")
 
     root.after(80, poll_ui_queue)
     root.mainloop()

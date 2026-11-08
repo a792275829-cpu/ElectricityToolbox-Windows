@@ -10,7 +10,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .file_dialogs import FileDialogState
-from .page_support import DateRangeInput, DATE_INPUT_ERROR, DATE_INPUT_HINT, parse_date_input
+from .page_support import DateRangeInput, DATE_HINT_WRAP, DATE_INPUT_ERROR, DATE_ROW_GAP, parse_date_input
 from .page_support import add_path_row, open_directory
 from .runtime import TaskRegistry, ToolPaths, python_executable
 from .widgets import ToolPage
@@ -58,21 +58,23 @@ class TransactionInfoUpdatePage(ToolPage):
             button_text="选择文件",
         )
         ttk.Label(form, text="日前日期范围").grid(row=1, column=0, sticky="w", pady=4)
-        DateRangeInput(form, start_variable=self.start_date, end_variable=self.end_date,
-                       start_optional=True, width=16).grid(
-            row=1, column=1, sticky="w", pady=4
-        )
+        date_line = ttk.Frame(form)
+        date_line.grid(row=1, column=1, columnspan=2, sticky="w", pady=4)
+        DateRangeInput(
+            date_line, start_variable=self.start_date, end_variable=self.end_date,
+            start_optional=True,
+        ).pack(side="left")
         ttk.Label(
-            form,
-            text="开始日期留空时自动从 Sheet1 最后日前日期+1接续；" + DATE_INPUT_HINT,
-            style="Muted.TLabel", wraplength=420,
-        ).grid(row=2, column=1, columnspan=3, sticky="w", pady=4)
-        SettingCheckbutton(
-            form, text="写入前生成时间戳备份", variable=self.create_backup
-        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(7, 0))
-        SettingCheckbutton(
-            form, text="覆盖非空单元格", variable=self.overwrite
-        ).grid(row=4, column=0, columnspan=3, sticky="w")
+            date_line,
+            text="开始日期可留空：先补空值，再表尾接续",
+            style="Muted.TLabel",
+            wraplength=DATE_HINT_WRAP,
+        ).pack(side="left", padx=(DATE_ROW_GAP, 0))
+        options = ttk.Frame(form)
+        options.grid(row=2, column=0, columnspan=3, sticky="w", pady=(7, 0))
+        SettingCheckbutton(options, text="覆盖非空单元格", variable=self.overwrite).pack(side="left")
+        SettingCheckbutton(options, text="写入前生成时间戳备份",
+                           variable=self.create_backup).pack(side="left", padx=(16, 0))
 
         mapping = ttk.LabelFrame(self.content, text="更新口径", padding=12)
         mapping.grid(row=1, column=0, sticky="ew", pady=(10, 0))
@@ -124,7 +126,10 @@ class TransactionInfoUpdatePage(ToolPage):
         start_date: date | None,
         create_backup: bool,
     ) -> list[str]:
-        return commands.transaction_info(self.paths, workbook, end_date, start_date=start_date, create_backup=create_backup, overwrite=self.overwrite.get())
+        return commands.transaction_info(
+            self.paths, workbook, end_date, start_date=start_date,
+            create_backup=create_backup, overwrite=self.overwrite.get(),
+        )
 
     def start_update(self) -> None:
         workbook = Path(self.workbook.get().strip()).expanduser()
@@ -157,7 +162,7 @@ class TransactionInfoUpdatePage(ToolPage):
                 start_date=start_date,
                 create_backup=self.create_backup.get(),
             ),
-            cwd=self.paths.transaction_info_update_dir,
+            action='run', cwd=self.paths.transaction_info_update_dir,
             status="正在抓取并更新交易系统信息收集表...",
             cancellable=False,
             on_success=lambda _code: messagebox.showinfo(
@@ -173,7 +178,7 @@ class TransactionInfoUpdatePage(ToolPage):
                 "--login",
                 "--headed",
             ],
-            cwd=self.paths.transaction_info_update_dir,
+            action='login', cwd=self.paths.transaction_info_update_dir,
             status="正在打开交易系统登录窗口...",
         )
 
