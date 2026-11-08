@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -493,6 +494,25 @@ def number_or_zero(value: Any) -> float:
         return 0.0
 
 
+def online_energy_hours(values, *, label: str, allow_empty: bool = False) -> tuple[float | None, ...]:
+    """Parse the 24 hourly values; unreported hours stay blank instead of zero."""
+    if not isinstance(values, list) or len(values) != 24:
+        raise ValueError(f"{label} 应有完整24个小时电量，实际为 {len(values) if isinstance(values, list) else 0} 个，停止导出。")
+    result = []
+    for hour, raw in enumerate(values):
+        if raw is None and allow_empty:
+            result.append(None)
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f"{label} {hour:02d}:00 电量缺失或无效，停止导出。") from None
+        if isinstance(raw, bool) or not math.isfinite(value):
+            raise ValueError(f"{label} {hour:02d}:00 电量缺失或无效，停止导出。")
+        result.append(value)
+    return tuple(result)
+
+
 def fetch_fire_rows(context, run_date: str, tenant_id: str) -> list[dict[str, Any]]:
     response = context.request.get(
         f"{BASE_URL}/gdfire/api/data/unit/power/fire",
@@ -504,6 +524,43 @@ def fetch_fire_rows(context, run_date: str, tenant_id: str) -> list[dict[str, An
     if not isinstance(rows, list):
         raise RuntimeError("火电上网电量返回格式不正确")
     return rows
+
+
+def fetch_qingyuan_rows(context, run_date: str, tenant_id: str, *, metric: str = "onlineEle") -> list[dict[str, Any]]:
+    """Read Qingyuan's dedicated report; ``planValue`` gives the D+2 plan."""
+    if metric not in {"onlineEle", "planValue"}:
+        raise ValueError(f"不支持的清远电量字段：{metric}")
+    response = context.request.get(
+        f"{BASE_URL}/gdfire/api/data/unit/power/qing-yuan/data",
+        params={"runDate": run_date, "endDate": run_date, "orgId": tenant_id},
+        timeout=30000,
+    )
+    data = parse_json_response(response, "读取清远上网电量").get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("columnList"), list) or not isinstance(data.get("rowList"), list):
+        raise ValueError("清远上网电量返回格式不正确，停止导出。")
+    columns = {}
+    for column in data["columnList"]:
+        if column.get("metricType") != metric:
+            continue
+        unit_id, field = column.get("unitId"), column.get("fieldKey")
+        if not unit_id or not field or unit_id in columns or field in columns.values():
+            raise ValueError("清远上网电量列缺失或重复，停止导出。")
+        columns[unit_id] = field
+    if not columns:
+        raise ValueError(f"清远缺少{metric}电量列，停止导出。")
+    hours = {}
+    for row in data["rowList"]:
+        hour = row.get("time")
+        if hour not in [f"{i:02d}:00" for i in range(24)] or hour in hours or not isinstance(row.get("valueMap"), dict):
+            raise ValueError("清远上网电量时刻无效或重复，停止导出。")
+        hours[hour] = row["valueMap"]
+    if len(hours) != 24:
+        raise ValueError("清远上网电量不足24个小时，停止导出。")
+    if any(field not in values for values in hours.values() for field in columns.values()):
+        raise ValueError("清远上网电量数据字段缺失，停止导出。")
+    return [{"unitId": unit_id, "runDate": run_date,
+             "onlineEle": [hours[f"{i:02d}:00"].get(field) for i in range(24)]}
+            for unit_id, field in columns.items()]
 
 
 def fetch_energy_rows(context, run_date: str, tenant_id: str, units: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -546,7 +603,27 @@ def collect_detail_rows(run_date: str, config: Config) -> list[dict[str, Any]]:
                 unit_names = {str(item.get("id")): unit_display_name(item) for item in units if item.get("id")}
                 unit_order = {str(item.get("id")): pos for pos, item in enumerate(units) if item.get("id")}
 
-                if is_renewable_company(units):
+                plans: dict[str, tuple[float | None, ...]] = {}
+                plan_date = ""
+                if company_name == "清远电厂":
+                    raw_rows = fetch_qingyuan_rows(context, run_date, tenant_id)
+                    plan_date = (datetime.strptime(run_date, "%Y-%m-%d") + timedelta(days=2)).date().isoformat()
+                    plan_rows = fetch_qingyuan_rows(context, plan_date, tenant_id, metric="planValue")
+                    if {str(row["unitId"]) for row in plan_rows} != set(unit_names):
+                        raise ValueError(f"清远 {plan_date} 计划电量机组与机组列表不符，停止导出。")
+                    plans = {
+                        str(row["unitId"]): online_energy_hours(
+                            row["onlineEle"],
+                            label=f"{plan_date} 清远 / {unit_names[str(row['unitId'])]} 计划值",
+                            allow_empty=True,
+                        )
+                        for row in plan_rows
+                    }
+                    for unit_id, plan_values in plans.items():
+                        missing_hours = sum(value is None for value in plan_values)
+                        if missing_hours:
+                            log(f"  提示：{plan_date} 清远 / {unit_names[unit_id]} 有 {missing_hours} 个时段计划值未填报，导出为空白。")
+                elif is_renewable_company(units):
                     raw_rows = fetch_energy_rows(context, run_date, tenant_id, units)
                 else:
                     raw_rows = fetch_fire_rows(context, run_date, tenant_id)
@@ -562,18 +639,31 @@ def collect_detail_rows(run_date: str, config: Config) -> list[dict[str, Any]]:
                 for item in power_items:
                     unit_id = str(item.get("unitId") or "")
                     unit_name = unit_names.get(unit_id, unit_id or "未知机组")
-                    values = item.get("onlineEle") or []
-                    if not isinstance(values, list):
-                        values = []
+                    if plans:
+                        if unit_id not in plans:
+                            raise ValueError(f"清远 {plan_date} 缺少机组 {unit_name} 的计划电量，停止导出。")
+                        values = online_energy_hours(
+                            item.get("onlineEle"),
+                            label=f"{run_date} {company_name} / {unit_name}",
+                            allow_empty=True,
+                        )
+                        missing_hours = sum(value is None for value in values)
+                        if missing_hours:
+                            log(f"  提示：{company_name} / {unit_name} 有 {missing_hours} 个时段实际上网电量未填报，导出为空白。")
+                    else:
+                        raw_values = item.get("onlineEle") or []
+                        if not isinstance(raw_values, list):
+                            raw_values = []
+                        values = [number_or_zero(raw_values[hour]) if hour < len(raw_values) else 0.0 for hour in range(24)]
 
-                    padded_values = [number_or_zero(values[hour]) if hour < len(values) else 0.0 for hour in range(24)]
-                    for hour, value in enumerate(padded_values):
+                    for hour, value in enumerate(values):
                         detail_rows.append(
                             {
                                 "company": company_name,
                                 "unit": unit_name,
                                 "time": f"{hour:02d}:00",
                                 "onlineEle": value,
+                                **({"planEle": plans[unit_id][hour], "planDate": plan_date} if plans else {}),
                             }
                         )
 
@@ -586,6 +676,9 @@ def collect_detail_rows(run_date: str, config: Config) -> list[dict[str, Any]]:
 
 
 def display_unit_header(value: str) -> str:
+    numbers = re.findall(r"#(\d+)", value)
+    if len(numbers) > 1:
+        return "、".join(numbers) + "号机"
     match = re.search(r"#(\d+)", value)
     if match:
         return f"{match.group(1)}号机"
@@ -600,10 +693,15 @@ def build_company_blocks(detail_rows: list[dict[str, Any]]) -> list[dict[str, An
     grouped: dict[str, dict[str, Any]] = {}
     for row in detail_rows:
         company = row["company"]
-        target = grouped.setdefault(company, {"units": [], "rows": {}})
+        target = grouped.setdefault(company, {"units": [], "rows": {}, "plans": {}, "plan_date": None})
         if row["unit"] not in target["units"]:
             target["units"].append(row["unit"])
         target["rows"][(row["time"], row["unit"])] = row["onlineEle"]
+        if "planEle" in row:
+            if target["plan_date"] not in (None, row["planDate"]):
+                raise ValueError("清远计划电量日期不一致，停止导出。")
+            target["plan_date"] = row["planDate"]
+            target["plans"][(row["time"], row["unit"])] = row["planEle"]
 
     blocks: list[dict[str, Any]] = []
     ordered_times = [f"{hour:02d}:00" for hour in range(24)]
@@ -615,10 +713,14 @@ def build_company_blocks(detail_rows: list[dict[str, Any]]) -> list[dict[str, An
         rows = []
         for time_key in ordered_times:
             rows.append([payload["rows"].get((time_key, unit), 0.0) for unit in payload["units"]])
+            if payload["plan_date"]:
+                rows[-1].extend(payload["plans"].get((time_key, unit)) for unit in payload["units"])
         blocks.append(
             {
                 "company": company_name,
-                "units": [display_unit_header(unit) for unit in payload["units"]],
+                "units": [display_unit_header(unit) for unit in payload["units"]] * (2 if payload["plan_date"] else 1),
+                "actual_count": len(payload["units"]),
+                "plan_date": payload["plan_date"],
                 "rows": rows,
             }
         )
@@ -637,11 +739,19 @@ def write_summary_sheet(ws, detail_rows: list[dict[str, Any]]) -> None:
 
     for block in blocks:
         unit_count = max(len(block["units"]), 1)
-        ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=unit_count)
+        actual_count = block["actual_count"]
+        ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=actual_count)
         title_cell = ws.cell(current_row, 1, f"{block['company']} 实际上网电量（万千瓦时）")
         title_cell.font = Font(bold=True)
         title_cell.alignment = Alignment(horizontal="center", vertical="center")
         title_cell.fill = title_fill
+        if block["plan_date"]:
+            ws.merge_cells(start_row=current_row, start_column=actual_count + 1, end_row=current_row, end_column=unit_count)
+            plan_title = ws.cell(current_row, actual_count + 1,
+                                 f"清远 {block['plan_date']} 计划电量（万千瓦时）")
+            plan_title.font = Font(bold=True)
+            plan_title.alignment = Alignment(horizontal="center", vertical="center", shrinkToFit=True)
+            plan_title.fill = title_fill
         for col in range(1, unit_count + 1):
             ws.cell(current_row, col).border = border
 
