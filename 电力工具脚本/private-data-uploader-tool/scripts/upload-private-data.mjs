@@ -4,8 +4,9 @@ import path from 'node:path';
 import process from 'node:process';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { loadSharedAccount, markAccountSession, prepareAccountSession } from './qingneng-account.mjs';
+import { loadSharedAccount, markAccountSession, prepareAccountSession, writePrivateJson } from './qingneng-account.mjs';
 import { dataPath } from './storage-paths.mjs';
+import { acquireAuthLock } from './auth-lock.mjs';
 import {
   TARGETS,
   buildMultipart,
@@ -46,6 +47,12 @@ function safeErrorMessage(error) {
   return redact(String(error?.message || error || '未知错误')).split('\nCall log:')[0].trim();
 }
 
+function loginFailure(kind, message) {
+  const error = new Error(message);
+  error.login_kind = kind;
+  return error;
+}
+
 function parseArgs(argv) {
   const args = {
     mode: 'plan',
@@ -83,8 +90,9 @@ function parseArgs(argv) {
     else if (arg === '--config') args.configPath = argv[++i];
     else if (arg === '--unit') args.unit = argv[++i];
     else if (arg === '--files') {
-      // GUI 逐个文件重复传参，Windows 路径本身可以含逗号；拆分交给 parseFileArguments。
-      args.files.push(String(argv[++i] ?? '').trim());
+      // 兼容 --files a,b,c 逗号拆分与 GUI 逐个文件重复传参；
+      // Windows 路径本身可以含逗号，含逗号的整体路径保护由 parseFileArguments 完成。
+      args.files.push(...parseFileArguments([String(argv[++i] ?? '')]));
     }
     else if (arg === '--summary-type') args.summaryType = argv[++i];
     else if (arg === '--power-source') args.powerSource = argv[++i];
@@ -165,58 +173,7 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function isProcessAlive(pid) {
-  if (!pid || !Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function acquireAuthLock(config, timeoutMs = 15 * 60 * 1000) {
-  const lockPath = `${config.authStatePath}.lock`;
-  const startedAt = Date.now();
-  let notified = false;
-
-  while (true) {
-    try {
-      const handle = await fs.open(lockPath, 'wx');
-      await handle.writeFile(JSON.stringify({
-        pid: process.pid,
-        startedAt: new Date().toISOString(),
-        script: 'private-data-uploader',
-      }, null, 2), 'utf8');
-      log(`已获得登录态锁：${lockPath}`);
-      return async () => {
-        await handle.close().catch(() => {});
-        await fs.unlink(lockPath).catch(() => {});
-      };
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      let owner;
-      try {
-        owner = JSON.parse(await fs.readFile(lockPath, 'utf8'));
-      } catch {
-        owner = {};
-      }
-      const lockAgeMs = Date.now() - (Date.parse(owner.startedAt ?? '') || 0);
-      if (lockAgeMs > 6 * 60 * 60 * 1000 || (owner.pid && !isProcessAlive(Number(owner.pid)))) {
-        await fs.unlink(lockPath).catch(() => {});
-        continue;
-      }
-      if (Date.now() - startedAt > timeoutMs) {
-        throw new Error(`等待登录态锁超时，请确认没有其他上传/抓取脚本仍在运行：${lockPath}`);
-      }
-      if (!notified) {
-        log(`检测到其他脚本正在使用同一登录态，等待其完成：${lockPath}`);
-        notified = true;
-      }
-      await sleep(2000);
-    }
-  }
-}
+// 登录态锁由 ./auth-lock.mjs 提供（stale-lock reaper / inode 校验 / 0o600）。
 
 function isExcelFile(name) {
   const lower = name.toLowerCase();
@@ -328,8 +285,7 @@ async function launchContext(config) {
 }
 
 async function saveAuthState(context, config) {
-  await fs.mkdir(path.dirname(config.authStatePath), { recursive: true });
-  await context.storageState({ path: config.authStatePath });
+  await writePrivateJson(config.authStatePath, await context.storageState());
   await markAccountSession(context, config);
 }
 
@@ -357,7 +313,7 @@ function encryptPassword(publicKeyBase64, password) {
 
 async function apiLogin(context, config) {
   if (!config.username || !config.password) {
-    throw new Error('config.json 缺少 username/password，无法自动登录。');
+    throw loginFailure('credentials', 'config.json 缺少 username/password，无法自动登录。');
   }
 
   log('获取登录公钥...');
@@ -367,14 +323,14 @@ async function apiLogin(context, config) {
       timeout: 60_000,
     });
   } catch (error) {
-    throw new Error(`获取登录公钥失败：${safeErrorMessage(error)}。请确认内网/VPN/代理可访问 ${config.baseUrl}`);
+    throw loginFailure('network', `获取登录公钥失败：${safeErrorMessage(error)}。请确认内网/VPN/代理可访问 ${config.baseUrl}`);
   }
   if (keyResponse.status() >= 400) {
-    throw new Error(`获取登录公钥失败 HTTP ${keyResponse.status()}`);
+    throw loginFailure('server', `获取登录公钥失败 HTTP ${keyResponse.status()}`);
   }
   const keyBody = await keyResponse.json();
   const publicKey = keyBody?.data;
-  if (!publicKey) throw new Error('登录公钥为空。');
+  if (!publicKey) throw loginFailure('protocol', '登录公钥为空。');
 
   const encryptedPassword = encryptPassword(publicKey, config.password);
   log('提交登录请求...');
@@ -389,7 +345,9 @@ async function apiLogin(context, config) {
   const loginBody = await loginResponse.json().catch(async () => ({ text: await loginResponse.text() }));
   if (loginResponse.status() >= 400 || (loginBody.retCode && loginBody.retCode !== 'T200')) {
     // 响应体可能含 token，只回报状态与业务返回码，不打印全文。
-    throw new Error(`自动登录失败 HTTP ${loginResponse.status()}（retCode=${loginBody?.retCode ?? 'unknown'}），请核对账号配置。`);
+    const verification = /验证|滑块|短信|captcha/i.test(String(loginBody?.retMsg || ''));
+    throw loginFailure(verification ? 'verification' : 'credentials',
+      `自动登录失败 HTTP ${loginResponse.status()}（retCode=${loginBody?.retCode ?? 'unknown'}），请核对账号配置。`);
   }
 
   await saveAuthState(context, config);
@@ -403,7 +361,7 @@ async function ensureLogin(context, config) {
   log('登录态失效，正在自动登录...');
   await apiLogin(context, config);
   if (!await isLoggedIn(context, config)) {
-    throw new Error('自动登录后仍未检测到有效登录态。');
+    throw loginFailure('session', '自动登录后仍未检测到有效登录态。');
   }
   log('自动登录成功。');
 }
@@ -513,7 +471,7 @@ async function uploadFile(page, filePath, current, total) {
 }
 
 async function executeUpload(plan, config) {
-  const releaseLock = await acquireAuthLock(config);
+  const releaseLock = await acquireAuthLock(config, undefined, log);
   let browser;
   let context;
   try {
@@ -787,7 +745,7 @@ async function runBatch(config, args) {
 }
 
 async function loginOnly(config) {
-  const releaseLock = await acquireAuthLock(config);
+  const releaseLock = await acquireAuthLock(config, undefined, log);
   let browser;
   let context;
   try {
@@ -838,6 +796,13 @@ async function main() {
 }
 
 main().catch((error) => {
+  if (error.login_kind && process.env.TOOLBOX_CLI_PROTOCOL === '1') {
+    console.log('TOOLBOX_ERROR=' + JSON.stringify({
+      code: ['network', 'server'].includes(error.login_kind) ? 'network' : 'authentication',
+      stage: 'login', login_kind: error.login_kind,
+      exception_type: 'LoginError', message: error.message,
+    }));
+  }
   const detail = error?.stack || error?.message || String(error);
   console.error(redact(detail).split('\nCall log:')[0]);
   process.exitCode = 1;

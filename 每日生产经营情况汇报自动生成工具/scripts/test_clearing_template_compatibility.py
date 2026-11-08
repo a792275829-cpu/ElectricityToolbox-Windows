@@ -40,6 +40,8 @@ def clearing_workbook(path: Path, total_row: int) -> None:
     basic.cell(total_row, 27, 0)            # AA{total_row}
     basic.cell(total_row, 29, 2300)        # AC{total_row}
     ahead = book.create_sheet("快报  (日前)")
+    for row, label in ((7, "分公司"), (8, "汕头"), (13, "海门"), (19, "东莞")):
+        ahead.cell(row, 1, label)
     for row, energy, price in ((7, 100, 400), (8, 20, 410)):
         ahead.cell(row, 6, energy)
         ahead.cell(row, 7, price)

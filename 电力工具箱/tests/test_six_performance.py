@@ -54,6 +54,8 @@ class PerformanceBoundaryTests(unittest.TestCase):
             sheet.title = "快报（日前）"
             for row in range(1, 41):
                 sheet.append([None] * 5 + [row, row + .25, -row])
+            for row, label in [(7, "分公司"), (8, "汕头"), (13, "海门"), (19, "东莞")]:
+                sheet.cell(row, 1, label)
             for row, label in [(20, "海上风电"), (25, "鮀莲"), (30, "归湖")]:
                 sheet.cell(row, 1, label)
             basic = book.create_sheet("基础信息")

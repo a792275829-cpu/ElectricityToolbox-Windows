@@ -242,7 +242,7 @@ def fetch_capacity_summary(context, *, date_text: str, province_area_id: str) ->
         "date": date_text,
         "unit": "MW",
         "capacity": capacity,
-        "capacityWanKw": int(capacity / 10) if capacity is not None else None,
+        "capacityWanKw": int(round(capacity / 10)) if capacity is not None else None,
         "versionDate": payload.get("data", {}).get("versionDate"),
         "raw": row,
     }
@@ -858,6 +858,8 @@ def main() -> int:
         print("\n已取消。")
         return 130
     except Exception as exc:
+        from toolbox_cli_login import emit_login_error
+        emit_login_error(exc)
         print(f"\n失败：{exc}", file=sys.stderr)
         return 1
 

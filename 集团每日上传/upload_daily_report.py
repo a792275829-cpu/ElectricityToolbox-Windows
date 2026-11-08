@@ -29,6 +29,7 @@ if str(WORKSPACE_DIR) not in sys.path:
 from toolbox_credentials import mark_browser_session, prepare_browser_session, read_login_config
 from toolbox_auth_loader import wait_for_login
 from toolbox_dates import normalize_date_input
+import toolbox_qingneng_login as qingneng_login
 
 LOGIN_SOURCE_DIR = WORKSPACE_DIR / "上网电量抓取"
 
@@ -465,107 +466,28 @@ def launch_context(playwright, *, headless: bool):
         )
     if not prepare_browser_session(context, AUTH_STATE_PATH):
         load_saved_auth_state(context)
+    context._qingneng_headless = headless
     return context
 
 
 def is_logged_in(context) -> bool:
-    urls = [
-        f"{BASE_URL}/gdfire/api/pf/tenant/user/info",
-        f"{BASE_URL}/usercenter/web/pf/tenant/user/info",
-    ]
-    for url in urls:
-        try:
-            response = context.request.get(url, timeout=30000)
-        except PlaywrightError:
-            continue
-        if response.status != 200:
-            continue
-        try:
-            data = response.json()
-        except Exception:
-            continue
-        if data.get("retCode") == "T200" and bool(data.get("data", {}).get("tenantId")):
-            return True
-    return False
+    return qingneng_login.check_session(context.request, base_url=BASE_URL)
 
 
 def rsa_encrypt_password(public_key_b64: str, password: str) -> str:
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric import padding
-
-    public_key = serialization.load_der_public_key(base64.b64decode(public_key_b64))
-    encrypted = public_key.encrypt(password.encode("utf-8"), padding.PKCS1v15())
-    return base64.b64encode(encrypted).decode("ascii")
+    return qingneng_login.rsa_encrypt_password(public_key_b64, password)
 
 
 def try_api_login(context, username: str, password: str) -> bool:
-    key_response = context.request.get(f"{BASE_URL}/usercenter/web/pf/login/info/publicKey", timeout=60000)
-    key_data = parse_json_response(key_response, "读取登录公钥")
-    public_key = key_data.get("data")
-    if not isinstance(public_key, str) or not public_key:
-        raise RuntimeError("读取登录公钥失败：返回中没有公钥")
-
-    encrypted_password = rsa_encrypt_password(public_key, password)
-    login_response = context.request.post(
-        f"{BASE_URL}/usercenter/web/login",
-        params={"loginMode": 2, "username": username, "password": encrypted_password},
-        timeout=60000,
-    )
-    payload = json_or_text(login_response)
-    if login_response.status >= 400:
-        raise RuntimeError(f"登录接口 HTTP {login_response.status}: {str(payload)[:300]}")
-    if isinstance(payload, dict) and payload.get("retCode") not in (None, "T200"):
-        raise RuntimeError(f"登录失败：{payload.get('retMsg') or payload}")
-
-    page = context.new_page()
-    try:
-        page.goto(USERCENTER_URL, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_load_state("networkidle", timeout=15000)
-    except PlaywrightTimeoutError:
-        pass
-    finally:
-        page.close()
-
-    logged_in = is_logged_in(context)
-    if logged_in:
-        save_auth_state(context)
-    return logged_in
+    return qingneng_login.api_login(sys.modules[__name__], context, username, password, app_url=USERCENTER_URL)
 
 
 def try_ui_login(context, username: str, password: str) -> bool:
-    page = context.new_page()
-    page.goto(LOGIN_URL, wait_until="domcontentloaded")
-    try:
-        page.locator("#username, input[placeholder*='工号'], input[placeholder*='手机号'], input[placeholder*='账号']").first.fill(
-            username, timeout=10000
-        )
-        page.locator("#password, input[type='password']").first.fill(password, timeout=10000)
-        page.locator("button:has-text('登 录'), button:has-text('登录'), button[type='submit']").first.click(timeout=10000)
-    except (PlaywrightTimeoutError, PlaywrightError):
-        pass
-
-    deadline = time.time() + 45
-    while time.time() < deadline:
-        if is_logged_in(context):
-            save_auth_state(context)
-            page.close()
-            return True
-        time.sleep(2)
-    page.close()
-    return False
+    return qingneng_login.ui_login(sys.modules[__name__], context, username, password)
 
 
 def try_auto_login(context, username: str, password: str) -> bool:
-    context._qingneng_login_credentials = (username, password)
-    try:
-        log("正在尝试接口登录...")
-        if try_api_login(context, username, password):
-            return True
-        log("接口登录后仍未检测到登录态，改用页面登录...")
-    except Exception as exc:
-        log(f"接口登录失败：{short_error(exc)}")
-        log("改用页面登录...")
-    return try_ui_login(context, username, password)
+    return qingneng_login.auto_login(sys.modules[__name__], context, username, password)
 
 
 def ensure_login(context, config: Config) -> None:
@@ -1813,6 +1735,8 @@ def main() -> int:
         print("\n已取消。")
         return 130
     except Exception as exc:
+        from toolbox_cli_login import emit_login_error
+        emit_login_error(exc)
         print(f"\n失败：{exc}", file=sys.stderr)
         return 1
 

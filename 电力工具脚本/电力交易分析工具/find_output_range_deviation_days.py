@@ -15,12 +15,12 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from generate_electricity_report import ReportBuilder, THERMAL_COMPANIES, fmt, load_value_workbook, invoke_domain
+from generate_electricity_report import ReportBuilder, THERMAL_COMPANIES, HAIMEN_UNIT_NAMES, fmt, load_value_workbook, invoke_domain
 
 
 DEFAULT_INPUT_DIR = Path.home() / "Downloads" / "haimen shouxian"
 DEFAULT_TOP = 10
-DEFAULT_UNIT_FILTERS = ["海门#1机组", "海门#2机组", "海门#3机组", "海门#4机组"]
+DEFAULT_UNIT_FILTERS = list(HAIMEN_UNIT_NAMES)
 
 
 @dataclass(frozen=True)
@@ -324,8 +324,8 @@ def write_results(output_path: Path, scores: list[PlantDayScore], excluded: list
     note.append(["项目", "说明"])
     note.append(["计算口径", "机端出力=出清电量/(1-厂用电率)，正常出力范围沿用电力交易分析报告的运行补偿报价段规则。"])
     note.append(["偏差计分", "机端出力在正常范围内记0；低于下限或高于上限时，按到最近边界的绝对差计入。"])
-    note.append(["统计范围", "默认只统计海门#1机组、海门#2机组、海门#3机组、海门#4机组。"])
-    note.append(["排序粒度", "日前和实时分开统计；每个口径按日期汇总海门4台机组全天偏差绝对值后各取前10天。"])
+    note.append(["统计范围", "默认只统计" + "、".join(DEFAULT_UNIT_FILTERS) + "。"])
+    note.append(["排序粒度", f"日前和实时分开统计；每个口径按日期汇总海门{len(DEFAULT_UNIT_FILTERS)}台机组全天偏差绝对值后各取前10天。"])
     note.append(["启停剔除", "任一机组在该日发生出力状态变化则剔除；全天有出力或全天无出力都不视为启停变化。"])
 
     for sheet in wb.worksheets:
@@ -344,7 +344,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-x", "--top", type=int, default=DEFAULT_TOP, help="日前、实时分别输出偏差最大的前X天，默认10")
     parser.add_argument("--start-date", help="开始日期，格式 YYYY-MM-DD")
     parser.add_argument("--end-date", help="结束日期，格式 YYYY-MM-DD")
-    parser.add_argument("--unit", action="append", help="只分析名称包含该文本的机组，可重复传入；不传时默认海门4台机组")
+    parser.add_argument("--unit", action="append", help=f"只分析名称包含该文本的机组，可重复传入；不传时默认海门{len(DEFAULT_UNIT_FILTERS)}台机组")
     parser.add_argument("--output", help="输出xlsx路径，默认写到输入目录下")
     return parser.parse_args()
 

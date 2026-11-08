@@ -244,6 +244,10 @@ def build_map_html(
             "coordinate_source": "公开站址与片区相对方位",
             "node_positions_path": "",
         }
+    node_cities = {}
+    if discovered_positions_path.exists():
+        records = json.loads(discovered_positions_path.read_text(encoding='utf-8')).get('nodes', [])
+        node_cities = {n['name']: n['city'] for n in records if n.get('city')}
     severity_by_edge = _build_edge_payloads(
         edges,
         edge_summary,
@@ -252,13 +256,17 @@ def build_map_html(
         time_headers,
         matched_rows,
     )
+    if node_cities:
+        for edge in severity_by_edge:
+            edge['city_label'] = '-'.join(dict.fromkeys(
+                node_cities.get(edge[k], NODE_CITY.get(edge[k], '未分类')) for k in ('a', 'b')))
     blocked_nodes = {edge["a"] for edge in severity_by_edge if edge["is_section"]} | {
         edge["b"] for edge in severity_by_edge if edge["is_section"]
     }
     nodes = _build_node_payloads(topology_nodes, node_regions, coordinates, matched_rows, time_headers, blocked_nodes)
     regions = _build_region_payloads(nodes)
     curve_names, connected_names = topology_inventory(topology_path)
-    curve_regions = price_hierarchy(curve_names)
+    curve_regions = price_hierarchy(curve_names, node_cities or None)
     administrative = {name: (region["name"], city["name"])
                       for region in curve_regions for city in region["cities"] for name in city["nodes"]}
     curve_rows = match_price_rows(curve_names, price_rows)
@@ -509,8 +517,11 @@ def _build_edge_payloads(
         if int(float(row.get("intervals", 0))) >= MIN_SECTION_INTERVALS
     }
     detail_counts = {}
+    congestion_by_edge: dict[str, dict[str, float]] = {}
     for row in interval_details:
-        detail_counts[str(row["edge"])] = detail_counts.get(str(row["edge"]), 0) + 1
+        edge_name = str(row["edge"])
+        detail_counts[edge_name] = detail_counts.get(edge_name, 0) + 1
+        congestion_by_edge.setdefault(edge_name, {})[str(row["time"])] = float(row["abs_diff"])
     flow_directions_by_edge = _build_flow_directions(
         edges,
         matched_rows or {},
@@ -564,6 +575,7 @@ def _build_edge_payloads(
                 "main_direction": summary.get("main_direction", "") if summary else "",
                 "direction_counts": summary.get("direction_counts", "") if summary else "",
                 "detail_count": detail_counts.get(edge_name, 0),
+                "congestion_by_time": congestion_by_edge.get(edge_name, {}),
                 "gap_severity": gap_severity,
                 "interval_severity": interval_severity,
                 "severity_score": severity,

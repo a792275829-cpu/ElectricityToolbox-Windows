@@ -701,6 +701,8 @@ class RuntimeTests(unittest.TestCase):
             workbook = Workbook()
             sheet = workbook.active
             sheet.title = "快报  (日前)"
+            for row, label in ((7, "分公司"), (8, "汕头"), (13, "海门"), (19, "东莞")):
+                sheet.cell(row, 1, label)
             for cell, value in {
                 "F7": 10116.2898,
                 "G7": 422.0653,
@@ -1297,7 +1299,7 @@ class PageAdapterTests(unittest.TestCase):
         module = load_module("toolbox_wps_writer_export_test", self.paths.wps_writer)
         runtime_config = {
             "recent_urls": ["https://www.kdocs.cn/l/target"],
-            "browser_mode": "persistent",
+            "browser_mode": "managed_cdp",
             "cdp_url": "http://127.0.0.1:9222",
             "configs": [
                 {
@@ -2176,11 +2178,11 @@ class PageAdapterTests(unittest.TestCase):
         dataset = {
             "data": {
                 "dataNetLoadDTOList": [
-                    {"loadType": "2", "actualPeriodList": [{"max": 41, "min": 42, "avg": 43, "sum": 44}]},
-                    {"loadType": "1", "actualPeriodList": [{"max": 11, "min": 12, "avg": 13, "sum": 14}]},
-                    {"loadType": "3", "actualPeriodList": [{"max": 51, "min": 52, "avg": 53, "sum": 54}]},
-                    {"loadType": "6", "actualPeriodList": [{"max": 21, "min": 22, "avg": 23, "sum": 24}]},
-                    {"loadType": "4", "actualPeriodList": [{"max": 31, "min": 32, "avg": 33, "sum": 34}]},
+                    {"loadType": "2", "actualPeriodList": [{"date": "2026-07-02", "max": 41, "min": 42, "avg": 43, "sum": 44}]},
+                    {"loadType": "1", "actualPeriodList": [{"date": "2026-07-02", "max": 11, "min": 12, "avg": 13, "sum": 14}]},
+                    {"loadType": "3", "actualPeriodList": [{"date": "2026-07-02", "max": 51, "min": 52, "avg": 53, "sum": 54}]},
+                    {"loadType": "6", "actualPeriodList": [{"date": "2026-07-02", "max": 21, "min": 22, "avg": 23, "sum": 24}]},
+                    {"loadType": "4", "actualPeriodList": [{"date": "2026-07-02", "max": 31, "min": 32, "avg": 33, "sum": 34}]},
                 ]
             }
         }
@@ -2205,7 +2207,7 @@ class PageAdapterTests(unittest.TestCase):
                 "dataNetLoadDTOList": [
                     {
                         "loadType": "1",
-                        "actualPeriodList": [{"max": None, "min": None, "avg": None, "sum": None}],
+                        "actualPeriodList": [{"date": "2026-07-05", "max": None, "min": None, "avg": None, "sum": None}],
                     }
                 ]
             }

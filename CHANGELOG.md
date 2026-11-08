@@ -4,6 +4,23 @@
 
 > 本轮只改源码与测试，未执行 `packaging/windows/build.ps1`，未生成新安装包；版本文件仍为 0.1.32。按用户要求，等待明确确认后再递增版本并发布。
 
+### 全模块按 mac v0.1.32 对齐（2026-11-09）
+
+> 用户确认「全部按 Mac 改」，本轮把逐模块排查出的 37 项差异（A 类功能漏同步 22 项、B 类 UI 与功能不一致 8 项、C 类口径分叉 7 项）全部按 mac 实现落地，含此前标记「待业务确认」的负荷对比科目 ID 与交易信息覆盖口径。
+
+- **共享基础设施**：新增 `toolbox_cli_login.py`（`ERROR_PREFIX` / `script_command` / `emit_login_error`，对应 mac `toolbox_shared/cli_login.py`）、`toolbox_auth_requests.py`（会话失效自动重登，含 `qing-yuan/data` 白名单）、`toolbox_trade_report.py`（海门六机动态汇总）。上网电量、集团上传、市场表、交易信息、功率收益、现货价格、风力截图、日报各脚本的 `main()` 均接入结构化登录错误上报。
+- **WPS**：连接模式统一为 `managed_cdp` / `cdp`，新增 `BROWSER_MODES` / `DEFAULT_BROWSER_MODE` / `normalize_browser_mode()`；删除 UI 上的「临时浏览器(persistent)」退役选项与加载配置时的强制改写，4 处默认值改为 `managed_cdp`。三处 `config.example.json`（上网电量、报告侧、电价预测）删除后端从不解析的 `unitIdsMode` / `skipExisting` / `exportTimeoutSeconds` / `downloadDir` / `initialDate`。
+- **服务层**：补齐 CLI 登录失效结构化诊断链路（`tasks/process.py` 注入 `TOOLBOX_CLI_PROTOCOL`、解析子进程 `ERROR_PREFIX` 行生成 `login_detail`；`tasks/errors.py` 按 `LoginError.kind` 给出可执行修复指引；`service.py` / `ui_tasks.py` 透传 `error_detail`；`desktop/python/task_worker.py` 输出结构化失败详情）；关闭工具箱时遍历页面 `confirm_close()` 并调用 `flush_autosave()`；`section-analysis` 契约恢复 `threshold`（覆盖此前「删除 threshold」的记录，与 mac `page_contracts.py` 一致）；补 `plan_batch_outputs`，`overwrite` / `create_backup` 改为严格取值；交易信息页与 `service_catalog` 覆盖策略文案按 mac。
+- **上网电量抓取**：补机组列表/返回机组/返回日期/缺机组 4 项校验与「无可采集公司」校验；非清远公司未填报时段统一导出空白并提示缺失（不再补 0）；新增 `iter_detail_rows` / `collect_date_rows`，多日导出复用单次登录会话，`collect_detail_rows` 保持原签名；`interactive_login` 复用有效登录态；登录委托 `toolbox_qingneng_login`；报表侧 wrapper 补 4 个 re-export。清远 D+2 计划电量列、六家公司版式与 WPS 映射不变。
+- **市场表 / 交易信息**：新增 `cell_holds_formula()`，5 处写入改为「公式或（非空且不覆盖）」判断，`overwrite=True` 也不再改写模板公式；`find_date_row(…, extend=True)` 支持目标日期行自动接续；`summarize_load_type` 改用 `select_dated_record` 严格日期唯一匹配（Rust `market_load_summary` 同步为同一语义：唯一匹配、重复日期报错、未发布仍返回可读 RuntimeError）；交易信息 `prepare_workbook` 覆盖口径不再受「未显式指定起始日期」限制，`select_dated_record` 严格匹配。
+- **功率收益 / PDF 上传**：抓取前校验日期块完整性并列出缺失日期；PDF 上传新增 `wait_upload_response`（精确 path 匹配、requestfailed 即时报告、15 秒进度、submitted 区分、120 秒超时）与分阶段日志、实时 `flush=True`。
+- **每日汇报 / 南方日报**：`generate_red_marked_report.py` 接入 `brief_row_index` 按标签定位，删除 `LEGACY_FIRE_ROWS` 固定行号回退；负荷对比科目映射按 mac 全量对齐（西电东送=4、A类=2、地方=3、总出力=18、粤港=5）；`capacityWanKw` 改为四舍五入；前两日 Excel 文案改为「日清分表/现货偏差分析」；南方日报实时电量/电价改按标签动态定位，保留 Windows 更全的六机支持。
+- **500kV 断面分析**：补齐拓扑编辑器 JSON 下游管线（`_run_editor_pipeline`：catalog 读取→同步→materialize）、`congestion_by_time` 逐时段数据、`price_hierarchy(city_overrides)` 动态地市与 `region_curves.js` 曲线切换对比动画。
+- **交易工具 / 私有上传 / 电量汇总**：海门 #1~#6 机组在 Python 与 Rust 后端同时支持（缺失行豁免），`DEFAULT_UNIT_FILTERS` 同步 6 台；私有上传新增独立 `auth-lock.mjs`（stale-lock reaper、inode 校验释放、`0o600`、三参数 `acquireAuthLock`）、登录态 JSON 原子写入、`--files a,b,c` 逗号拆分（保留含逗号整体路径保护）与 `loginFailure` / `login_kind` 分类；电量汇总新增「来源冲突」校验。
+- 验证：电力工具箱全量 805 项（`discover tests`）除下述环境项外通过，其中 `test_toolbox` 98 项、上网电量输出、页面绑定、登录生命周期、私有上传 43 项、市场表/交易信息 17 项、六机性能、500kV 12 个测试文件、汇报脚本 82 项、南方日报 70 项、交易分析（除 3 项预存在 Rust/Python 浮点差异）、私有上传 Node 9 项均通过；54 个改动 `.py` 全部 `py_compile` 通过，Rust `cargo check` / `cargo build --release` 通过并重装 `500kV断面分析/bin`；清远计划列在 7 家公司完整工作簿回读一致。
+- 已知环境项（非本轮引入，已在 HEAD 基线复现）：① `desktop/tests/python/test_windows_platform.py::test_output_lock_…` 在本机构建出 Rust 后端后挂起（子进程退出时原生事务进程仍持有管道；`TOOLBOX_DOMAIN_BACKEND=python` 下 0.5 秒通过）；② `电力工具脚本/电力交易分析工具/tests/test_native_trading_parity.py` 3 项为 Python 未取整与 Rust 取整的既有差异；③ `test_date_range_input` 的 ESC 用例在全量运行时偶发 Tk 焦点抖动，单独运行稳定通过。
+- 本轮未改版本号（仍 0.1.32），未执行 `packaging/windows/build.ps1`，未生成安装包。
+
 ### 清远计划电量导出对齐 mac v0.1.32（2026-11-08）
 
 - 导出上网电量的「汇总」表在清远区域右侧新增「清远 <日期> 计划电量（万千瓦时）」列区；计划日期按运行日加两天（D+2，导出 D-1 实际电量时即次日 T+1），取清能 `qing-yuan/data` 接口的 `planValue`。清远实际上网电量也改走该专用接口，与计划值共用列结构。

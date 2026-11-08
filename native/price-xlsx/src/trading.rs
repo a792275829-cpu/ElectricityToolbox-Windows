@@ -217,6 +217,32 @@ fn pair(s: &str) -> String {
         _ => normalized,
     }
 }
+/// Locate the 快报 row for an optional 海门 unit; 0 means the row is absent.
+fn find_brief_row(rows: &Value, unit_label: &str) -> usize {
+    let mut plant = String::new();
+    let mut renewable = false;
+    for r in 1..81 {
+        let l = label(cell(rows, r, 1)).trim().to_owned();
+        let u = label(cell(rows, r, 2)).trim().to_owned();
+        if l.starts_with("备注") || l.starts_with("日前简析") || l.starts_with("实时简析") || l == "时刻" {
+            break;
+        }
+        if l == "新能源" {
+            renewable = true;
+            plant.clear();
+            continue;
+        }
+        if ["汕头", "海门", "东莞", "清远"].contains(&l.as_str()) {
+            plant = l.clone();
+            continue;
+        }
+        if !renewable && l.is_empty() && plant == "海门" && u == unit_label {
+            return r;
+        }
+    }
+    0
+}
+
 fn summary_parse_report(sheets: &Value) -> Result<Value> {
     let names = [
         "分公司火电",
@@ -258,6 +284,8 @@ fn summary_parse_report(sheets: &Value) -> Result<Value> {
         return Err("新版交易汇总页需要配套的‘快报’工作表。".into());
     }
     let mut rows = if old { legacy } else { modern };
+    // 海门 #5/#6 号机为可选机组：(名称, 汇总页行, 快报行)；快报行 0 表示缺行豁免。
+    let mut extra_rows: Vec<(String, usize, usize)> = Vec::new();
     if !old && cell(ws, 8, 1) == "南方分公司" {
         let mut found = BTreeMap::new();
         let mut plant = String::new();
@@ -274,7 +302,7 @@ fn summary_parse_report(sheets: &Value) -> Result<Value> {
                 l
             } else if l.is_empty()
                 && ["汕头", "海门"].contains(&plant.as_str())
-                && ["#1机组", "#2机组", "#3机组", "#4机组"].contains(&u.as_str())
+                && ["#1机组", "#2机组", "#3机组", "#4机组", "#5机组", "#6机组"].contains(&u.as_str())
             {
                 format!("{}{}", plant, u)
             } else {
@@ -296,6 +324,13 @@ fn summary_parse_report(sheets: &Value) -> Result<Value> {
             missing.sort();
             return Err(format!("新版交易汇总页缺少标签：{}", missing.join("、")).into());
         }
+        let brief = &sheets["快报"];
+        for extra in ["海门#5机组", "海门#6机组"] {
+            if let Some(row) = found.get(extra) {
+                let unit_label = extra.strip_prefix("海门").unwrap_or(extra);
+                extra_rows.push((extra.to_string(), *row, find_brief_row(brief, unit_label)));
+            }
+        }
     }
     let mut out = Map::new();
     for (i, name) in names.iter().enumerate() {
@@ -303,6 +338,22 @@ fn summary_parse_report(sheets: &Value) -> Result<Value> {
         let b = brief_rows[i];
         let brief = &sheets["快报"];
         out.insert(name.to_string(),if old{json!({"capacity_10mw":nv(cell(ws,r,3)),"cost":cell(ws,r,4),"load_rate":cell(ws,r,5),"da_mwh":n(cell(ws,r,6))*10.,"da_price":n(cell(ws,r,7)),"ml_mwh":n(cell(ws,r,8))*10.,"dev_mwh":n(cell(ws,r,9))*10.,"dev_price":nv(cell(ws,r,10)),"profit_wanyuan":n(cell(ws,r,11))})}else{json!({"capacity_10mw":nv(cell(brief,b,3)),"cost":cell(ws,r,3),"load_rate":nv(cell(brief,b,11)),"da_mwh":n(cell(ws,r,7))*10.,"da_price":n(cell(ws,r,8)),"ml_mwh":n(cell(ws,r,4))*10.,"dev_mwh":n(cell(ws,r,9))*10.,"dev_price":nv(cell(ws,r,10)),"profit_wanyuan":n(cell(ws,r,11))})});
+    }
+    for (name, r, b) in &extra_rows {
+        let brief = &sheets["快报"];
+        let capacity = if *b > 0 { nv(cell(brief, *b, 3)) } else { Value::Null };
+        let load_rate = if *b > 0 { nv(cell(brief, *b, 11)) } else { Value::Null };
+        out.insert(name.clone(), json!({
+            "capacity_10mw": capacity,
+            "cost": cell(ws, *r, 3),
+            "load_rate": load_rate,
+            "da_mwh": n(cell(ws, *r, 7)) * 10.,
+            "da_price": n(cell(ws, *r, 8)),
+            "ml_mwh": n(cell(ws, *r, 4)) * 10.,
+            "dev_mwh": n(cell(ws, *r, 9)) * 10.,
+            "dev_price": nv(cell(ws, *r, 10)),
+            "profit_wanyuan": n(cell(ws, *r, 11))
+        }));
     }
     Ok(Value::Object(out))
 }
@@ -438,7 +489,7 @@ fn parse_blocks(rows: &Value, company: &str) -> Value {
             continue;
         };
         let clean = l.trim();
-        if !(["1号机", "2号机", "3号机", "4号机"].contains(&clean)
+        if !(["1号机", "2号机", "3号机", "4号机", "5号机", "6号机"].contains(&clean)
             || (clean.starts_with('#') && clean.contains("机组")))
         {
             continue;

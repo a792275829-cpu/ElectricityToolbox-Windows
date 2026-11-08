@@ -11,6 +11,7 @@ import tempfile
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import copy
+from functools import wraps
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -193,7 +194,30 @@ def date_matches(value: Any, target: date) -> bool:
     return parsed == target
 
 
-def find_date_row(sheet, target: date) -> int:
+def select_dated_record(records, target: date, *, label: str):
+    """要求恰好一条显式带日期的来源记录，绝不推断缺失日期（与 Mac 同口径）。
+
+    市场表的 summarize_load_type 与交易系统信息更新都走这里；Rust
+    market_load_summary 保持同样的严格匹配语义。
+    """
+    matching = []
+    for record in records if isinstance(records, list) else ():
+        if not isinstance(record, dict):
+            continue
+        try:
+            source_date = date.fromisoformat(str(record.get("date") or "")[:10])
+        except ValueError:
+            continue
+        if source_date == target:
+            matching.append(record)
+    if not matching:
+        raise RuntimeError(f"{target.isoformat()} {label}没有返回对应日期数据。")
+    if len(matching) != 1:
+        raise RuntimeError(f"{target.isoformat()} {label}返回重复日期记录，无法唯一确定数据。")
+    return matching[0]
+
+
+def find_date_row(sheet, target: date, *, extend: bool = False) -> int:
     resolved_dates: dict[int, date] = {}
     formula_pattern = re.compile(r"^=\$?A\$?(\d+)\s*([+-])\s*(\d+)$", re.IGNORECASE)
 
@@ -212,8 +236,45 @@ def find_date_row(sheet, target: date) -> int:
                     parsed = ref_date + timedelta(days=delta)
         if parsed is not None:
             resolved_dates[row] = parsed
-        if parsed == target:
-            return row
+    matches = [row for row, day in resolved_dates.items() if day == target]
+    if len(matches) > 1:
+        raise RuntimeError(f"{sheet.title} 日期重复：{target.isoformat()}")
+    if matches:
+        return matches[0]
+    if extend and resolved_dates:
+        last_row = max(resolved_dates)
+        last_date = resolved_dates[last_row]
+        year = re.match(r"^(\d{4})年", sheet.title)
+        if year and target.year != int(year[1]):
+            raise RuntimeError(f"{sheet.title} 不支持写入 {target.year} 年，请选择对应年度模板。")
+        if target > max(resolved_dates.values()) and last_date == max(resolved_dates.values()):
+            if (target.month != last_date.month and any(
+                isinstance(cells[0].value, str) and re.search(r"\d+月|合计|汇总|小计", cells[0].value)
+                for cells in sheet.iter_rows(min_col=1, max_col=1)
+            )):
+                raise RuntimeError(f"{sheet.title} 跨月接续涉及月份汇总，请先补齐对应月份模板。")
+            for cells in sheet.iter_rows(min_row=last_row + 1):
+                if any(cell.value not in (None, "") for cell in cells):
+                    raise RuntimeError(f"{sheet.title} 表尾存在汇总或其他内容，请先补齐日期模板，未执行写入。")
+            final_row = last_row + (target - last_date).days
+            if final_row > 1_048_576:
+                raise RuntimeError(f"{sheet.title} 接续日期将超出 Excel 行数限制。")
+            if any(area.min_row <= final_row and area.max_row > last_row for area in sheet.merged_cells.ranges):
+                raise RuntimeError(f"{sheet.title} 接续区域存在合并单元格，请先补齐日期模板。")
+            for row in range(last_row + 1, final_row + 1):
+                sheet.row_dimensions[row].height = sheet.row_dimensions[last_row].height
+                for column in range(1, sheet.max_column + 1):
+                    source, cell = sheet.cell(last_row, column), sheet.cell(row, column)
+                    copy_cell_style(source, cell)
+                day = last_date + timedelta(days=row - last_row)
+                cell = sheet.cell(row, 1, datetime.combine(day, datetime.min.time()))
+                if not is_date_format(cell.number_format):
+                    cell.number_format = "yyyy-mm-dd"
+                session = _active_write_session.get()
+                if session is not None:
+                    session.record(cell)
+            log(f"{sheet.title}：接续 {last_date + timedelta(days=1)} 至 {target} 的日期行。")
+            return final_row
     raise RuntimeError(f"{sheet.title} 未找到日期行：{target.isoformat()}")
 
 
@@ -358,7 +419,7 @@ def find_date_row_in_workbook(
             raise RuntimeError(f"Excel 中未找到工作表：{sheet_name}")
         key = (sheet_name, target)
         if key not in session.date_rows:
-            session.date_rows[key] = find_date_row(workbook[sheet_name], target)
+            session.date_rows[key] = find_date_row(workbook[sheet_name], target, extend=True)
         return session.date_rows[key]
     workbook = load_workbook_checked(workbook_path, read_only=True, data_only=False)
     try:
@@ -484,6 +545,12 @@ def cell_is_non_empty(cell) -> bool:
     return cell.value not in (None, "")
 
 
+def cell_holds_formula(cell) -> bool:
+    """覆盖非空也不改写公式：只换 <v> 会让公式结果与公式体不一致。"""
+    value = cell.value
+    return isinstance(value, str) and value.startswith("=")
+
+
 def write_count_text(summary: dict[str, Any]) -> str:
     count = summary.get("count")
     if count is None:
@@ -512,7 +579,8 @@ def summarize_load_type(
         raise RuntimeError(
             f"{run_date.isoformat()} loadType={load_type} 没有返回{label}数据"
         )
-    summary = periods[0]
+    # 与 Mac 一致：要求恰好一条日期等于运行日的记录，绝不推断缺失日期。
+    summary = select_dated_record(periods, run_date, label=f"loadType={load_type} {label}")
     fields = ("max", "min", "avg", "sum")
     if any(summary.get(field) in (None, "") for field in fields):
         raise RuntimeError(
@@ -1086,6 +1154,17 @@ def write_market_load_values(
     )
 
 
+def _market_write(function):
+    @wraps(function)
+    def write(workbook_path, *args, **kwargs):
+        if active_session_for(workbook_path) is not None:
+            return function(workbook_path, *args, **kwargs)
+        with workbook_write_session(workbook_path):
+            return function(workbook_path, *args, **kwargs)
+    return write
+
+
+@_market_write
 def write_market_row_values(
     workbook_path: Path | str,
     run_date: date,
@@ -1112,7 +1191,7 @@ def write_market_row_values(
     skipped_count = 0
     for offset, value in enumerate(values):
         cell = sheet.cell(row=row, column=start_column_index + offset)
-        if cell_is_non_empty(cell) and not overwrite:
+        if cell_holds_formula(cell) or (cell_is_non_empty(cell) and not overwrite):
             skipped_count += 1
             continue
         if style_row is not None:
@@ -1133,6 +1212,7 @@ def write_market_row_values(
     }
 
 
+@_market_write
 def write_unit_cost_price_values(
     workbook_path: Path | str,
     run_date: date,
@@ -1156,7 +1236,7 @@ def write_unit_cost_price_values(
     skipped_count = 0
     for offset, value in enumerate(values):
         cell = sheet.cell(row=row, column=start_column + offset)
-        if cell_is_non_empty(cell) and not overwrite:
+        if cell_holds_formula(cell) or (cell_is_non_empty(cell) and not overwrite):
             skipped_count += 1
             continue
         if style_row is not None:
@@ -1177,6 +1257,7 @@ def write_unit_cost_price_values(
     }
 
 
+@_market_write
 def write_market_board_online_unit_values(
     workbook_path: Path | str,
     run_date: date,
@@ -1202,7 +1283,7 @@ def write_market_board_online_unit_values(
         column = openpyxl.utils.column_index_from_string(column_name)
         cell = sheet.cell(row=row, column=column)
         cells.append(cell.coordinate)
-        if cell_is_non_empty(cell) and not overwrite:
+        if cell_holds_formula(cell) or (cell_is_non_empty(cell) and not overwrite):
             skipped_count += 1
             continue
         if style_row is not None:
@@ -1222,6 +1303,7 @@ def write_market_board_online_unit_values(
     }
 
 
+@_market_write
 def write_spot_clearing_unit_count_values(
     workbook_path: Path | str,
     run_date: date,
@@ -1247,7 +1329,7 @@ def write_spot_clearing_unit_count_values(
     skipped_count = 0
     for offset, value in enumerate(values):
         cell = sheet.cell(row=row, column=start_column + offset)
-        if cell_is_non_empty(cell) and not overwrite:
+        if cell_holds_formula(cell) or (cell_is_non_empty(cell) and not overwrite):
             skipped_count += 1
             continue
         if style_row is not None:
@@ -1270,6 +1352,7 @@ def write_spot_clearing_unit_count_values(
     }
 
 
+@_market_write
 def copy_previous_day_unit_operation_mode(
     workbook_path: Path | str,
     run_date: date,
@@ -1293,7 +1376,7 @@ def copy_previous_day_unit_operation_mode(
     for column in range(start_column, end_column + 1):
         source = sheet.cell(row=source_row, column=column)
         target = sheet.cell(row=target_row, column=column)
-        if cell_is_non_empty(target) and not overwrite:
+        if cell_holds_formula(target) or (cell_is_non_empty(target) and not overwrite):
             skipped_count += 1
             continue
         copy_cell_style(source, target)
@@ -1642,14 +1725,23 @@ def main() -> int:
     if not args.date or not args.workbook:
         raise SystemExit("请同时提供 --date 和 --workbook，或使用 --login。")
 
-    run_update(
-        args.workbook,
-        parse_date(args.date),
-        headless=headless,
-        overwrite=not args.skip_existing,
-        create_backup=not args.no_backup,
-    )
-    return 0
+    try:
+        run_update(
+            args.workbook,
+            parse_date(args.date),
+            headless=headless,
+            overwrite=not args.skip_existing,
+            create_backup=not args.no_backup,
+        )
+        return 0
+    except KeyboardInterrupt:
+        print("已取消。", file=sys.stderr)
+        return 130
+    except Exception as exc:
+        from toolbox_cli_login import emit_login_error
+        emit_login_error(exc)
+        print(f"失败：{exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

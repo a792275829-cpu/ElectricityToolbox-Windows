@@ -91,6 +91,33 @@
     element.textContent = text;
     return element;
   };
+  const uiMotionPreference = typeof matchMedia === 'function'
+    ? matchMedia('(prefers-reduced-motion: reduce)') : {matches:false};
+  const reduceUIMotion = () => uiMotionPreference.matches;
+  const uiAnimations = new WeakMap();
+  function animateUI(element, frames, duration) {
+    uiAnimations.get(element)?.cancel?.();
+    if (reduceUIMotion() || typeof element.animate !== 'function') return null;
+    const animation = element.animate(frames, {duration, easing:'cubic-bezier(.2,.7,.2,1)'});
+    uiAnimations.set(element, animation);
+    return animation;
+  }
+  function animateComparisonPaths(previous, svg) {
+    const current = [...svg.querySelectorAll('path[data-series]')];
+    const oldNames = new Set(previous.map(path => path.dataset.series));
+    const newNames = new Set(current.map(path => path.dataset.series));
+    current.filter(path => !oldNames.has(path.dataset.series))
+      .forEach(path => animateUI(path, [{opacity:0}, {opacity:1}], 140));
+    if (reduceUIMotion()) return;
+    previous.filter(path => !newNames.has(path.dataset.series)).forEach(path => {
+      path.removeAttribute('data-series'); path.setAttribute('data-exiting-series','true');
+      path.setAttribute('pointer-events','none'); path.setAttribute('aria-hidden','true');
+      svg.insertBefore(path, svg.firstChild);
+      const animation = animateUI(path, [{opacity:1}, {opacity:0}], 90);
+      if (animation) { animation.onfinish = () => path.remove(); animation.oncancel = () => path.remove(); }
+      else path.remove();
+    });
+  }
   function restore() {
     selected.clear();
     const hash = location.hash.slice(1), params = new URLSearchParams(hash.split('?')[1] || '');
@@ -280,7 +307,9 @@
   function draw() {
     if (panel.hidden) return;
     hideTooltip();
-    const svg=$('regionPriceChart'); svg.replaceChildren(); guide=null;markerLayer=null;
+    const svg=$('regionPriceChart');
+    const previousPaths=[...svg.querySelectorAll('path[data-series]')].map(path => path.cloneNode(true));
+    svg.replaceChildren(); guide=null;markerLayer=null;
     series=aggregateSeries(nodes,selected,'nodes',times.length);
     const palette=seriesPalette(series.length);
     automaticColors=new Map(series.map((item,index) => [item.name,palette[index]]));
@@ -318,6 +347,7 @@
           svg.append(make('circle',{cx:x(j),cy:y(v),r:3,fill:color(item.name)}));
       });
     });
+    animateComparisonPaths(previousPaths,svg);
     guide=make('line',{y1:margin.top,y2:height-margin.bottom,stroke:'var(--muted)','pointer-events':'none'});
     svg.append(guide);
     markerLayer=make('g',{'pointer-events':'none'});svg.append(markerLayer);

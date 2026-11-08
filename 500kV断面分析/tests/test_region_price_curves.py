@@ -34,6 +34,22 @@ class RegionPriceCurvesTests(unittest.TestCase):
         self.assertEqual([len(r["cities"]) for r in tree[:4]], [9, 4, 3, 5])
         self.assertEqual(tree[-1], {"name": "未分类", "cities": [{"name": "待确认", "nodes": ["新节点站"]}]})
 
+    def test_price_hierarchy_applies_city_overrides(self):
+        names = ["从西换流站", "广南变", "新节点站"]
+        baseline = price_hierarchy(names)
+        self.assertEqual(price_hierarchy(names, None), baseline)
+        self.assertEqual(price_hierarchy(names, {}), baseline)
+        self.assertEqual(
+            baseline[-1],
+            {"name": "未分类", "cities": [{"name": "待确认", "nodes": ["新节点站"]}]},
+        )
+        tree = price_hierarchy(names, {"广南变": "深圳", "新节点站": "珠海"})
+        by_city = {city["name"]: city["nodes"] for region in tree for city in region["cities"]}
+        self.assertEqual(by_city["广州"], ["从西换流站"])
+        self.assertEqual(by_city["深圳"], ["广南变"])
+        self.assertEqual(by_city["珠海"], ["新节点站"])
+        self.assertNotIn("未分类", [region["name"] for region in tree])
+
     def test_price_whitelist_includes_declared_node_without_adding_edges(self):
         with tempfile.TemporaryDirectory() as temp:
             topology = Path(temp) / "topology.md"

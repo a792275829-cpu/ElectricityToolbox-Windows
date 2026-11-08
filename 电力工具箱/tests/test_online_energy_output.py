@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
+from unittest.mock import Mock, patch
 
 from toolbox.runtime import ToolPaths, load_module
 
@@ -16,6 +20,48 @@ ROOT = Path(__file__).resolve().parents[2]
 class OnlineEnergyOutputTests(unittest.TestCase):
     def setUp(self):
         self.module = load_module("test_online_energy_output", ToolPaths(ROOT).online_energy)
+
+    def range_module(self, fetch, *, units=({"id": "u", "name": "#1"},)):
+        """Patch the browser boundary so a whole date range uses one session."""
+        module = self.module
+        context = SimpleNamespace(close=Mock())
+        session = SimpleNamespace(
+            sync_playwright=Mock(side_effect=lambda: nullcontext(None)),
+            launch_context=Mock(side_effect=lambda *a, **k: context),
+            ensure_login=Mock(return_value=None),
+            get_companies=Mock(return_value=[dict(tenantId="test", name="海门电厂")]),
+        )
+        overrides = dict(
+            sync_playwright=session.sync_playwright,
+            launch_context=session.launch_context,
+            ensure_login=session.ensure_login,
+            log=lambda *a: None,
+            get_companies=session.get_companies,
+            switch_company=lambda *a: None,
+            get_units=lambda *a: list(units),
+            is_renewable_company=lambda *a: False,
+            fetch_fire_rows=fetch,
+        )
+        return (module, context, session,
+                patch.multiple(module, **overrides), patch.object(module.time, "sleep"))
+
+    def date_rows(self, run_date, fetch, *, units=({"id": "u", "unitName": "#1"},),
+                  companies=None):
+        """Call collect_date_rows directly with the network boundary patched."""
+        module = self.module
+        context = SimpleNamespace(close=Mock())
+        if companies is None:
+            companies = [{"tenantId": "test", "name": "海门电厂"}]
+        overrides = dict(
+            switch_company=lambda *a: None,
+            get_units=lambda *a: list(units),
+            is_renewable_company=lambda *a: False,
+            fetch_fire_rows=fetch,
+            log=lambda *a: None,
+        )
+        with patch.multiple(module, **overrides), patch.object(module.time, "sleep"):
+            return module.collect_date_rows(
+                run_date, context, companies, module.Config(request_delay_seconds=0))
 
     def test_default_and_empty_config_use_downloads_subfolder(self):
         expected = Path.home() / "Downloads" / "上网电量"
@@ -279,3 +325,188 @@ class OnlineEnergyOutputTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "计划电量日期不一致"):
                 self.module.save_excel("2026-12-30", rows, Path(folder))
             self.assertEqual(list(Path(folder).glob("*.xlsx")), [])
+
+    # ---- New Mac-aligned validation / empty-value / single-session coverage ----
+
+    def test_collect_date_rows_rejects_bad_unit_inventory(self):
+        with self.assertRaisesRegex(ValueError, "机组列表为空、缺少ID或ID重复"):
+            self.date_rows("2026-10-28", lambda *a: [], units=[])
+        with self.assertRaisesRegex(ValueError, "机组列表为空、缺少ID或ID重复"):
+            self.date_rows("2026-10-28", lambda *a: [], units=[{"unitName": "#1"}])
+        with self.assertRaisesRegex(ValueError, "机组列表为空、缺少ID或ID重复"):
+            self.date_rows("2026-10-28", lambda *a: [],
+                           units=[{"id": "u", "unitName": "#1"}, {"id": "u", "unitName": "#2"}])
+
+    def test_collect_date_rows_rejects_unknown_or_duplicate_units(self):
+        units = [{"id": "u", "unitName": "#1"}]
+        with self.assertRaisesRegex(ValueError, "返回未知或重复机组 ghost"):
+            self.date_rows("2026-10-28", lambda *a: [
+                {"unitId": "ghost", "runDate": "2026-10-28", "onlineEle": [1.0] * 24}], units=units)
+        with self.assertRaisesRegex(ValueError, "返回未知或重复机组 u"):
+            self.date_rows("2026-10-28", lambda *a: [
+                {"unitId": "u", "runDate": "2026-10-28", "onlineEle": [1.0] * 24} for _ in range(2)],
+                units=units)
+
+    def test_collect_date_rows_rejects_return_date_mismatch(self):
+        with self.assertRaisesRegex(ValueError, "返回日期与 2026-10-28 不符"):
+            self.date_rows("2026-10-28", lambda *a: [
+                {"unitId": "u", "runDate": "2026-10-27", "onlineEle": [1.0] * 24}],
+                units=[{"id": "u", "unitName": "#1"}])
+
+    def test_collect_date_rows_rejects_missing_unit_data(self):
+        units = [{"id": "u1", "unitName": "#1"}, {"id": "u2", "unitName": "#2"}]
+        with self.assertRaisesRegex(ValueError, "缺少机组数据：#2"):
+            self.date_rows("2026-10-28", lambda *a: [
+                {"unitId": "u1", "runDate": "2026-10-28", "onlineEle": [1.0] * 24}], units=units)
+
+    def test_iter_detail_rows_rejects_empty_company_list(self):
+        context = SimpleNamespace(close=Mock())
+        with (patch.object(self.module, "sync_playwright", return_value=nullcontext(None)),
+              patch.object(self.module, "launch_context", return_value=context),
+              patch.object(self.module, "ensure_login"),
+              patch.object(self.module, "get_companies", return_value=[]),
+              patch.object(self.module, "log")):
+            with self.assertRaisesRegex(ValueError, "未返回可采集公司"):
+                self.module.collect_detail_rows("2026-10-28", self.module.Config())
+        context.close.assert_called_once()
+
+    def test_non_qingyuan_unreported_hours_stay_blank_not_zero(self):
+        import openpyxl
+
+        values = [None, 0, 12.5] + [None] * 21
+        with patch.object(self.module, "number_or_zero",
+                          side_effect=AssertionError("number_or_zero 补 0 分流仍存在")):
+            rows = self.date_rows("2026-10-28", lambda *a: [
+                {"unitId": "u", "runDate": "2026-10-28", "onlineEle": values}],
+                units=[{"id": "u", "unitName": "#1"}])
+        self.assertEqual(len(rows), 24)
+        self.assertIsNone(rows[0]["onlineEle"])
+        self.assertEqual(rows[1]["onlineEle"], 0)
+        self.assertEqual(rows[2]["onlineEle"], 12.5)
+        self.assertEqual(sum(row["onlineEle"] is None for row in rows), 22)
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.module.save_excel("2026-10-28", rows, Path(folder))
+            workbook = openpyxl.load_workbook(path)
+            try:
+                sheet = workbook["汇总"]
+                self.assertIsNone(sheet["A3"].value)
+                self.assertEqual(sheet["A4"].value, 0)
+                self.assertEqual(sheet["A5"].value, 12.5)
+                self.assertEqual(sheet["A3"].number_format, "General")
+            finally:
+                workbook.close()
+
+    def test_range_dates_reject_reversed_range_and_cover_both_ends(self):
+        self.assertEqual(self.module.range_dates("2026-10-26", "2026-10-28"),
+                         ["2026-10-26", "2026-10-27", "2026-10-28"])
+        self.assertEqual(self.module.range_dates("2026-10-26", "2026-10-26"), ["2026-10-26"])
+        with self.assertRaisesRegex(ValueError, "结束日期不能早于开始日期"):
+            self.module.range_dates("2026-10-28", "2026-10-26")
+
+    def test_range_export_writes_one_workbook_per_day_and_reuses_one_session(self):
+        fetched = []
+
+        def fetch(_context, run_date, _tenant_id):
+            fetched.append(run_date)
+            return [dict(unitId="u", runDate=run_date, onlineEle=[1.5] * 24)]
+
+        module, context, session, overrides, sleep = self.range_module(fetch)
+        with tempfile.TemporaryDirectory() as folder, overrides, sleep:
+            paths = module.export_online_energy_range(
+                "2026-10-26", "2026-10-28", module.Config(output_dir=Path(folder)))
+            self.assertEqual([path.name for path in paths], [
+                "上网电量汇总_2026-10-26.xlsx",
+                "上网电量汇总_2026-10-27.xlsx",
+                "上网电量汇总_2026-10-28.xlsx",
+            ])
+            self.assertTrue(all(path.is_file() for path in paths))
+            self.assertEqual(fetched, ["2026-10-26", "2026-10-27", "2026-10-28"])
+        context.close.assert_called_once()
+        self.assertEqual(session.sync_playwright.call_count, 1)
+        self.assertEqual(session.launch_context.call_count, 1)
+        self.assertEqual(session.ensure_login.call_count, 1)
+        self.assertEqual(session.get_companies.call_count, 1)
+
+    def test_range_export_stops_on_bad_day_and_keeps_finished_workbooks(self):
+        def fetch(_context, run_date, _tenant_id):
+            return [dict(unitId="u", runDate=run_date,
+                         onlineEle=[1.0] * 24 if run_date != "2026-10-27" else ["无效"] * 24)]
+
+        module, context, session, overrides, sleep = self.range_module(fetch)
+        with tempfile.TemporaryDirectory() as folder, overrides, sleep:
+            folder = Path(folder)
+            with self.assertRaisesRegex(ValueError, "缺失或无效"):
+                module.export_online_energy_range(
+                    "2026-10-26", "2026-10-28", module.Config(output_dir=folder))
+            self.assertTrue((folder / "上网电量汇总_2026-10-26.xlsx").is_file())
+            self.assertFalse((folder / "上网电量汇总_2026-10-27.xlsx").exists())
+            self.assertFalse((folder / "上网电量汇总_2026-10-28.xlsx").exists())
+        context.close.assert_called_once()
+        self.assertEqual(session.sync_playwright.call_count, 1)
+
+    def test_full_layout_with_plan_columns_reads_back_at_row_163(self):
+        import openpyxl
+
+        plan_date = "2026-10-30"
+        rows = []
+        for i, company in enumerate(item["name"] for item in self.module.FALLBACK_COMPANIES):
+            for hour in range(24):
+                rows.append({"company": company, "unit": "#1", "time": f"{hour:02d}:00",
+                             "onlineEle": 100 + i + hour})
+        for col, unit in enumerate(("清远#1", "清远#2")):
+            for hour in range(24):
+                rows.append({"company": "清远电厂", "unit": unit, "time": f"{hour:02d}:00",
+                             "onlineEle": 10 + col + hour,
+                             "planEle": None if hour == 0 else 200 + col + hour,
+                             "planDate": plan_date})
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.module.save_excel("2026-10-28", rows, Path(folder))
+            workbook = openpyxl.load_workbook(path)
+            try:
+                sheet = workbook["汇总"]
+                self.assertEqual(sheet["A163"].value, "清远 实际上网电量（万千瓦时）")
+                self.assertEqual(sheet["C163"].value, f"清远 {plan_date} 计划电量（万千瓦时）")
+                merged = {str(item) for item in sheet.merged_cells.ranges}
+                self.assertIn("A163:B163", merged)
+                self.assertIn("C163:D163", merged)
+                self.assertEqual([sheet.cell(164, c).value for c in range(1, 5)],
+                                 ["1号机", "2号机", "1号机", "2号机"])
+                self.assertEqual([sheet.cell(165, c).value for c in range(1, 5)],
+                                 [10, 11, None, None])
+                self.assertEqual([sheet.cell(188, c).value for c in range(1, 5)],
+                                 [33, 34, 223, 224])
+                for ref in ("A165", "B165", "C165", "D165", "A188", "C188", "D188"):
+                    self.assertEqual(sheet[ref].number_format, "General")
+                self.assertIsNone(sheet["A189"].value)
+            finally:
+                workbook.close()
+
+    def test_launch_context_wraps_context_for_session_recovery(self):
+        import toolbox_auth_requests
+
+        module = self.module
+        raw_context = SimpleNamespace(add_cookies=Mock(), clear_cookies=Mock(),
+                                      storage_state=Mock(return_value={}))
+        chromium = SimpleNamespace(launch_persistent_context=Mock(return_value=raw_context))
+        playwright = SimpleNamespace(chromium=chromium)
+        with (patch.object(module, "PROFILE_DIR", mock.MagicMock()),
+              patch.object(module, "playwright_proxy", return_value=None),
+              patch.object(module, "prepare_browser_session", return_value=True),
+              patch.object(module, "load_saved_auth_state") as load_saved):
+            wrapped = module.launch_context(playwright, headless=False)
+        self.assertIsInstance(wrapped, toolbox_auth_requests.AuthenticatedContext)
+        self.assertIs(wrapped._context, raw_context)
+        self.assertIs(wrapped._auth, module)
+        self.assertIs(wrapped._auth, module._SELF_MODULE)
+        self.assertFalse(raw_context._qingneng_headless)
+        load_saved.assert_not_called()
+
+    def test_main_reports_structured_login_error(self):
+        module = self.module
+        with (patch.object(module, "load_config", return_value=module.Config()),
+              patch.object(module, "ask_date", side_effect=ValueError("bad date")),
+              patch.object(sys, "argv", ["export_online_energy.py"]),
+              patch("toolbox_cli_login.emit_login_error") as emit):
+            code = module.main()
+        self.assertEqual(code, 1)
+        emit.assert_called_once()

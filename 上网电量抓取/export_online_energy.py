@@ -27,6 +27,11 @@ if str(WORKSPACE) not in sys.path:
 from toolbox_credentials import mark_browser_session, prepare_browser_session, read_login_config
 from toolbox_auth_loader import wait_for_login
 from toolbox_dates import normalize_date_input
+import toolbox_qingneng_login as qingneng_login
+
+# Report-local wrappers load this file through importlib and can be evicted from
+# sys.modules afterwards, so keep a stable self reference for the login policy.
+_SELF_MODULE = sys.modules[__name__]
 
 APP_ROOT = SCRIPT_DIR.parent if SCRIPT_DIR.name in {"scripts", "\u811a\u672c"} else SCRIPT_DIR
 BASE_URL = "https://xhxt.chng.com.cn"
@@ -286,30 +291,15 @@ def launch_context(playwright, *, headless: bool):
             str(PROFILE_DIR),
             **launch_options,
         )
+    context._qingneng_headless = headless
     if not prepare_browser_session(context, AUTH_STATE_PATH):
         load_saved_auth_state(context)
-    return context
+    from toolbox_auth_requests import AuthenticatedContext
+    return AuthenticatedContext(context, _SELF_MODULE)
 
 
 def is_logged_in(context) -> bool:
-    urls = [
-        f"{BASE_URL}/gdfire/api/pf/tenant/user/info",
-        f"{BASE_URL}/usercenter/web/pf/tenant/user/info",
-    ]
-    for url in urls:
-        try:
-            response = context.request.get(url, timeout=15000)
-        except PlaywrightError:
-            continue
-        if response.status != 200:
-            continue
-        try:
-            data = response.json()
-        except Exception:
-            continue
-        if data.get("retCode") == "T200" and bool(data.get("data", {}).get("tenantId")):
-            return True
-    return False
+    return qingneng_login.check_session(context.request, base_url=BASE_URL)
 
 
 def base64_decode(value: str) -> bytes:
@@ -325,85 +315,26 @@ def base64_encode(value: bytes) -> str:
 
 
 def rsa_encrypt_password(public_key_b64: str, password: str) -> str:
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric import padding
-
-    public_key = serialization.load_der_public_key(base64_decode(public_key_b64))
-    encrypted = public_key.encrypt(password.encode("utf-8"), padding.PKCS1v15())
-    return base64_encode(encrypted)
+    return qingneng_login.rsa_encrypt_password(public_key_b64, password)
 
 
 def try_api_login(context, username: str, password: str) -> bool:
-    key_response = context.request.get(f"{BASE_URL}/usercenter/web/pf/login/info/publicKey", timeout=20000)
-    key_data = parse_json_response(key_response, "读取登录公钥")
-    public_key = key_data.get("data")
-    if not isinstance(public_key, str) or not public_key:
-        raise RuntimeError("读取登录公钥失败：返回中没有公钥")
-
-    encrypted_password = rsa_encrypt_password(public_key, password)
-    login_response = context.request.post(
-        f"{BASE_URL}/usercenter/web/login",
-        params={"loginMode": 2, "username": username, "password": encrypted_password},
-        timeout=30000,
-    )
-    payload = json_or_text(login_response)
-    if login_response.status >= 400:
-        raise RuntimeError(f"登录接口 HTTP {login_response.status}: {str(payload)[:300]}")
-    if isinstance(payload, dict) and payload.get("retCode") not in (None, "T200"):
-        raise RuntimeError(f"登录失败：{payload.get('retMsg') or payload}")
-
-    page = context.new_page()
-    try:
-        page.goto(FIRE_APP_URL, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_load_state("networkidle", timeout=15000)
-    except PlaywrightTimeoutError:
-        pass
-    finally:
-        page.close()
-
-    logged_in = is_logged_in(context)
-    if logged_in:
-        save_auth_state(context)
-    return logged_in
+    return qingneng_login.api_login(_SELF_MODULE, context, username, password, app_url=FIRE_APP_URL)
 
 
 def try_ui_login(context, username: str, password: str) -> bool:
-    page = context.new_page()
-    page.goto(LOGIN_URL, wait_until="domcontentloaded")
-    try:
-        page.locator("#username, input[placeholder*='工号'], input[placeholder*='手机号'], input[placeholder*='账号']").first.fill(
-            username, timeout=10000
-        )
-        page.locator("#password, input[type='password']").first.fill(password, timeout=10000)
-        page.locator("button:has-text('登 录'), button:has-text('登录'), button[type='submit']").first.click(timeout=10000)
-    except (PlaywrightTimeoutError, PlaywrightError):
-        pass
-
-    deadline = time.time() + 45
-    while time.time() < deadline:
-        if is_logged_in(context):
-            save_auth_state(context)
-            page.close()
-            return True
-        time.sleep(2)
-    page.close()
-    return False
+    return qingneng_login.ui_login(_SELF_MODULE, context, username, password)
 
 
 def try_auto_login(context, username: str, password: str) -> bool:
-    context._qingneng_login_credentials = (username, password)
-    try:
-        log("正在尝试接口登录...")
-        if try_api_login(context, username, password):
-            return True
-        log("接口登录后仍未检测到登录态，改用页面登录...")
-    except Exception as exc:
-        log(f"接口登录失败：{exc}")
-        log("改用页面登录...")
-    return try_ui_login(context, username, password)
+    return qingneng_login.auto_login(_SELF_MODULE, context, username, password)
 
 
 def interactive_login(context, config: Config) -> None:
+    if getattr(context, "_qingneng_account_changed", False) is not True and is_logged_in(context):
+        save_auth_state(context)
+        log("登录态有效，已复用。")
+        return
     if config.username and config.password and try_auto_login(context, config.username, config.password):
         save_auth_state(context)
         log("自动登录成功，登录态已保存。")
@@ -421,6 +352,7 @@ def interactive_login(context, config: Config) -> None:
 
 
 def ensure_login(context, config: Config) -> None:
+    context._qingneng_credentials = (config.username, config.password)
     if getattr(context, "_qingneng_account_changed", False) is not True and is_logged_in(context):
         return
     if not config.username or not config.password:
@@ -582,97 +514,117 @@ def fetch_energy_rows(context, run_date: str, tenant_id: str, units: list[dict[s
     return rows
 
 
-def collect_detail_rows(run_date: str, config: Config) -> list[dict[str, Any]]:
+def collect_date_rows(run_date: str, context, companies: list[dict[str, str]],
+                      config: Config) -> list[dict[str, Any]]:
     detail_rows: list[dict[str, Any]] = []
 
+    for index, company in enumerate(companies, start=1):
+        tenant_id = company["tenantId"]
+        company_name = company["name"]
+        log(f"[{index}/{len(companies)}] 切换公司：{company_name}")
+        switch_company(context, tenant_id)
+        time.sleep(0.3)
+
+        units = sorted(get_units(context), key=lambda item: natural_key(unit_display_name(item)))
+        unit_names = {str(item.get("id")): unit_display_name(item) for item in units if item.get("id")}
+        unit_order = {str(item.get("id")): pos for pos, item in enumerate(units) if item.get("id")}
+
+        plans: dict[str, tuple[float | None, ...]] = {}
+        plan_date = ""
+        if company_name == "清远电厂":
+            raw_rows = fetch_qingyuan_rows(context, run_date, tenant_id)
+            plan_date = (datetime.strptime(run_date, "%Y-%m-%d") + timedelta(days=2)).date().isoformat()
+            plan_rows = fetch_qingyuan_rows(context, plan_date, tenant_id, metric="planValue")
+            if {str(row["unitId"]) for row in plan_rows} != set(unit_names):
+                raise ValueError(f"清远 {plan_date} 计划电量机组与机组列表不符，停止导出。")
+            plans = {
+                str(row["unitId"]): online_energy_hours(
+                    row["onlineEle"],
+                    label=f"{plan_date} 清远 / {unit_names[str(row['unitId'])]} 计划值",
+                    allow_empty=True,
+                )
+                for row in plan_rows
+            }
+            for unit_id, plan_values in plans.items():
+                missing_hours = sum(value is None for value in plan_values)
+                if missing_hours:
+                    log(f"  提示：{plan_date} 清远 / {unit_names[unit_id]} 有 {missing_hours} 个时段计划值未填报，导出为空白。")
+        elif is_renewable_company(units):
+            raw_rows = fetch_energy_rows(context, run_date, tenant_id, units)
+        else:
+            raw_rows = fetch_fire_rows(context, run_date, tenant_id)
+
+        power_items = [item for item in raw_rows if str(item.get("unitId") or "") != "-"]
+        if not unit_names or len(unit_names) != len(units):
+            raise ValueError(f"{company_name} 机组列表为空、缺少ID或ID重复，停止导出。")
+        seen = set()
+        for item in power_items:
+            unit_id = str(item.get("unitId") or "")
+            if unit_id not in unit_names or unit_id in seen:
+                raise ValueError(f"{company_name} 返回未知或重复机组 {unit_id}，停止导出。")
+            if str(item.get("runDate") or "")[:10] != run_date:
+                raise ValueError(f"{company_name} / {unit_id} 返回日期与 {run_date} 不符，停止导出。")
+            seen.add(unit_id)
+        missing = set(unit_names) - seen
+        if missing:
+            raise ValueError(f"{company_name} 缺少机组数据：{'、'.join(unit_names[key] for key in sorted(missing))}，停止导出。")
+        power_items.sort(
+            key=lambda item: (
+                unit_order.get(str(item.get("unitId") or ""), 999),
+                natural_key(unit_names.get(str(item.get("unitId") or ""), str(item.get("unitId") or ""))),
+            )
+        )
+
+        for item in power_items:
+            unit_id = str(item.get("unitId") or "")
+            unit_name = unit_names.get(unit_id, unit_id or "未知机组")
+            values = online_energy_hours(item.get("onlineEle"),
+                label=f"{run_date} {company_name} / {unit_name}",
+                allow_empty=True)
+            missing_hours = sum(value is None for value in values)
+            if missing_hours:
+                log(f"  提示：{company_name} / {unit_name} 有 {missing_hours} 个时段实际上网电量未填报，导出为空白。")
+            for hour, value in enumerate(values):
+                detail_rows.append(
+                    {
+                        "company": company_name,
+                        "unit": unit_name,
+                        "time": f"{hour:02d}:00",
+                        "onlineEle": value,
+                        **({"planEle": plans[unit_id][hour], "planDate": plan_date}
+                           if plans else {}),
+                    }
+                )
+
+        log(f"  完成：{company_name}，记录 {len(power_items)} 条。")
+        time.sleep(config.request_delay_seconds)
+
+    return detail_rows
+
+
+def iter_detail_rows(dates: list[str], config: Config):
+    """Yield ``(日期, 明细行)`` per date while reusing one login session."""
     with sync_playwright() as playwright:
         context = launch_context(playwright, headless=config.headless)
         try:
             ensure_login(context, config)
             companies = get_companies(context)
-            log(f"开始抓取 {run_date} 上网电量，共 {len(companies)} 家公司。")
-
-            for index, company in enumerate(companies, start=1):
-                tenant_id = company["tenantId"]
-                company_name = company["name"]
-                log(f"[{index}/{len(companies)}] 切换公司：{company_name}")
-                switch_company(context, tenant_id)
-                time.sleep(0.3)
-
-                units = sorted(get_units(context), key=lambda item: natural_key(unit_display_name(item)))
-                unit_names = {str(item.get("id")): unit_display_name(item) for item in units if item.get("id")}
-                unit_order = {str(item.get("id")): pos for pos, item in enumerate(units) if item.get("id")}
-
-                plans: dict[str, tuple[float | None, ...]] = {}
-                plan_date = ""
-                if company_name == "清远电厂":
-                    raw_rows = fetch_qingyuan_rows(context, run_date, tenant_id)
-                    plan_date = (datetime.strptime(run_date, "%Y-%m-%d") + timedelta(days=2)).date().isoformat()
-                    plan_rows = fetch_qingyuan_rows(context, plan_date, tenant_id, metric="planValue")
-                    if {str(row["unitId"]) for row in plan_rows} != set(unit_names):
-                        raise ValueError(f"清远 {plan_date} 计划电量机组与机组列表不符，停止导出。")
-                    plans = {
-                        str(row["unitId"]): online_energy_hours(
-                            row["onlineEle"],
-                            label=f"{plan_date} 清远 / {unit_names[str(row['unitId'])]} 计划值",
-                            allow_empty=True,
-                        )
-                        for row in plan_rows
-                    }
-                    for unit_id, plan_values in plans.items():
-                        missing_hours = sum(value is None for value in plan_values)
-                        if missing_hours:
-                            log(f"  提示：{plan_date} 清远 / {unit_names[unit_id]} 有 {missing_hours} 个时段计划值未填报，导出为空白。")
-                elif is_renewable_company(units):
-                    raw_rows = fetch_energy_rows(context, run_date, tenant_id, units)
-                else:
-                    raw_rows = fetch_fire_rows(context, run_date, tenant_id)
-
-                power_items = [item for item in raw_rows if str(item.get("unitId") or "") != "-"]
-                power_items.sort(
-                    key=lambda item: (
-                        unit_order.get(str(item.get("unitId") or ""), 999),
-                        natural_key(unit_names.get(str(item.get("unitId") or ""), str(item.get("unitId") or ""))),
-                    )
-                )
-
-                for item in power_items:
-                    unit_id = str(item.get("unitId") or "")
-                    unit_name = unit_names.get(unit_id, unit_id or "未知机组")
-                    if plans:
-                        if unit_id not in plans:
-                            raise ValueError(f"清远 {plan_date} 缺少机组 {unit_name} 的计划电量，停止导出。")
-                        values = online_energy_hours(
-                            item.get("onlineEle"),
-                            label=f"{run_date} {company_name} / {unit_name}",
-                            allow_empty=True,
-                        )
-                        missing_hours = sum(value is None for value in values)
-                        if missing_hours:
-                            log(f"  提示：{company_name} / {unit_name} 有 {missing_hours} 个时段实际上网电量未填报，导出为空白。")
-                    else:
-                        raw_values = item.get("onlineEle") or []
-                        if not isinstance(raw_values, list):
-                            raw_values = []
-                        values = [number_or_zero(raw_values[hour]) if hour < len(raw_values) else 0.0 for hour in range(24)]
-
-                    for hour, value in enumerate(values):
-                        detail_rows.append(
-                            {
-                                "company": company_name,
-                                "unit": unit_name,
-                                "time": f"{hour:02d}:00",
-                                "onlineEle": value,
-                                **({"planEle": plans[unit_id][hour], "planDate": plan_date} if plans else {}),
-                            }
-                        )
-
-                log(f"  完成：{company_name}，记录 {len(power_items)} 条。")
-                time.sleep(config.request_delay_seconds)
+            if not companies:
+                raise ValueError("未返回可采集公司，停止导出。")
+            for index, run_date in enumerate(dates, start=1):
+                log(f"[{index}/{len(dates)}] 抓取 {run_date} 上网电量，共 {len(companies)} 家公司。")
+                yield run_date, collect_date_rows(run_date, context, companies, config)
         finally:
             context.close()
 
-    return detail_rows
+
+def collect_detail_rows(run_date: str, config: Config) -> list[dict[str, Any]]:
+    """Collect one date; the report pipeline aggregates a single day at a time."""
+    rows = iter_detail_rows([run_date], config)
+    try:
+        return next(rows)[1]
+    finally:
+        rows.close()
 
 
 def display_unit_header(value: str) -> str:
@@ -809,12 +761,17 @@ def range_dates(start_date: str, end_date: str) -> list[str]:
 
 
 def export_online_energy_range(start_date: str, end_date: str, config: Config) -> list[Path]:
-    """逐日导出日期范围；单日复用原有 export_online_energy，已完成日期不受后续失败影响。"""
+    """导出日期范围内每一天，逐日写一个汇总工作簿，已完成日期不受后续失败影响。"""
+    dates = range_dates(start_date, end_date)
     paths: list[Path] = []
-    for run_date in range_dates(start_date, end_date):
-        path = export_online_energy(run_date, config)
-        paths.append(path)
-        log(f"已保存：{path}")
+    rows = iter_detail_rows(dates, config)
+    try:
+        for run_date, detail_rows in rows:
+            path = save_excel(run_date, detail_rows, config.output_dir)
+            paths.append(path)
+            log(f"已保存：{path}")
+    finally:
+        rows.close()
     return paths
 
 
@@ -862,6 +819,8 @@ def main() -> int:
         print("\n已取消。")
         return 130
     except Exception as exc:
+        from toolbox_cli_login import emit_login_error
+        emit_login_error(exc)
         print(f"\n失败：{exc}", file=sys.stderr)
         return 1
 

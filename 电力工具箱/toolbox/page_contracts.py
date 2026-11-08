@@ -26,9 +26,9 @@ class PageBinding:
 PAGE_BINDINGS = MappingProxyType({
     'online-energy': PageBinding('online-energy', ('start_date', 'end_date')),
     'wind-forecast': PageBinding('wind-forecast', ('run_date',)),
-    # 与 mac 版一致：GUI 不提供价差阈值输入，服务表单里的阈值有默认值 80，
-    # 页面字段契约只登记页面上真实存在的变量。
-    'section-analysis': PageBinding('section-analysis', ('output_root', 'topology_path')),
+    # 与 mac 版一致：字段契约登记 threshold（服务表单默认值 80）。页面未提供该输入变量，
+    # 采集端按缺失跳过，实际取值由服务表单/validate 决定。
+    'section-analysis': PageBinding('section-analysis', ('output_root', 'topology_path', 'threshold')),
     'trade-analysis': PageBinding('trade-analysis', ('output_dir',)),
     'market-table': PageBinding('market-table', ('run_date', 'workbook', 'overwrite', 'create_backup')),
     'transaction-info': PageBinding('transaction-info', ('workbook', 'start_date', 'end_date', 'overwrite', 'create_backup')),

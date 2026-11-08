@@ -115,7 +115,7 @@ class MarketPayloadParityTests(unittest.TestCase):
             {'date':'2026-10-27','max':20,'min':0,'avg':10,'sum':.23456789012}]}]}}
         a=self.parity(market.summarize_load_type,p,'1',target,'forecastPeriodList','日前')
         b=self.parity(transaction.summarize_load_type,p,'1',target,period_list_key='forecastPeriodList',label='日前')
-        self.assertEqual(a[0],10);self.assertEqual(b[0],20);self.assertEqual(b[3],23456.78901)
+        self.assertEqual(a[0],20);self.assertEqual(b[0],20);self.assertEqual(b[3],23456.78901)
         rows=[{'date':'2026年10月27日','info':{'中文字段':0,'比例':'12.34%','备用':3}}]
         self.parity(market.extract_report_market_values,rows,target,fields=(('缺失','中文字段'),'比例'),expected_count=2,label='报表',percent_fields={'比例'})
         rows=[{'date':'2026/10/27','dataType':1,'dataItemGroup':g,'unitCount':list(range(24))} for g in market.DAY_AHEAD_CLEARING_UNIT_COUNT_GROUPS]
@@ -224,7 +224,9 @@ class MarketPayloadParityTests(unittest.TestCase):
         sys.modules[spec.name] = market_table
         spec.loader.exec_module(market_table)
         target = date(2026, 7, 5)
-        missing = {"max": None, "min": None, "avg": None, "sum": None}
+        # Mac 口径要求每条周期记录都显式带日期；这里保留日期、清空指标，
+        # 才能命中「未发布汇总」这条业务可用性分支。
+        missing = {"date": target.isoformat(), "max": None, "min": None, "avg": None, "sum": None}
         for name, periods in [("null metrics", [missing]),
                               ("empty metric", [{**missing, "max": 1, "min": ""}]),
                               ("no periods", [])]:
@@ -238,7 +240,8 @@ class MarketPayloadParityTests(unittest.TestCase):
                         market_table.extract_actual_load_values(dataset, target)
         # A published zero is data, and malformed nonempty text stays a numeric error.
         zero = {"data": {"dataNetLoadDTOList": [
-            {"loadType": "1", "actualPeriodList": [dict.fromkeys(missing, 0)]}]}}
+            {"loadType": "1", "actualPeriodList": [
+                {"date": target.isoformat(), "max": 0, "min": 0, "avg": 0, "sum": 0}]}]}}
         self.parity(market_table.summarize_actual_load_type, zero, "1", target)
         zero["data"]["dataNetLoadDTOList"][0]["actualPeriodList"][0]["max"] = "bad"
         with patch.dict(os.environ, TOOLBOX_DOMAIN_BACKEND="rust"):

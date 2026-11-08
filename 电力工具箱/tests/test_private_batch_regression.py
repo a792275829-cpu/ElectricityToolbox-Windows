@@ -127,17 +127,19 @@ class WorkbookDateMatchingTests(unittest.TestCase):
 
 
 class UploaderScriptTests(unittest.TestCase):
-    def test_no_undefined_login_failure_helper(self) -> None:
+    def test_login_failure_helper_is_defined_before_use(self) -> None:
         source = UPLOADER.read_text(encoding="utf-8")
-        self.assertNotIn("loginFailure(", source)
+        self.assertIn("function loginFailure(kind, message)", source)
+        self.assertIn("error.login_kind = kind;", source)
         self.assertIn("进入私有数据导入页面时登录态失效，请先重新登录。", source)
         self.assertIn("throw lastError ?? new Error(", source)
 
     def test_cli_collects_raw_file_values(self) -> None:
         source = UPLOADER.read_text(encoding="utf-8")
         self.assertIn("parseFileArguments(args.files)", source)
-        self.assertIn("args.files.push(String(argv[++i] ?? '').trim());", source)
-        self.assertNotIn("args.files.push(...String(argv[++i]", source)
+        # Mac 支持 --files a,b,c；Windows 额外保护含逗号的完整路径，
+        # 因此改为统一委托 parseFileArguments（见 FileArgumentTests 的功能用例）。
+        self.assertIn("args.files.push(...parseFileArguments([String(argv[++i] ?? '')]));", source)
 
     def test_script_passes_node_syntax_check(self) -> None:
         if not node_available():

@@ -51,7 +51,7 @@ class BusinessClient:
             except queue.Empty:
                 raise RuntimeError("后台响应超时；写入或上传不会自动重试，请先核对结果。") from None
             if "error" in response:
-                raise RuntimeError(response["error"])
+                raise RemoteTaskError(response["error"], details=response.get("error_detail"))
             return response.get("result")
         finally:
             with self._lock:
@@ -111,7 +111,7 @@ class RemoteTaskRegistry(TaskRegistry):
             if snapshot["state"] == "failed":
                 with self._request_lock:
                     self._request_ids.pop(fingerprint, None)
-                raise RemoteTaskError(snapshot["error"] or "业务任务失败", "".join(first_trace))
+                raise RemoteTaskError(snapshot["error"] or "业务任务失败", "".join(first_trace), details=snapshot.get("error_detail"))
             time.sleep(0.15)
 
     def prepare_page_worker(self, page, status, *, command=None, process=False, action="run"):

@@ -541,18 +541,24 @@ class ToolboxApp(tk.Tk):
             names = "\n".join(f"• {task.name}" for task in active) or "• 后台任务"
             if not messagebox.askyesno("仍有任务运行", f"以下任务仍在运行：\n\n{names}\n\n{action}工具箱将取消这些任务，确定{action}吗？", parent=self):
                 return False
+        for page in self.pages.values():
+            confirm_close = getattr(page, 'confirm_close', None)
+            if confirm_close is not None and not confirm_close():
+                return False
         remaining = self.registry.terminate_all()
         if remaining:
             messagebox.showwarning(f"无法立即{action}", f"仍有不可安全中断的写入任务。请等待任务结束后再{action}。", parent=self)
             return False
-        if self.credentials_panel.dirty and not self.credentials_panel.save():
-            messagebox.showwarning("账号尚未保存", self.credentials_panel.status_var.get(), parent=self)
+        if not self.credentials_panel.flush_autosave():
+            messagebox.showwarning("账号未保存", "账号自动保存失败，请检查账号区提示后重试。", parent=self)
             return False
         return True
 
-    def _on_close(self) -> None:
+    def _on_close(self) -> bool:
         if self._confirm_shutdown():
             self.destroy()
+            return True
+        return False
 
     def restart_application(self) -> None:
         """Relaunch the same source checkout with its current environment."""

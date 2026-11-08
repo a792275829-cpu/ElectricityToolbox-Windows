@@ -21,6 +21,7 @@ from toolbox_file_button import FileSelectButton
 from toolbox_native_excel import load_value_workbook, excel_session
 from toolbox_platform import open_path
 from toolbox_native_domain import invoke as _invoke_domain, backend_mode, with_native_session
+from toolbox_clearing_layout import brief_row_index
 
 
 def invoke_domain(domain, action, payload):
@@ -34,6 +35,14 @@ RENEWABLE_UNITS = ["海风", "鮀莲", "归湖"]
 POINT_TYPE_ORDER = ["高价欠发亏损", "高价超发收益", "低价欠发收益", "低价超发亏损"]
 DEFAULT_OUTPUT_NAME = "electricity_clearing_report.html"
 DEFAULT_OUTPUT_DIR = pathlib.Path.home() / "Downloads"
+
+HAIMEN_UNIT_NAMES = [f"海门#{number}机组" for number in range(1, 7)]
+OPTIONAL_HAIMEN_UNITS = ("海门#5机组", "海门#6机组")
+
+
+def is_optional_haimen_unit(name):
+    """海门 #5/#6 号机属于可选机组：快报汇总区缺行时豁免。"""
+    return bool(re.fullmatch(r"海门#[56]机组", str(name)))
 
 
 def open_directory(path):
@@ -170,7 +179,7 @@ class ReportBuilder:
         self.compare_mode = "dayahead_vs_ml"
         self.companies = {
             "汕头": ["汕头#1机组", "汕头#2机组", "汕头#3机组"],
-            "海门": ["海门#1机组", "海门#2机组", "海门#3机组", "海门#4机组"],
+            "海门": list(HAIMEN_UNIT_NAMES),
             "东莞": ["东莞#1、#2机组", "东莞#3、#4机组", "东莞#5、#6机组", "东莞#7、#8机组"],
             "海风": ["海风"],
             "鮀莲": ["鮀莲"],
@@ -201,6 +210,9 @@ class ReportBuilder:
                 self.hourly = {unit: domain["hourly"][unit] for unit in domain["unit_order"]}
                 self.offer_cards = domain["offer_cards"]
                 self.compare_mode = domain["compare_mode"]
+            for unit in OPTIONAL_HAIMEN_UNITS:
+                if unit in self.hourly and unit not in self.companies["海门"]:
+                    self.companies["海门"].append(unit)
             html_doc = self._render()
             self.out_path.write_text(html_doc, encoding="utf-8")
             return self.out_path
@@ -283,7 +295,7 @@ class ReportBuilder:
             raise ValueError("新版交易汇总页需要配套的‘快报’工作表。")
 
         ws_brief = self.wb["快报"]
-        brief_value = read_cell_values(ws_brief, 19, 11)
+        brief_value = read_cell_values(ws_brief, 80, 11)
         summary_rows = {
             "分公司火电": (10, 7),
             "汕头": (11, 8),
@@ -310,7 +322,7 @@ class ReportBuilder:
                 elif label in {"汕头", "海门", "东莞"}:
                     plant = label
                     name = label
-                elif not label and plant in {"汕头", "海门"} and re.fullmatch(r"#[1-4]机组", unit):
+                elif not label and plant in {"汕头", "海门"} and re.fullmatch(r"#[1-6]机组", unit):
                     name = f"{plant}{unit}"
                 else:
                     continue
@@ -322,11 +334,20 @@ class ReportBuilder:
                 raise ValueError(f"新版交易汇总页缺少标签：{'、'.join(sorted(missing))}")
             summary_rows = {name: (found[name], brief_row)
                             for name, (_, brief_row) in summary_rows.items()}
+            # 海门 #5/#6 号机为可选机组：汇总页出现即纳入，快报缺行时豁免。
+            brief_index = brief_row_index(
+                [(brief_value(row, 1), brief_value(row, 2)) for row in range(1, 81)]
+            )
+            for name in OPTIONAL_HAIMEN_UNITS:
+                if name in found:
+                    summary_rows[name] = (found[name], brief_index.get(name))
         for name, (summary_row, brief_row) in summary_rows.items():
+            if brief_row is None and not is_optional_haimen_unit(name):
+                raise ValueError(f"快报汇总区缺少标签：{name}")
             self.summary[name] = {
-                "capacity_10mw": num(brief_value(brief_row, 3), None),
+                "capacity_10mw": num(brief_value(brief_row, 3), None) if brief_row else None,
                 "cost": cell_value(summary_row, 3),
-                "load_rate": num(brief_value(brief_row, 11), None),
+                "load_rate": num(brief_value(brief_row, 11), None) if brief_row else None,
                 "da_mwh": num(cell_value(summary_row, 7)) * 10,
                 "da_price": num(cell_value(summary_row, 8)),
                 "ml_mwh": num(cell_value(summary_row, 4)) * 10,
@@ -434,7 +455,7 @@ class ReportBuilder:
             if not isinstance(label, str):
                 continue
             clean = label.strip()
-            if not (clean in ["1号机", "2号机", "3号机", "4号机"] or (clean.startswith("#") and "机组" in clean)):
+            if not (re.fullmatch(r"[1-6]号机", clean) or (clean.startswith("#") and "机组" in clean)):
                 continue
             data = []
             ok = True

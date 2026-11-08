@@ -35,7 +35,7 @@ if str(BASE_DIR.parent) not in sys.path:
 from toolbox_file_button import FileSelectButton
 from toolbox_storage import data_path
 from toolbox_platform import process_is_alive, hidden_process_options, detached_browser_process_options, windows_browser_processes, find_windows_browser
-from toolbox_wps_config import (_document_config_from_dict, _region_config_from_dict, _string_list, build_config_export, load_config_export, normalize_document_titles, normalize_runtime_config, runtime_config_from_export_payload, save_config_export)
+from toolbox_wps_config import (_document_config_from_dict, _region_config_from_dict, _string_list, build_config_export, load_config_export, normalize_browser_mode, normalize_document_titles, normalize_runtime_config, runtime_config_from_export_payload, save_config_export)
 from toolbox_log_console import LogConsole, explain_error, redact
 from toolbox_choices import SegmentedGroup
 from toolbox_wps_urls import url_choices
@@ -428,7 +428,7 @@ def read_excel_sheet_names(workbook_path: Path) -> list[str]:
 
 def prepare_mappings(
     mappings: list[MappingRow],
-    browser_mode: str = "persistent",
+    browser_mode: str = "managed_cdp",
     cdp_url: str = "http://127.0.0.1:9222",
     log=None,
 ) -> list[PreparedMapping]:
@@ -1333,30 +1333,16 @@ def open_browser_context(
             context = browser.contexts[0] if browser.contexts else browser.new_context()
         return browser, context, False
 
-    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    log("正在启动临时浏览器，并载入已保存的登录信息…")
-    try:
-        context = playwright.chromium.launch_persistent_context(
-            str(PROFILE_DIR),
-            headless=for_login_check,
-            channel=None if os.environ.get("TOOLBOX_PORTABLE") == "1" else "chrome",
-            viewport={"width": 1400, "height": 900},
-        )
-    except Exception:
-        log("未能启动系统浏览器，正在尝试使用内置浏览器。")
-        context = playwright.chromium.launch_persistent_context(
-            str(PROFILE_DIR),
-            headless=for_login_check,
-            viewport={"width": 1400, "height": 900},
-        )
-    return None, context, True
+    raise ValueError(
+        f"无法识别的浏览器连接方式：{browser_mode}。请选择“WPS 专用浏览器”或“连接已打开的浏览器”。"
+    )
 
 
 def write_to_wps(
     url: str,
     prepared: list[PreparedMapping],
     log,
-    browser_mode: str = "persistent",
+    browser_mode: str = "managed_cdp",
     cdp_url: str = "http://127.0.0.1:9222",
 ) -> dict[str, Any]:
     if sync_playwright is None:
@@ -1538,7 +1524,7 @@ class MappingDialog(tk.Toplevel):
         title: str,
         initial: MappingRow | None = None,
         recent_urls: list[str] | None = None,
-        browser_mode: str = "persistent",
+        browser_mode: str = "managed_cdp",
         cdp_url: str = "http://127.0.0.1:9222",
         log=None,
     ):
@@ -1784,7 +1770,7 @@ class DocumentConfigDialog(tk.Toplevel):
         title: str,
         initial: DocumentConfig | None = None,
         recent_urls: list[str] | None = None,
-        browser_mode: str = "persistent",
+        browser_mode: str = "managed_cdp",
         cdp_url: str = "http://127.0.0.1:9222",
         log=None,
         autosave=None,
@@ -2063,7 +2049,7 @@ class DocumentConfigDialog(tk.Toplevel):
             info: dict[str, Any] | None = None
             error: str | None = None
             try:
-                # A persistent Playwright profile cannot be opened twice at once.
+                # One browser profile serves one connection at a time.
                 with browser_read_lock:
                     info = read_online_document_info(
                         url, browser_mode, cdp_url, log
@@ -2331,7 +2317,6 @@ class WpsWriterFrame(ttk.Frame):
         ttk.Label(file_frame, text="连接方式").grid(row=0, column=0, padx=8, pady=8, sticky="w")
         mode_frame = SegmentedGroup(file_frame, variable=self.browser_mode, choices=(
             ("managed_cdp", "WPS 专用浏览器（推荐）"),
-            ("persistent", "临时浏览器"),
             ("cdp", "连接已打开的浏览器"),
         ))
         mode_frame.grid(row=0, column=1, padx=8, pady=8, sticky="w")
@@ -2952,10 +2937,7 @@ class WpsWriterFrame(ttk.Frame):
         self.recent_urls = [url for url in config.get("recent_urls", []) if isinstance(url, str) and url.strip()]
         if config.get("kdocs_url"):
             self.recent_urls = update_recent_urls(self.recent_urls, config["kdocs_url"])
-        saved_browser_mode = config.get("browser_mode", "managed_cdp")
-        if saved_browser_mode == "persistent" and sys.platform in {"darwin", "win32"}:
-            saved_browser_mode = "managed_cdp"
-        self.browser_mode.set(saved_browser_mode)
+        self.browser_mode.set(normalize_browser_mode(config.get("browser_mode")))
         self.cdp_url.set(config.get("cdp_url", "http://127.0.0.1:9222"))
         default_url = config.get("kdocs_url", "")
         default_file = config.get("excel_path", "")

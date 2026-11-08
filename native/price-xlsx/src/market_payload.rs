@@ -256,26 +256,42 @@ fn load_summary(p: &Value, transaction: bool) -> R {
     }
     let periods = &s[txt(&p["period_key"])];
     let rows = arr(periods);
+    let target = txt(&p["date"]);
+    let summary = if transaction {
+        rows.iter()
+            .find(|r| dt(&r["date"]) == target)
+            .or_else(|| if rows.len() == 1 { rows.first() } else { None })
+            .ok_or("没有返回负荷数据")?
+    } else {
+        // Mac 口径：要求恰好一条日期等于运行日的记录，绝不推断缺失日期。
+        let matching: Vec<&Value> = rows.iter().filter(|r| dt(&r["date"]) == target).collect();
+        if matching.len() > 1 {
+            return Err(format!(
+                "{target} loadType={kind} 返回重复日期记录，无法唯一确定数据。"
+            )
+            .into());
+        }
+        match matching.first() {
+            Some(row) => *row,
+            None => {
+                // 未发布的汇总属业务可用性状态，不是格式错误：保留既有 RuntimeError 文案。
+                return Ok(json!({"unavailable": format!(
+                    "{} loadType={kind} 没有返回{}数据", target, txt(&p["label"])
+                )}));
+            }
+        }
+    };
     // An unpublished market-load summary is a business availability state,
     // not a malformed numeric value. Preserve its public RuntimeError contract.
     if !transaction
-        && (rows.is_empty()
-            || ["max", "min", "avg", "sum"]
-                .iter()
-                .any(|field| rows[0][*field].is_null() || rows[0][*field] == ""))
+        && ["max", "min", "avg", "sum"]
+            .iter()
+            .any(|field| summary[*field].is_null() || summary[*field] == "")
     {
         return Ok(json!({"unavailable": format!(
-            "{} loadType={kind} 没有返回{}数据", txt(&p["date"]), txt(&p["label"])
+            "{} loadType={kind} 没有返回{}数据", target, txt(&p["label"])
         )}));
     }
-    let summary = if transaction {
-        rows.iter()
-            .find(|r| dt(&r["date"]) == txt(&p["date"]))
-            .or_else(|| if rows.len() == 1 { rows.first() } else { None })
-    } else {
-        rows.first()
-    }
-    .ok_or("没有返回负荷数据")?;
     let mut ns = vec![];
     for f in ["max", "min", "avg", "sum"] {
         ns.push(required(&summary[f], f, if transaction { 10 } else { 4 })?)

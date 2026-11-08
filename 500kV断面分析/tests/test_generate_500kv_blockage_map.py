@@ -145,6 +145,58 @@ class Generate500kVBlockageMapTest(unittest.TestCase):
                 ["实时节点电价查询_500kV分析.html"],
             )
 
+    def test_editor_pipeline_accepts_minimal_json_topology(self):
+        import json
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            times = [f"{i // 4:02d}:{i % 4 * 15:02d}" for i in range(12)]
+            curve_a = [100.0 + i for i in range(12)]
+            curve_b = [100.0 - i * 10 for i in range(12)]
+            catalog = {
+                "version": 1,
+                "revision": 0,
+                "headers": times,
+                "nodes": [
+                    dict(id="node-a", name="甲", station="甲", voltage=500,
+                         keys=[], curve=curve_a, curve_headers=times,
+                         present=True, pending=False, city="",
+                         anchor={"x": 100, "y": 100}),
+                    dict(id="node-b", name="乙", station="乙", voltage=500,
+                         keys=[], curve=curve_b, curve_headers=times,
+                         present=True, pending=False, city="",
+                         anchor={"x": 900, "y": 500}),
+                ],
+                "edges": [dict(a="node-a", b="node-b", kind="line", reviewed=True)],
+                "image": {"width": 1500, "height": 1020},
+                "source": "测试拓扑",
+                "summary": {},
+            }
+            topology = root / "catalog.json"
+            topology.write_text(json.dumps(catalog, ensure_ascii=False), encoding="utf-8")
+
+            raw = root / "raw.xlsx"
+            book = Workbook()
+            sheet = book.active
+            sheet.append(["节点名称", "数据项", *times])
+            sheet.append(["其他甲500kV", "电价(元/MWh)", *curve_a])
+            sheet.append(["其他乙500kV", "电价(元/MWh)", *curve_b])
+            book.save(raw)
+            book.close()
+
+            result = generate_blockage_map(
+                topology_path=topology,
+                raw_price_path=raw,
+                output_dir=root / "out",
+                threshold=50.0,
+            )
+
+            self.assertTrue(result.html_path.exists())
+            html = result.html_path.read_text(encoding="utf-8")
+            self.assertIn("广东电网 500kV 接线拓扑与电价分析", html)
+            self.assertIn('"edge": "甲-乙"', html)
+            self.assertIn('"congestion_by_time":', html)
+
 
 if __name__ == "__main__":
     unittest.main()

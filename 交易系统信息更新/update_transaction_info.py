@@ -9,7 +9,7 @@ import sys
 import time
 import uuid
 import zipfile
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
@@ -99,12 +99,14 @@ class PreparedWorkbook:
     last_row: int
     pairs: tuple[DailyLoadPair, ...]
     cell_expectations: tuple[tuple[str, int | float, str], ...] = ()
+    preserved_cells: dict[str, tuple[Any, str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
 class WorkbookGroup:
     tail: WorkbookTail
     cells: dict[str, tuple[Any, str]]
+    formulas: dict[str, tuple[Any, str]] = field(default_factory=dict)
 
 
 def log(message: str) -> None:
@@ -176,12 +178,23 @@ def _payload_rows(dataset: dict[str, Any]) -> list[dict[str, Any]]:
     return [row for row in rows if isinstance(row, dict)]
 
 
-def _period_date(value: Any) -> date | None:
-    text = str(value or "")[:10]
-    try:
-        return datetime.strptime(text, "%Y-%m-%d").date()
-    except ValueError:
-        return None
+def select_dated_record(records, target: date, *, label: str):
+    """Require one explicitly dated source record; never infer a missing date."""
+    matching = []
+    for record in records if isinstance(records, list) else ():
+        if not isinstance(record, dict):
+            continue
+        try:
+            source_date = date.fromisoformat(str(record.get("date") or "")[:10])
+        except ValueError:
+            continue
+        if source_date == target:
+            matching.append(record)
+    if not matching:
+        raise RuntimeError(f"{target.isoformat()} {label}没有返回对应日期数据。")
+    if len(matching) != 1:
+        raise RuntimeError(f"{target.isoformat()} {label}返回重复日期记录，无法唯一确定数据。")
+    return matching[0]
 
 
 def summarize_load_type(
@@ -210,14 +223,7 @@ def summarize_load_type(
     periods = series.get(period_list_key) or []
     if not isinstance(periods, list):
         periods = []
-    summary = next(
-        (row for row in periods if isinstance(row, dict) and _period_date(row.get("date")) == run_date),
-        None,
-    )
-    if summary is None and len(periods) == 1 and isinstance(periods[0], dict):
-        summary = periods[0]
-    if summary is None:
-        raise RuntimeError(f"{run_date.isoformat()} loadType={load_type}没有返回{label}数据。")
+    summary = select_dated_record(periods, run_date, label=f"loadType={load_type} {label}")
     values = tuple(
         _number(summary.get(field), label=f"{run_date.isoformat()} {label} loadType={load_type} {field}")
         for field in ("max", "min", "avg", "sum")
@@ -348,7 +354,7 @@ def _read_workbook_groups(path: Path) -> dict[date, WorkbookGroup]:
             raise RuntimeError(f"工作簿中没有工作表 {SHEET_NAME}。")
         groups = {}
         tail = None
-        cells, labels, right_labels = {}, [], []
+        cells, formulas, labels, right_labels = {}, {}, [], []
 
         def finish_group():
             if tail is None:
@@ -359,7 +365,7 @@ def _read_workbook_groups(path: Path) -> dict[date, WorkbookGroup]:
                 raise RuntimeError(f"第 {tail.start_row} 行日期不符合 D / D-{DATE_OFFSET_DAYS}。")
             if tail.day_ahead_date in groups:
                 raise ValueError(f"工作簿存在重复日前日期：{tail.day_ahead_date}")
-            groups[tail.day_ahead_date] = WorkbookGroup(tail, dict(cells))
+            groups[tail.day_ahead_date] = WorkbookGroup(tail, dict(cells), dict(formulas))
 
         for row, values in enumerate(workbook[SHEET_NAME].iter_rows(
             min_col=3, max_col=15,
@@ -370,7 +376,7 @@ def _read_workbook_groups(path: Path) -> dict[date, WorkbookGroup]:
                 if day and actual:
                     finish_group()
                     tail = WorkbookTail(row, day, actual)
-                    cells, labels, right_labels = {}, [], []
+                    cells, formulas, labels, right_labels = {}, {}, [], []
             if tail is not None and row < tail.start_row + len(CATEGORY_ORDER):
                 category = CATEGORY_ORDER[row - tail.start_row]
                 labels.append(values[1].value)
@@ -378,9 +384,12 @@ def _read_workbook_groups(path: Path) -> dict[date, WorkbookGroup]:
                 columns = (() if category == "西电" else (5, 6, 7, 8)) + (12, 13, 14, 15)
                 for column in columns:
                     cell = values[column - 3]
-                    # Preserve formulas regardless of the overwrite option.
-                    if cell.data_type != "f":
-                        cells[f"{get_column_letter(column)}{row}"] = (cell.value, cell.number_format or "General")
+                    reference = f"{get_column_letter(column)}{row}"
+                    if cell.data_type == "f":
+                        # 公式始终只读：覆盖开关也不改写，并参与保存后回读校验。
+                        formulas[reference] = (cell.value, cell.number_format or "General")
+                    else:
+                        cells[reference] = (cell.value, cell.number_format or "General")
         finish_group()
         if not groups:
             raise RuntimeError(f"{SHEET_NAME} 中未找到可接续的日前/实际数据组。")
@@ -397,13 +406,16 @@ def inspect_workbook_tail(path: Path) -> WorkbookTail:
 
 def resolve_start_date(path: Path, requested: date | None) -> date:
     groups = _read_workbook_groups(path)
-    expected = max(groups) + timedelta(days=1)
-    if requested is not None:
-        if requested not in groups and requested != expected:
-            raise ValueError(f"开始日期必须是已有日期组或待接续日期；新数据开始日期必须是 {expected.isoformat()}。")
-        return requested
-    return next((day for day, group in groups.items()
-                 if any(value in (None, "") for value, _ in group.cells.values())), expected)
+    pending = [day for day, group in groups.items()
+               if any(value in (None, "") for value, _ in group.cells.values())]
+    expected = min(pending) if pending else max(groups) + timedelta(days=1)
+    # 历史日期组仍允许指定用于原地补录；其余输入必须保持日期连续。
+    if requested is not None and requested not in groups and requested != expected:
+        raise ValueError(
+            f"为保持日期连续，开始日期必须是 {expected.isoformat()}；"
+            f"当前输入为 {requested.isoformat()}。"
+        )
+    return expected
 
 
 def _pending_dates(path: Path, start_date: date | None, end_date: date, *, overwrite: bool) -> tuple[date, ...]:
@@ -671,6 +683,8 @@ def _write_patched_workbook(
 
 
 def _values_equal(actual: Any, expected: int | float) -> bool:
+    if isinstance(actual, bool):
+        return False
     try:
         return math.isclose(float(actual), float(expected), rel_tol=0, abs_tol=1e-7)
     except (TypeError, ValueError):
@@ -724,9 +738,18 @@ def verify_workbook(path: Path, prepared: PreparedWorkbook) -> None:
                     raise RuntimeError(f"实际数值回读失败：第 {row} 行。")
     finally:
         workbook.close()
+    if prepared.preserved_cells:
+        raw = openpyxl.load_workbook(path, data_only=False, read_only=True)
+        try:
+            actual = read_cell_snapshots(raw, ((SHEET_NAME, coordinate) for coordinate in prepared.preserved_cells))
+            for coordinate, expected in prepared.preserved_cells.items():
+                if actual[(SHEET_NAME, coordinate)] != expected:
+                    raise RuntimeError(f"已有单元格回读失败：{coordinate}")
+        finally:
+            raw.close()
 
 
-def prepare_workbook(path: Path, pairs: Iterable[DailyLoadPair], *, overwrite: bool = True) -> PreparedWorkbook:
+def prepare_workbook(path: Path, pairs: Iterable[DailyLoadPair], *, overwrite: bool = False) -> PreparedWorkbook:
     original = Path(path).expanduser().resolve()
     pair_tuple = tuple(pairs)
     if not pair_tuple:
@@ -743,7 +766,7 @@ def prepare_workbook(path: Path, pairs: Iterable[DailyLoadPair], *, overwrite: b
         if pair.day_ahead_date != expected:
             raise ValueError(f"新数据必须从 {expected.isoformat()} 开始并保持日期连续。")
         expected += timedelta(days=1)
-    changes, expectations = {}, []
+    changes, expectations, preserved_cells = {}, [], {}
     for pair in pair_tuple:
         if pair.day_ahead_date - pair.actual_date != timedelta(days=DATE_OFFSET_DAYS):
             raise ValueError("每组数据必须满足日前 D、实际 D-3。")
@@ -752,6 +775,13 @@ def prepare_workbook(path: Path, pairs: Iterable[DailyLoadPair], *, overwrite: b
         group = groups.get(pair.day_ahead_date)
         if group is None:
             raise ValueError(f"工作簿中没有日期组：{pair.day_ahead_date}")
+        # 公式始终只读；非覆盖模式下已有普通数值同样保留并回读校验。
+        for coordinate, snapshot in group.formulas.items():
+            preserved_cells[coordinate] = snapshot
+        if not overwrite:
+            for coordinate, snapshot in group.cells.items():
+                if snapshot[0] not in (None, ""):
+                    preserved_cells[coordinate] = snapshot
         for offset, category in enumerate(CATEGORY_ORDER):
             row = group.tail.start_row + offset
             values = dict(zip(("L", "M", "N", "O"), pair.actual[category]))
@@ -772,6 +802,7 @@ def prepare_workbook(path: Path, pairs: Iterable[DailyLoadPair], *, overwrite: b
         )
         prepared = PreparedWorkbook(
             original, temporary, source_fingerprint, first_row, last_row, appended, tuple(expectations),
+            preserved_cells=dict(preserved_cells),
         )
         verify_workbook(temporary, prepared)
         assert_workbook_unchanged(original, source_fingerprint)
@@ -812,8 +843,8 @@ def update_workbook(
     if tuple(pair.day_ahead_date for pair in pairs) != days:
         raise RuntimeError("抓取日期与待更新日期不一致，停止写入。")
     assert_workbook_unchanged(original, source_fingerprint)
-    # With no explicit range, preserve all populated historical values.
-    prepared = prepare_workbook(original, pairs, overwrite=overwrite and start_date is not None)
+    # 与 Mac 一致：覆盖口径由 overwrite 参数决定，不再因未显式指定起始日期而降级。
+    prepared = prepare_workbook(original, pairs, overwrite=overwrite)
     backup = commit_prepared_workbook(prepared, create_backup=create_backup)
     log(f"已更新 {prepared.original}：日前 {days[0]} 至 {days[-1]}，实际日期为日前 D-3；"
         f"历史写入 {len(prepared.cell_expectations)} 格，新增 {len(prepared.pairs)} 组。")
@@ -891,6 +922,8 @@ def main() -> int:
         print("已取消。", file=sys.stderr)
         return 130
     except Exception as exc:
+        from toolbox_cli_login import emit_login_error
+        emit_login_error(exc)
         print(f"失败：{exc}", file=sys.stderr)
         return 1
 

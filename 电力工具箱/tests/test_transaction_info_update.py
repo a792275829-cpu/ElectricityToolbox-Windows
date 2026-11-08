@@ -182,7 +182,7 @@ class TransactionInfoUpdateTests(unittest.TestCase):
             self.assertIsNotNone(backup)
             self.assertTrue(backup.is_file())
 
-    def test_auto_repairs_blanks_then_appends_without_overwriting_values_or_formulas(self):
+    def test_auto_repairs_blanks_then_appends_overwriting_values_but_keeping_formulas(self):
         for backend in ("python", "rust"):
             with self.subTest(backend=backend), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "fixture.xlsx"
@@ -210,9 +210,11 @@ class TransactionInfoUpdateTests(unittest.TestCase):
                     sheet = book["Sheet1"]
                     self.assertEqual(sheet["E1"].value, 1000)
                     self.assertEqual(sheet["E1"].number_format, "0.0000")
-                    self.assertEqual(sheet["F1"].value, 0)
+                    # Mac 口径：overwrite 默认 True，自动模式也会覆盖已填数值（含 0），
+                    # 只保留模板公式，不再因未显式给起始日期而降级为不覆盖。
+                    self.assertEqual(sheet["F1"].value, 100)
                     self.assertEqual(sheet["G1"].value, "=1+2")
-                    self.assertEqual(sheet["H1"].value, 18)
+                    self.assertEqual(sheet["H1"].value, 12003)
                     self.assertEqual(sheet["L3"].value, 3000)
                     self.assertIsNone(sheet["E3"].value)
                     self.assertEqual(sheet["C8"].value.date(), days[-1])

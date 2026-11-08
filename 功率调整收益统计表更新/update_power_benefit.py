@@ -239,11 +239,9 @@ def inspect_workbook(path: Path, *, end_date: date, start_date: date | None = No
             header_row = next((r for r in range(1, min(sheet.max_row, 20) + 1)
                                if all(re.sub(r"\s+", "", str(sheet[f"{col}{r}"].value or "")) == label
                                       for col, label in headers.items())), None)
-            if header_row is None:
-                raise ValueError(f"{path.name}/{sheet.title} 目标列模板表头不匹配。")
             groups: dict[date, dict[int, int]] = {}
             current: date | None = None
-            for row in range(header_row + 1, sheet.max_row + 1):
+            for row in range((header_row or 0) + 1, sheet.max_row + 1):
                 if sheet.cell(row, 1).value is not None:
                     current = date_at(sheet, cached[sheet.title], row, workbook.epoch)
                 hour = hour_of(sheet.cell(row, 2).value)
@@ -256,6 +254,10 @@ def inspect_workbook(path: Path, *, end_date: date, start_date: date | None = No
                 if hour in hours:
                     raise ValueError(f"{path.name}/{sheet.title} {current} {hour}:00 重复。")
                 hours[hour] = row
+            if not groups:
+                continue
+            if header_row is None:
+                raise ValueError(f"{path.name}/{sheet.title} 目标列模板表头不匹配。")
             for day, hours in sorted(groups.items()):
                 if set(hours) != set(range(24)) or day in seen_days:
                     raise ValueError(f"{path.name} {day} 日期重复或不是完整的0–23点。")
@@ -270,6 +272,15 @@ def inspect_workbook(path: Path, *, end_date: date, start_date: date | None = No
                                                     field, cell.number_format, cell.style_id))
         if not seen_days:
             raise ValueError(f"{path.name} 模板内未找到指定日期范围的完整小时块。")
+        first = start_date or min(seen_days)
+        missing = [first + timedelta(days=offset) for offset in range((end_date - first).days + 1)
+                   if first + timedelta(days=offset) not in seen_days]
+        if missing:
+            preview = "、".join(day.isoformat() for day in missing[:10])
+            raise ValueError(
+                f"{path.name} 模板缺少日期的完整0–23点块：{preview}"
+                f"（共 {len(missing)} 天）。请补齐对应月份模板后重试；未抓取或写入任何数据。"
+            )
     finally:
         workbook.close()
         if cached is not None:
@@ -649,6 +660,8 @@ def main() -> int:
                        headed=args.headed, overwrite=not args.skip_existing)
         return 0
     except Exception as exc:
+        from toolbox_cli_login import emit_login_error
+        emit_login_error(exc)
         log(f"更新失败：{exc}")
         return 1
 

@@ -29,11 +29,11 @@ SUBJECT_MAP_PATH = SCRIPT_DIR / "load_compare_subject_map.json"
 DEFAULT_SUBJECT_MAP = {
     "统调负荷": "1",
     "B类竞价空间": "6",
-    "西电东送电力": "2",
-    "A类电源出力": "4",
-    "地方电源出力": "18",
-    "发电总出力": "8",
-    "粤港联络线": "20",
+    "西电东送电力": "4",
+    "A类电源出力": "2",
+    "地方电源出力": "3",
+    "发电总出力": "18",
+    "粤港联络线": "5",
 }
 POINT_TO_TIME_SEGMENT = {
     24: 1,
@@ -520,6 +520,8 @@ def main() -> int:
         print("\n已取消。")
         return 130
     except Exception as exc:
+        from toolbox_cli_login import emit_login_error
+        emit_login_error(exc)
         print(f"\n失败：{exc}", file=sys.stderr)
         return 1
 

@@ -82,14 +82,26 @@ class PageContractTests(unittest.TestCase):
 
     def test_registered_fields_exist_on_their_pages(self) -> None:
         from toolbox.page_contracts import PAGE_BINDINGS
+        from toolbox.service_catalog import desktop_catalog
 
+        # 与 mac 版一致：section-analysis 契约登记 threshold，但页面没有该输入变量；
+        # 它由服务表单提供，采集端按缺失跳过、由 validate 补默认值。
+        form_only = {"section-analysis": {"threshold"}}
+        catalog_fields = {
+            tool["id"]: {item["key"] for item in tool["fields"]}
+            for tool in desktop_catalog(self.paths)
+        }
         checked = 0
         for descriptor, page in self.pages():
             binding = PAGE_BINDINGS.get(descriptor.tool_id)
             if binding is None:
                 continue
-            missing = [name for name in binding.fields if not hasattr(page, name)]
+            exempt = form_only.get(descriptor.tool_id, set())
+            missing = [name for name in binding.fields
+                       if name not in exempt and not hasattr(page, name)]
             self.assertEqual([], missing, f"{descriptor.tool_id} 的注册字段在页面上不存在")
+            for name in exempt & set(binding.fields):
+                self.assertIn(name, catalog_fields[descriptor.tool_id])
             checked += 1
         self.assertGreaterEqual(checked, 15)
 
