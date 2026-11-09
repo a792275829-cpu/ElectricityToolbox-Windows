@@ -179,6 +179,47 @@ mod implementation {
                      dir.join("electricity-toolbox.exe")).unwrap();
             dir
         }
+        fn runtime_fixture(name: &str) -> PathBuf {
+            let dir = std::env::temp_dir().join(format!("toolbox-runtime-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            for part in ["payload/runtime/python", "payload/runtime/node",
+                         "payload/app/电力工具箱/bin", "payload/app/desktop/python"] {
+                fs::create_dir_all(dir.join(part)).unwrap();
+            }
+            for part in ["payload/runtime/python/python.exe", "payload/runtime/node/node.exe",
+                         "payload/app/电力工具箱/bin/toolbox-service.exe"] {
+                fs::write(dir.join(part), b"MZstub").unwrap();
+            }
+            for part in ["payload/app/desktop/python/native_bridge.py",
+                         "payload/app/desktop/python/service_bridge.py"] {
+                fs::write(dir.join(part), b"# bridge").unwrap();
+            }
+            dir
+        }
+        #[test]
+        fn full_payload_without_bundled_python_is_rejected() {
+            let dir = runtime_fixture("missing");
+            fs::remove_file(dir.join("payload/runtime/python/python.exe")).unwrap();
+            let error = verify_runtime(&dir, &json!({"version":"9.1.2","layout":2})).unwrap_err();
+            let _ = fs::remove_dir_all(&dir);
+            assert!(error.contains("内置运行环境不完整"), "{error}");
+            assert!(error.contains("payload/runtime/python/python.exe"), "{error}");
+        }
+        #[test]
+        fn full_payload_with_a_replaced_python_launcher_is_rejected() {
+            let dir = runtime_fixture("replaced");
+            fs::write(dir.join("payload/runtime/python/python.exe"), b"not-an-exe").unwrap();
+            let error = verify_runtime(&dir, &json!({"version":"9.1.2","layout":2})).unwrap_err();
+            let _ = fs::remove_dir_all(&dir);
+            assert!(error.contains("不是有效的 Windows 程序"), "{error}");
+        }
+        #[test]
+        fn complete_runtime_is_accepted_and_source_layout_is_not_checked() {
+            let dir = runtime_fixture("complete");
+            verify_runtime(&dir, &json!({"version":"9.1.2","layout":2})).unwrap();
+            verify_runtime(&dir, &json!({"version":"9.1.2"})).unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
         #[test]
         fn relaunch_reports_a_program_that_exits_immediately_instead_of_claiming_success() {
             // `where` without arguments exits 1 at once: the update must not be
@@ -238,6 +279,43 @@ mod implementation {
             assert!(!command(&reg).args(["query",&key]).status().unwrap().success(),"rollback created an originally absent key");
         }
     }
+    /// A missing bundled Python does not kill the Tauri host: it stays alive and
+    /// only shows a startup-failure window. Verifying that the relaunched process
+    /// did not exit therefore accepts a broken update. A layout-2 payload is the
+    /// full Windows distribution and always ships a standalone runtime, so check
+    /// its launchers before the rollback copy is discarded.
+    fn verify_runtime(target: &Path, manifest: &Value) -> Result<(), String> {
+        if manifest.get("layout").and_then(Value::as_u64) != Some(2) {
+            return Ok(()); // 源码启动与精简测试夹具没有内置运行时
+        }
+        const REQUIRED: &[&str] = &[
+            "payload/runtime/python/python.exe",
+            "payload/runtime/node/node.exe",
+            "payload/app/电力工具箱/bin/toolbox-service.exe",
+            "payload/app/desktop/python/native_bridge.py",
+            "payload/app/desktop/python/service_bridge.py",
+        ];
+        let mut problems = Vec::new();
+        for name in REQUIRED {
+            match fs::metadata(target.join(name)) {
+                Ok(info) if info.is_file() && info.len() > 0 => {}
+                Ok(_) => problems.push(format!("{name}（空文件或目录）")),
+                Err(error) => problems.push(format!("{name}（{error}）")),
+            }
+        }
+        let python = target.join("payload/runtime/python/python.exe");
+        let mut header = [0u8; 2];
+        match fs::File::open(&python).and_then(|mut file| file.read_exact(&mut header)) {
+            Ok(()) if header == *b"MZ" => {}
+            Ok(()) => problems.push("payload/runtime/python/python.exe（不是有效的 Windows 程序）".into()),
+            Err(error) => problems.push(format!("payload/runtime/python/python.exe（无法读取：{error}）")),
+        }
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("更新后的内置运行环境不完整：{}；请重新安装完整发行版", problems.join("、")))
+        }
+    }
     fn install(plan: &Plan, cache: &Path) -> Result<(u32, &'static str, Option<String>), String> {
         // Keep the verified file locked against writes/deletion until NSIS exits.
         let mut installer = fs::OpenOptions::new().read(true).share_mode(1).open(&plan.installer).map_err(|e| e.to_string())?;
@@ -276,6 +354,7 @@ mod implementation {
             if manifest["version"] != plan.version || !plan.target_dir.join("electricity-toolbox.exe").is_file() {
                 return Err("安装后的版本或程序文件校验失败".into());
             }
+            verify_runtime(&plan.target_dir, &manifest)?;
             relaunch(plan)
         })();
         let (pid, relaunched_by) = match outcome {

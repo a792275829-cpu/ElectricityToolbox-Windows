@@ -31,9 +31,11 @@ class WindowsHelperTests(unittest.TestCase):
         crash_script.write_text('Unicode true\nRequestExecutionLevel user\nSilentInstall silent\nSetCompress off\n'
             f'OutFile "{crash}"\nSection\nSetErrorLevel 3\nQuit\nSectionEnd\n',encoding='utf-8-sig')
         subprocess.run([str(MAKENSIS),str(crash_script)],check=True,capture_output=True,timeout=30,creationflags=subprocess.CREATE_NO_WINDOW)
-        for name in ('good','fail','badapp','hold','crash'):
+        for name in ('good','fail','badapp','hold','crash','nopython'):
             fail=name=='fail'
-            manifest=folder/(name+'.json');manifest.write_text(json.dumps({'version':'9.0.1'}))
+            payload=dict(version='9.0.1')
+            if name=='nopython':payload['layout']=2  # 完整发行版清单，但没有内置运行时
+            manifest=folder/(name+'.json');manifest.write_text(json.dumps(payload))
             installer=folder/(name+'.exe')
             script=folder/(name+'.nsi')
             binary=SERVICE
@@ -146,6 +148,16 @@ class WindowsHelperTests(unittest.TestCase):
     def test_partial_install_failure_restores_old_program_and_data(self):
         self.launch('fail');self.commit()
         self.assertEqual(self.status()['state'],'failed',self.status())
+        self.assertEqual(json.loads((self.target/'payload/manifest.json').read_text())['version'],'9.0.0')
+        self.assertEqual((self.home/'keep.txt').read_text(),'KEEP-DATA')
+
+    def test_missing_bundled_python_rolls_back_instead_of_claiming_success(self):
+        # Tauri 宿主在后端启动失败时仍存活，只显示「内置 Python 不完整」窗口；
+        # 仅凭重启进程是否退出会把这样的坏安装判成更新成功并删掉旧版备份。
+        self.launch('nopython');self.commit()
+        status=self.status()
+        self.assertEqual(status['state'],'failed',status)
+        self.assertIn('内置运行环境不完整',status['error'])
         self.assertEqual(json.loads((self.target/'payload/manifest.json').read_text())['version'],'9.0.0')
         self.assertEqual((self.home/'keep.txt').read_text(),'KEEP-DATA')
 
