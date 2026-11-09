@@ -100,7 +100,7 @@ class Generate500kVBlockageMapTest(unittest.TestCase):
             self.assertIn('"edge": "凤城-水乡"', html)
             self.assertIn('"is_section": true', html)
 
-    def test_generate_blockage_map_removes_legacy_excel_outputs(self):
+    def test_generate_blockage_map_preserves_existing_legacy_outputs(self):
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             raw_prices = tmp_path / "实时节点电价查询.xlsx"
@@ -142,8 +142,29 @@ class Generate500kVBlockageMapTest(unittest.TestCase):
             self.assertTrue(result.html_path.exists())
             self.assertEqual(
                 sorted(path.name for path in output_dir.iterdir()),
-                ["实时节点电价查询_500kV分析.html"],
+                ["500kv_section_price_gap_analysis.xlsx", "guangdong_500kv_section_map.html",
+                 "实时节点电价查询_500kV分析.html", "实时节点电价查询_500kV去重.xlsx"],
             )
+            self.assertEqual((output_dir / "500kv_section_price_gap_analysis.xlsx").read_bytes(), b"legacy")
+            self.assertEqual((output_dir / "实时节点电价查询_500kV去重.xlsx").read_bytes(), b"legacy")
+            self.assertEqual((output_dir / "guangdong_500kv_section_map.html").read_text(encoding="utf-8"), "legacy")
+
+    def test_input_named_like_old_analysis_survives_in_output_directory(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            topology = root / "topology.md"
+            topology.write_text("## 2. 跨片区主通道边\n### 片区\n凤城-水乡\n## 3. next\n", encoding="utf-8")
+            raw = root / "500kv_section_price_gap_analysis.xlsx"
+            book = Workbook()
+            book.active.append(["节点名称", "数据项", "00:00", "00:15", "00:30", "00:45"])
+            book.active.append(["其他凤城站500kV", "电价(元/MWh)", 100, 200, 300, 400])
+            book.active.append(["其他水乡站500kV", "电价(元/MWh)", 500, 400, 300, 200])
+            book.save(raw)
+            book.close()
+            before = raw.read_bytes()
+            result = generate_blockage_map(topology, raw, root)
+            self.assertTrue(result.html_path.is_file())
+            self.assertEqual(raw.read_bytes(), before)
 
     def test_editor_pipeline_accepts_minimal_json_topology(self):
         import json

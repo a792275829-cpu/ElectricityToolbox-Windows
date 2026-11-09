@@ -18,7 +18,7 @@ import {
   planBatches,
   resolveTarget,
   sourceName,
-  summarizeImport,
+  parseImportResponse,
 } from './batch-plan.mjs';
 
 
@@ -575,7 +575,7 @@ async function postBatch(context, config, batch, fields) {
     if (response.status() >= 400 || (parsed?.retCode && parsed.retCode !== 'T200')) {
       throw new Error(`上传失败 HTTP ${response.status()}（retCode=${parsed?.retCode ?? 'unknown'}）：${redact(JSON.stringify(parsed).slice(0, 500))}`);
     }
-    return summarizeImport(Array.isArray(parsed) ? parsed : parsed?.data);
+    return parseImportResponse(parsed);
   } finally {
     clearInterval(heartbeat);
   }

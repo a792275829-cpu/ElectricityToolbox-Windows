@@ -141,6 +141,37 @@ class RustServiceTests(unittest.TestCase):
         self.assertEqual(result['state'], 'succeeded', result)
         self.assertEqual(marker.read_text(), 'complete')
 
+    def test_cli_login_errors_reach_snapshot_and_ui_classification(self):
+        from toolbox.tasks.errors import RemoteTaskError, classify_error
+        for kind, category, exit_code in (("verification", "authentication", 1), ("network", "network", 7)):
+            self.script.write_text(
+                "import os,sys\n"
+                f"sys.path.insert(0, {str(ROOT)!r})\n"
+                "from toolbox_qingneng_login import LoginError\n"
+                "from toolbox_cli_login import emit_login_error\n"
+                "assert os.environ.get('TOOLBOX_CLI_PROTOCOL') == '1'\n"
+                f"error=LoginError({kind!r}, 'review-login-failure password=synthetic-secret')\n"
+                f"emit_login_error(error)\nsys.exit({exit_code})\n", encoding="utf-8")
+            task_id = self.start(request_id="login-" + kind)
+            task = self.finish(task_id)
+            self.assertEqual(task["state"], "failed", task)
+            detail = task["error_detail"]
+            self.assertEqual(detail["login_kind"], kind)
+            self.assertEqual(detail["code"], category)
+            self.assertEqual(detail["tool_id"], "online-energy")
+            self.assertEqual(detail["action"], "run")
+            self.assertEqual(detail["exit_code"], exit_code)
+            self.assertNotIn("synthetic-secret", json.dumps(task, ensure_ascii=False))
+            error = RemoteTaskError(task["error"], details=detail)
+            self.assertEqual(classify_error(error).category.value, category)
+            events = self.call("events")
+            self.assertFalse(any(row["task_id"] == task_id and row["message"].startswith("TOOLBOX_ERROR=")
+                for row in events["events"]))
+        self.script.write_text('print("done",flush=True)\n', encoding="utf-8")
+        task = self.finish(self.start(request_id="after-login-failures"))
+        self.assertEqual(task["state"], "succeeded", task)
+        self.assertIsNone(task["error_detail"])
+
     def test_uninterruptible_write_refuses_cancellation_and_shutdown(self):
         target = self.workspace / "市场表更新/update_market_table.py"
         target.parent.mkdir()

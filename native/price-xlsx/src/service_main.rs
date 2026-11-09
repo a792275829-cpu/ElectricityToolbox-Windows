@@ -37,6 +37,22 @@ fn redact(text: &str) -> String {
 }
 
 fn active(task: &Value) -> bool { matches!(task["state"].as_str(), Some("created" | "running" | "cancelling")) }
+fn parse_worker_error(text: &str) -> Option<Value> {
+    let incoming: Value = serde_json::from_str(text).ok()?;
+    let incoming = incoming.as_object()?;
+    let mut detail = serde_json::Map::new();
+    for key in ["code", "tool_id", "action", "stage", "login_kind", "exception_type", "message", "exit_code"] {
+        if let Some(value) = incoming.get(key) {
+            let value = match value {
+                Value::String(text) => json!(redact(text)),
+                Value::Number(_) | Value::Null => value.clone(),
+                _ => continue,
+            };
+            detail.insert(key.to_string(), value);
+        }
+    }
+    if detail.is_empty() { None } else { Some(Value::Object(detail)) }
+}
 fn event(state: &mut State, id: &str, kind: &str, message: &str) {
     state.sequence += 1;
     let message: String = redact(message).chars().take(16000).collect();
@@ -53,6 +69,7 @@ fn transition(shared: &Shared, id: &str, mut phase: &str, mut result: Value, mut
         task.value["state"] = json!(phase);
         task.value["result"] = result.clone();
         task.value["error"] = json!(error.as_ref().map(|e| redact(e)));
+        if phase != "failed" { task.value["error_detail"] = Value::Null; }
         task.value["message"] = json!(error.as_ref().map(|e| redact(e)).unwrap_or_else(||
             if phase == "succeeded" { redact(result["message"].as_str().unwrap_or("已完成")) }
             else if phase == "cancelled" { "任务已取消".to_string() } else { String::new() }));
@@ -86,6 +103,7 @@ fn run_worker(config: Config, shared: Shared, id: String, prepared: Value, reque
     let request_path = std::env::temp_dir().join(format!("toolbox-native-task-{}-{id}.json", std::process::id()));
     let mut request_created = false;
     let mut owned_child = None;
+    let mut failure_detail: Option<Value> = None;
     let outcome = (|| -> Result<Value, String> {
         let mut options = fs::OpenOptions::new(); options.write(true).create_new(true);
         #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
@@ -97,7 +115,8 @@ fn run_worker(config: Config, shared: Shared, id: String, prepared: Value, reque
         command.args(["-u", "-B"]).arg(prepared["worker"].as_str().ok_or("缺少业务引擎入口")?)
             .arg("--workspace").arg(&config.workspace).arg("--request").arg(&request_path)
             .current_dir(&config.workspace).env("PYTHONUTF8", "1").env("PYTHONIOENCODING", "utf-8")
-            .env("TOOLBOX_PYTHON", &config.python).env("PYTHONDONTWRITEBYTECODE", "1");
+            .env("TOOLBOX_PYTHON", &config.python).env("PYTHONDONTWRITEBYTECODE", "1")
+            .env("TOOLBOX_CLI_PROTOCOL", "1");
         owned_child = Some(service_process::OwnedChild::spawn_if_active(&mut command, &cancelled,
             request["tool_id"] == "wps-writer").map_err(|e| e.to_string())?);
         let owned = owned_child.as_mut().unwrap();
@@ -142,6 +161,16 @@ fn run_worker(config: Config, shared: Shared, id: String, prepared: Value, reque
                 Ok(Some(line)) => {
                     if let Some(value) = line.strip_prefix("TOOLBOX_RESULT=") {
                         result = Some(serde_json::from_str::<Value>(value).map_err(|_| "业务完成结果无效".to_string())?);
+                    } else if let Some(detail) = line.strip_prefix("TOOLBOX_ERROR=").and_then(parse_worker_error) {
+                        // A nested CLI's login diagnosis precedes the worker's
+                        // generic CalledProcessError. Keep the specific cause.
+                        if !failure_detail.as_ref().is_some_and(|v| v["login_kind"].as_str().is_some_and(|s| !s.is_empty())) {
+                            failure_detail = Some(detail);
+                        } else if detail["exit_code"].as_i64().is_some_and(|code| code != 0) {
+                            // The outer worker knows the nested command's exit
+                            // code even when its generic error is less specific.
+                            failure_detail.as_mut().unwrap()["exit_code"] = detail["exit_code"].clone();
+                        }
                     } else {
                         let safe = redact(&line);
                         if (!trace.is_empty() || line.contains("Traceback (most recent call last)")) && trace.len() < 16000 {
@@ -157,7 +186,15 @@ fn run_worker(config: Config, shared: Shared, id: String, prepared: Value, reque
         }
         let status = status.unwrap_or(owned.child.wait().map_err(|e| e.to_string())?);
         if cancelled.load(Ordering::Acquire) { return Err("任务已取消".into()); }
-        if !status.success() { return Err(format!("子进程执行失败，退出码 {}{}", status.code().unwrap_or(-1), if trace.is_empty() { String::new() } else { format!("\n{trace}") })); }
+        if !status.success() {
+            let detail = failure_detail.get_or_insert_with(|| json!({"code":"external_process","stage":"worker"}));
+            if !detail["exit_code"].as_i64().is_some_and(|code| code != 0) {
+                detail["exit_code"] = json!(status.code().unwrap_or(-1));
+            }
+            detail["tool_id"] = request["tool_id"].clone();
+            detail["action"] = request.get("action").cloned().unwrap_or(json!("run"));
+            return Err(format!("子进程执行失败，退出码 {}{}", status.code().unwrap_or(-1), if trace.is_empty() { String::new() } else { format!("\n{trace}") }));
+        }
         let result = result.filter(|v| !v.is_null()).ok_or("业务进程未返回完成结果，请核对日志")?;
         Ok(no_data.map(|message| json!({"message":message,"outputs":[]})).unwrap_or(result))
     })();
@@ -174,7 +211,15 @@ fn run_worker(config: Config, shared: Shared, id: String, prepared: Value, reque
     }
     if request_created { let _ = fs::remove_file(request_path); }
     if cancelled.load(Ordering::Acquire) { transition(&shared, &id, "cancelled", Value::Null, None); }
-    else { match outcome { Ok(result) => transition(&shared, &id, "succeeded", result, None), Err(error) => transition(&shared, &id, "failed", Value::Null, Some(error)) } }
+    else { match outcome {
+        Ok(result) => transition(&shared, &id, "succeeded", result, None),
+        Err(error) => {
+            if let Some(task) = shared.lock().unwrap().tasks.get_mut(&id) {
+                task.value["error_detail"] = failure_detail.unwrap_or(Value::Null);
+            }
+            transition(&shared, &id, "failed", Value::Null, Some(error));
+        }
+    } }
 }
 
 fn start(config: &Config, shared: &Shared, params: &Value, closed: &AtomicBool) -> Result<Value, String> {
@@ -196,7 +241,7 @@ fn start(config: &Config, shared: &Shared, params: &Value, closed: &AtomicBool) 
     let cancelled = Arc::new(AtomicBool::new(false));
     {
         let mut state = shared.lock().unwrap();
-        state.tasks.insert(id.clone(), Task { value: json!({"id":id,"tool_id":tool,"name":prepared["name"],"state":"created","cancellable":prepared["cancellable"],"message":"","result":null,"error":null}), cancelled: cancelled.clone() });
+        state.tasks.insert(id.clone(), Task { value: json!({"id":id,"tool_id":tool,"name":prepared["name"],"state":"created","cancellable":prepared["cancellable"],"message":"","result":null,"error":null,"error_detail":null}), cancelled: cancelled.clone() });
         state.order.push(id.clone());
         state.requests.insert(request_id.to_string(), (fingerprint, id.clone()));
         event(&mut state, &id, "state", "created");
@@ -310,6 +355,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn worker_errors_are_validated_redacted_and_allowlisted() {
+        for text in ["not-json", "null", "[]", r#"{"unexpected":"value"}"#] {
+            assert!(parse_worker_error(text).is_none());
+        }
+        let detail = parse_worker_error(r#"{"login_kind":"verification","message":"password=synthetic-secret","password":"synthetic-secret","exit_code":7}"#).unwrap();
+        assert_eq!(detail["login_kind"], "verification");
+        assert_eq!(detail["exit_code"], 7);
+        assert_eq!(detail["message"], "password=[已隐藏]");
+        assert!(detail.get("password").is_none());
+    }
+
+    #[test]
     fn successful_snapshot_message_is_redacted_like_events() {
         let shared: Shared = Arc::new(Mutex::new(State::default()));
         shared.lock().unwrap().tasks.insert("task".into(), Task {
@@ -325,11 +382,12 @@ mod tests {
     fn accepted_cancellation_cannot_be_overwritten_by_completion() {
         let shared: Shared = Arc::new(Mutex::new(State::default()));
         shared.lock().unwrap().tasks.insert("task".into(), Task {
-            value: json!({"state":"cancelling","cancellable":true}),
+            value: json!({"state":"cancelling","cancellable":true,"error_detail":{"login_kind":"network"}}),
             cancelled: Arc::new(AtomicBool::new(true)),
         });
         transition(&shared, "task", "succeeded", json!({"message":"done"}), None);
         assert_eq!(shared.lock().unwrap().tasks["task"].value["state"], "cancelled");
+        assert!(shared.lock().unwrap().tasks["task"].value["error_detail"].is_null());
     }
 
     #[test]

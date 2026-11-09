@@ -254,12 +254,11 @@ def execute(paths, tool_id, action, p):
     log = lambda text: print(str(text), flush=True)
     if tool_id == "trade-analysis":
         module = load_module("toolbox_trade_analysis", paths.trade_analysis)
+        from toolbox_trade_batch import iter_batch_reports
         output_dir = Path(p["output_dir"]).expanduser()
         output_dir.mkdir(parents=True, exist_ok=True)
         outputs = []
-        for source in selected_files(p):
-            output = output_dir / f"{source.stem}_分析报告.html"
-            module.generate_report(source, out_path=output)
+        for source, output, _, _ in iter_batch_reports(selected_files(p), output_dir, module.generate_report):
             log(f"完成：{source.name} -> {output.name}")
             outputs.append(str(output))
         return dict(outputs=outputs)

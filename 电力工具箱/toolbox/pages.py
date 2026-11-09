@@ -19,6 +19,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from toolbox_storage import data_path
+from toolbox_trade_batch import plan_batch_outputs, iter_batch_reports
 from .file_dialogs import FileDialogState
 from .runtime import (
     TaskRegistry,
@@ -271,16 +272,19 @@ class TradeAnalysisPage(ToolPage):
             )
             return
         output_dir = Path(self.output_dir.get().strip())
-        output_dir.mkdir(parents=True, exist_ok=True)
         selected_files = list(self.files)
+        try:
+            plan_batch_outputs(selected_files, output_dir)
+        except ValueError as exc:
+            messagebox.showerror("输出文件冲突", str(exc), parent=self)
+            return
+        output_dir.mkdir(parents=True, exist_ok=True)
         self.clear_log()
 
         def worker() -> list[Path]:
             module = load_module("toolbox_trade_analysis", self.paths.trade_analysis)
             outputs: list[Path] = []
-            for source in selected_files:
-                output = output_dir / f"{source.stem}_分析报告.html"
-                module.generate_report(source, out_path=output)
+            for source, output, _, _ in iter_batch_reports(selected_files, output_dir, module.generate_report):
                 outputs.append(output)
                 self.append_log(f"完成：{source.name} -> {output.name}")
             return outputs

@@ -518,6 +518,38 @@ def read_excel_range(workbook_path: Path, sheet_name: str, source_range: str) ->
     return read_excel_ranges(workbook_path, [(sheet_name, source_range)])[0]
 
 
+def validate_formula_caches(workbook, sheet_name, regions) -> None:
+    """Inspect requested cells in the same archive, before blanks become values.
+
+    An explicit string cache may legitimately be empty (e.g. =IF(...,"",...)).
+    Missing numeric caches must never clear a populated online destination.
+    """
+    from xml.etree.ElementTree import iterparse
+    from openpyxl.utils.cell import coordinate_to_tuple
+
+    namespace = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    last_row = max(bounds[3] for _, bounds in regions)
+    sheet = workbook[sheet_name]
+    with workbook._archive.open(sheet._worksheet_path) as source:
+        for _, element in iterparse(source, events=("end",)):
+            if element.tag == namespace + "c" and element.find(namespace + "f") is not None:
+                coordinate = element.attrib["r"]
+                row, column = coordinate_to_tuple(coordinate)
+                if any(left <= column <= right and top <= row <= bottom
+                       for _, (left, top, right, bottom) in regions):
+                    cached = element.find(namespace + "v")
+                    if cached is None or (cached.text is None and element.get("t") != "str"):
+                        raise ValueError(
+                            f"来源公式缺少计算结果：{sheet_name}!{coordinate}。"
+                            "请先用 Excel/WPS 重新计算并保存来源工作簿，再执行写入。"
+                        )
+            elif element.tag == namespace + "row":
+                row = int(element.get("r", "0"))
+                element.clear()
+                if row >= last_row:
+                    break
+
+
 def read_excel_ranges(
     workbook_path: Path, requests: list[tuple[str, str]]
 ) -> list[tuple[list[list[Any]], int, int]]:
@@ -538,6 +570,7 @@ def read_excel_ranges(
 
         results: list[tuple[list[list[Any]], int, int] | None] = [None] * len(requests)
         for sheet_name, regions in grouped.items():
+            validate_formula_caches(wb, sheet_name, regions)
             first_row = min(bounds[1] for _, bounds in regions)
             last_row = max(bounds[3] for _, bounds in regions)
             first_col = min(bounds[0] for _, bounds in regions)

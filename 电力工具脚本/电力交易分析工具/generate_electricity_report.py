@@ -18,10 +18,11 @@ WORKSPACE = pathlib.Path(__file__).resolve().parents[2]
 if str(WORKSPACE) not in sys.path:
     sys.path.insert(0, str(WORKSPACE))
 from toolbox_file_button import FileSelectButton
-from toolbox_native_excel import load_value_workbook, excel_session
+from toolbox_native_excel import load_value_workbook
 from toolbox_platform import open_path
 from toolbox_native_domain import invoke as _invoke_domain, backend_mode, with_native_session
 from toolbox_clearing_layout import brief_row_index
+from toolbox_trade_batch import plan_batch_outputs, iter_batch_reports
 
 
 def invoke_domain(domain, action, payload):
@@ -1104,17 +1105,7 @@ def generate_report(xlsx_path, out_path=None):
 
 
 def generate_batch(xlsx_paths, output_dir):
-    output_dir = pathlib.Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    results = []
-    xlsx_paths = [pathlib.Path(path) for path in xlsx_paths]
-    repeated = len({path.resolve() for path in xlsx_paths}) < len(xlsx_paths)
-    with excel_session(cache=repeated, enabled=repeated):
-        for xlsx_path in xlsx_paths:
-            xlsx_path = pathlib.Path(xlsx_path)
-            out_path = output_dir / f"{xlsx_path.stem}_分析报告.html"
-            results.append(generate_report(xlsx_path, out_path=out_path))
-    return results
+    return [result for _, _, result, _ in iter_batch_reports(xlsx_paths, output_dir, generate_report)]
 
 
 class ReportApp:
@@ -1216,25 +1207,28 @@ class ReportApp:
             messagebox.showwarning("没有文件", "请先添加至少一个 Excel 文件。")
             return
         output_dir = pathlib.Path(self.output_dir.get())
+        files = list(self.files)
+        try:
+            plan_batch_outputs(files, output_dir)
+        except ValueError as exc:
+            messagebox.showerror("输出文件冲突", str(exc))
+            return
         output_dir.mkdir(parents=True, exist_ok=True)
         self.run_button.configure(state="disabled")
         self.status.set("正在生成报告，请稍候...")
         self.append_log(f"开始批量分析，共 {len(self.files)} 个文件。")
-        threading.Thread(target=self._run_batch_worker, daemon=True).start()
+        threading.Thread(target=self._run_batch_worker, args=(files, output_dir), daemon=True).start()
 
-    def _run_batch_worker(self):
+    def _run_batch_worker(self, files, output_dir):
         success = []
         errors = []
-        output_dir = pathlib.Path(self.output_dir.get())
-        for path in self.files:
-            try:
-                out_path = output_dir / f"{path.stem}_分析报告.html"
-                generate_report(path, out_path=out_path)
+        for path, out_path, _, error in iter_batch_reports(files, output_dir, generate_report, continue_on_error=True):
+            if error is None:
                 success.append(out_path)
                 self.root.after(0, self.append_log, f"完成：{path.name} -> {out_path.name}")
-            except Exception as exc:  # noqa: BLE001
-                errors.append((path, exc))
-                self.root.after(0, self.append_log, f"失败：{path.name} -> {exc}")
+            else:
+                errors.append((path, error))
+                self.root.after(0, self.append_log, f"失败：{path.name} -> {error}")
         self.root.after(0, self._finish_batch, success, errors)
 
     def _finish_batch(self, success, errors):

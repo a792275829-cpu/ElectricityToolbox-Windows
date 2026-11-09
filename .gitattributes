@@ -2,3 +2,4 @@
 # git diff --check 会把新增行行尾的 \r 报成 trailing whitespace；
 # 直接整文件转成 LF 又会产生数千行无意义改动。
 **/wps_excel_to_kdocs_gui.py whitespace=cr-at-eol
+CHANGELOG.md whitespace=cr-at-eol

@@ -190,7 +190,10 @@ export function buildMultipart(files, fields = {}) {
 
 /** 接口返回逐文件结果数组：detail 非空即该文件失败。 */
 export function summarizeImport(payload) {
-  const items = Array.isArray(payload) ? payload : [];
+  if (!Array.isArray(payload) || payload.some((item) => !item || typeof item !== 'object' || Array.isArray(item))) {
+    throw new Error('上传接口结果格式异常；请求可能已提交，请核对网站状态后再重试。');
+  }
+  const items = payload;
   const succeeded = [];
   const failed = [];
   for (const item of items) {
@@ -199,6 +202,15 @@ export function summarizeImport(payload) {
     else succeeded.push({ date: item?.date ?? '', dataType: item?.dataType ?? '' });
   }
   return { items, succeeded, failed };
+}
+
+/** Accept the known bare-array and T200-envelope protocols only. */
+export function parseImportResponse(payload) {
+  if (Array.isArray(payload)) return summarizeImport(payload);
+  if (!payload || typeof payload !== 'object' || payload.retCode !== 'T200') {
+    throw new Error('上传接口结果格式异常；请求可能已提交，请核对网站状态后再重试。');
+  }
+  return summarizeImport(payload.data);
 }
 
 /** 接口没返回数据日期时，用 --date 或文件名里的 YYYYMMDD 兜底。 */
