@@ -427,7 +427,13 @@ def number_or_zero(value: Any) -> float:
 
 
 def online_energy_hours(values, *, label: str, allow_empty: bool = False) -> tuple[float | None, ...]:
-    """Parse the 24 hourly values; unreported hours stay blank instead of zero."""
+    """Parse the 24 hourly values; unreported hours stay blank instead of zero.
+
+    网站对当日尚未填报的场站返回 ``[]``（而不是 24 个 null），这类场站按
+    “24 个时段都未填报”处理，导出为空白单元格并提示，不能让整日导出失败。
+    """
+    if isinstance(values, list) and not values and allow_empty:
+        return (None,) * 24
     if not isinstance(values, list) or len(values) != 24:
         raise ValueError(f"{label} 应有完整24个小时电量，实际为 {len(values) if isinstance(values, list) else 0} 个，停止导出。")
     result = []
@@ -582,7 +588,9 @@ def collect_date_rows(run_date: str, context, companies: list[dict[str, str]],
                 label=f"{run_date} {company_name} / {unit_name}",
                 allow_empty=True)
             missing_hours = sum(value is None for value in values)
-            if missing_hours:
+            if missing_hours == len(values):
+                log(f"  提示：{company_name} / {unit_name} 当日网站尚未填报任何时段上网电量，整列导出为空白（稍后可在网站补录后重新导出）。")
+            elif missing_hours:
                 log(f"  提示：{company_name} / {unit_name} 有 {missing_hours} 个时段实际上网电量未填报，导出为空白。")
             for hour, value in enumerate(values):
                 detail_rows.append(

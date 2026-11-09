@@ -396,6 +396,49 @@ class OnlineEnergyOutputTests(unittest.TestCase):
             finally:
                 workbook.close()
 
+    def test_empty_hour_array_means_unreported_day(self):
+        # 网站对尚未填报的场站返回 []，应视为 24 个未填报时段而不是致命错误。
+        self.assertEqual(self.module.online_energy_hours([], label="华归光伏电站", allow_empty=True),
+                         (None,) * 24)
+        with self.assertRaisesRegex(ValueError, "24个小时电量"):
+            self.module.online_energy_hours([], label="华归光伏电站")
+        with self.assertRaisesRegex(ValueError, "24个小时电量"):
+            self.module.online_energy_hours([1.0] * 23, label="华归光伏电站", allow_empty=True)
+        with self.assertRaisesRegex(ValueError, "缺失或无效"):
+            self.module.online_energy_hours(["无效"] * 24, label="华归光伏电站", allow_empty=True)
+
+    def test_collect_date_rows_keeps_unreported_renewable_station_blank(self):
+        import openpyxl
+
+        module = self.module
+        context = SimpleNamespace(close=Mock())
+        units = [{"id": "u1", "unitName": "华归光伏电站"}]
+        companies = [{"tenantId": "test", "name": "华能（潮州潮安）新能源有限责任公司"}]
+        overrides = dict(
+            switch_company=lambda *a: None,
+            get_units=lambda *a: list(units),
+            is_renewable_company=lambda *a: True,
+            fetch_energy_rows=lambda *a, **k: [
+                {"unitId": "u1", "runDate": "2026-11-08", "onlineEle": []}],
+            log=lambda *a: None,
+        )
+        with patch.multiple(module, **overrides), patch.object(module.time, "sleep"):
+            rows = module.collect_date_rows("2026-11-08", context, companies,
+                                            module.Config(request_delay_seconds=0))
+        self.assertEqual(len(rows), 24)
+        self.assertTrue(all(row["onlineEle"] is None for row in rows))
+        self.assertEqual({row["unit"] for row in rows}, {"华归光伏电站"})
+        with tempfile.TemporaryDirectory() as folder:
+            path = module.save_excel("2026-11-08", rows, Path(folder))
+            workbook = openpyxl.load_workbook(path)
+            try:
+                sheet = workbook["汇总"]
+                self.assertEqual(sheet["A2"].value, "华归光伏电站")
+                self.assertIsNone(sheet["A3"].value)
+                self.assertIsNone(sheet["A26"].value)
+            finally:
+                workbook.close()
+
     def test_range_dates_reject_reversed_range_and_cover_both_ends(self):
         self.assertEqual(self.module.range_dates("2026-10-26", "2026-10-28"),
                          ["2026-10-26", "2026-10-27", "2026-10-28"])
