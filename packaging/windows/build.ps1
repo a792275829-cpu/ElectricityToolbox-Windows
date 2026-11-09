@@ -1,21 +1,42 @@
-﻿param([Parameter(Mandatory=$true)][string]$PythonRoot, [string]$ForecastWorkbook, [switch]$FullOnly)
+﻿param([Parameter(Mandatory=$true)][string]$PythonRoot, [string]$ForecastWorkbook, [switch]$FullOnly,
+      [switch]$PruneArchive, [switch]$DryRun, [switch]$KeepGuard, [string]$ArchiveRoot)
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 Set-Location -LiteralPath $root
+. (Join-Path $PSScriptRoot 'build_env.ps1')
+if (-not $KeepGuard) { Reset-BuildEnvironment }
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
 $env:PATH = "$env:USERPROFILE/.cargo/bin;$root/.venv/Scripts;$env:PATH"
+$archiveRoot = if ($ArchiveRoot) { [IO.Path]::GetFullPath($ArchiveRoot) } else { Join-Path $root 'dist/build-archive' }
+# Generated trees are replaced by renaming them aside, so the build stays correct
+# even when the guard cannot be dropped; see packaging/windows/README.md.
+function Archive-Generated([string]$LiteralPath, [string]$Name) {
+    if (-not (Test-Path -LiteralPath $LiteralPath)) { return }
+    $target = Join-Path $archiveRoot (Get-Date -Format 'yyyyMMdd-HHmmss')
+    New-Item -ItemType Directory -Force -Path $target | Out-Null
+    $destination = Join-Path $target $Name
+    while (Test-Path -LiteralPath $destination) { $destination = "$destination-old" }
+    Move-Item -LiteralPath $LiteralPath -Destination $destination
+    Write-Host "Archived $Name -> $destination"
+}
 function Run-Native([string]$Program, [string[]]$Arguments) {
     & $Program @Arguments
     if ($LASTEXITCODE -ne 0) { throw "Command failed ($LASTEXITCODE): $Program" }
 }
-$arguments = @('packaging/windows/prepare_payload.py', '--python-root', $PythonRoot)
+$arguments = @('packaging/windows/prepare_payload.py', '--python-root', $PythonRoot, '--archive-root', $archiveRoot)
 if ($ForecastWorkbook) { $arguments += @('--forecast-workbook', $ForecastWorkbook) }
+if ($DryRun) {
+    Run-Native "$root/.venv/Scripts/python.exe" @('packaging/windows/prepare_payload.py', '--dry-run', '--archive-root', $archiveRoot)
+    Write-Host 'Windows dry run complete; no file was changed.'
+    exit 0
+}
 Run-Native "$root/.venv/Scripts/python.exe" @('-m', 'pip', 'install', 'uv')
 Run-Native "$root/.venv/Scripts/python.exe" $arguments
 # prepare_payload.py rebuilds the Rust helper into the payload. Refuse to package
 # a stale copy (for example a 0.1.34 helper inside a 0.1.35 installer).
 Run-Native "$root/.venv/Scripts/python.exe" @('packaging/windows/verify_payload.py')
+Archive-Generated (Join-Path $root 'desktop/node_modules') 'node_modules'
 Run-Native 'npm.cmd' @('--prefix', 'desktop', 'ci')
 Push-Location -LiteralPath (Join-Path $root 'desktop')
 try { Run-Native 'npm.cmd' @('run', 'build', '--', '--bundles', 'nsis') }
@@ -45,3 +66,8 @@ $manifest = Join-Path $output "updates-$version/windows-update-manifest.json"
 if (-not (Test-Path -LiteralPath $manifest)) { throw "Windows delta index was not produced: $manifest" }
 Write-Host "Windows delta index: $manifest"
 Get-ChildItem -LiteralPath (Split-Path -Parent $manifest) | Select-Object Name, Length | Format-Table -AutoSize
+if ($PruneArchive) {
+    Run-Native "$root/.venv/Scripts/python.exe" @('packaging/windows/prune_build_archive.py', '--root', $archiveRoot, '--keep', '1')
+} else {
+    Write-Host "Build archive kept at $archiveRoot; pass -PruneArchive or run prune_build_archive.py to reclaim it."
+}

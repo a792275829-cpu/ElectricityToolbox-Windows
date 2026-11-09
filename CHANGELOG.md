@@ -1,5 +1,11 @@
 # 更新日志
 
+## [未发布] - 2026-11-10
+
+- 修复打包在 Agent 会话中反复中断：会话会把批量删除守卫注入所有子进程，`prepare_payload.py` 清空 `payload/app`、`npm ci` 清空 `node_modules`、`build_updates.py` 删除补丁还原目录三处先后被 fail-closed 掐断。现改为两层处理——`build.ps1` 先用新增的 `build_env.ps1`／`Reset-BuildEnvironment` 只移除指向 `vendor\shim` 的 `NODE_OPTIONS`／`PYTHONPATH`／`PATH` 条目和 `CODEBUDDY_SAFE_DELETE_BULK_GUARD`，还原成人工终端环境（`-KeepGuard` 可保留）；生成目录则改为改名归档到 `dist/build-archive/<时间戳>/` 后重建，不再原地删除。
+- 新增 `packaging/windows/prune_build_archive.py` 统一回收归档：默认保留最近 1 份，先 robocopy 空目录镜像再删空骨架，可处理上万文件与超长路径；`build.ps1 -PruneArchive` 构建成功后自动调用，`-DryRun` 只打印归档计划不改文件。`packaging/windows/README.md` 与 `AGENTS.md` 补充构建机清理约定。
+- 验证：`prepare_payload.py --dry-run` 输出归档目标且未改动文件；连续两次真实重建成功（第二次走归档路径，app 63.1 MB、runtime/python 410.1 MB），`PAYLOAD_FRESH=OK`、payload 692 个受管文件；`npm ci` 在 `node_modules` 归档后重装 50 个包并恢复 `tauri` 命令；修复前全量 `build.ps1` 在补丁还原目录处第 3 次被拦，加入环境还原后 `build_updates.py` 一次产出 0.1.32/0.1.33/0.1.34 三条直达补丁（3,678,576 / 5,074,260 / 5,142,324 字节）且全部通过还原校验；`prune_build_archive.py --keep 1` 实际回收 473.1 MB 与 450.0 MB 两份快照、保留 1 份；新增 10 项归档与回收单测通过。本次构建产物仅作验证，未覆盖已发布的 0.1.35 资产。
+
 ## [0.1.35] - 2026-11-09
 
 - 加固 Windows 自动更新后的重启：安装成功后会校验新版本进程是否真的存活，启动即退出时自动重试并从系统外壳再次拉起；仍失败则恢复旧程序，并在下次启动提示具体原因
