@@ -599,7 +599,7 @@ def collect_date_rows(run_date: str, context, companies: list[dict[str, str]],
             item = by_unit.get(unit_id)
             if item is None:
                 # 机组已建档但当日未纳入日报（新增机组、未开机的备用机组等），按整列空白导出。
-                log(f"  提示：{company_name} / {unit_name} 网站当日未返回该机组上网电量，整列导出为空白（可在网站补报后重新导出）。")
+                log(f"  提示：{company_name} / {unit_name} 当日无数据：网站未返回该机组的上网电量记录，整列导出为空白（补录后可重新导出）。")
                 values: tuple[float | None, ...] = (None,) * 24
             else:
                 values = online_energy_hours(item.get("onlineEle"),
@@ -607,9 +607,9 @@ def collect_date_rows(run_date: str, context, companies: list[dict[str, str]],
                     allow_empty=True)
                 missing_hours = sum(value is None for value in values)
                 if missing_hours == len(values):
-                    log(f"  提示：{company_name} / {unit_name} 当日网站尚未填报任何时段上网电量，整列导出为空白（稍后可在网站补录后重新导出）。")
+                    log(f"  提示：{company_name} / {unit_name} 当日无数据：网站未填报任何时段上网电量，整列导出为空白（补录后可重新导出）。")
                 elif missing_hours:
-                    log(f"  提示：{company_name} / {unit_name} 有 {missing_hours} 个时段实际上网电量未填报，导出为空白。")
+                    log(f"  提示：{company_name} / {unit_name} 数据缺失：{missing_hours} 个时段未填报，已导出为空白。")
             for hour, value in enumerate(values):
                 detail_rows.append(
                     {
@@ -773,9 +773,31 @@ def save_excel(run_date: str, detail_rows: list[dict[str, Any]], output_dir: Pat
         return fallback
 
 
+def blank_unit_labels(detail_rows: list[dict[str, Any]]) -> list[str]:
+    """Return ``公司 / 机组`` for units whose 24 hourly cells are all blank."""
+    totals: dict[tuple[str, str], list[int]] = {}
+    for row in detail_rows:
+        counts = totals.setdefault((row["company"], row["unit"]), [0, 0])
+        counts[1] += 1
+        if row["onlineEle"] is None:
+            counts[0] += 1
+    return [f"{display_company_name(company)} / {unit}"
+            for (company, unit), (blank, total) in totals.items()
+            if total and blank == total]
+
+
+def log_blank_summary(run_date: str, detail_rows: list[dict[str, Any]]) -> None:
+    """Workbook is written anyway; the summary is what the UI flags as 完成（有提示）。"""
+    labels = blank_unit_labels(detail_rows)
+    if labels:
+        log(f"提示：{run_date} 有 {len(labels)} 个机组当日无数据：{'、'.join(labels)}（已导出为空白，网站补录后可重新导出）。")
+
+
 def export_online_energy(run_date: str, config: Config) -> Path:
     detail_rows = collect_detail_rows(run_date, config)
-    return save_excel(run_date, detail_rows, config.output_dir)
+    path = save_excel(run_date, detail_rows, config.output_dir)
+    log_blank_summary(run_date, detail_rows)
+    return path
 
 
 def range_dates(start_date: str, end_date: str) -> list[str]:
@@ -796,6 +818,7 @@ def export_online_energy_range(start_date: str, end_date: str, config: Config) -
             path = save_excel(run_date, detail_rows, config.output_dir)
             paths.append(path)
             log(f"已保存：{path}")
+            log_blank_summary(run_date, detail_rows)
     finally:
         rows.close()
     return paths

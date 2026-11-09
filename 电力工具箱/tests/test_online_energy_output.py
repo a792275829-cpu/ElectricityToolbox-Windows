@@ -460,6 +460,50 @@ class OnlineEnergyOutputTests(unittest.TestCase):
             finally:
                 workbook.close()
 
+    def test_blank_data_is_exported_with_ui_warning_marker(self):
+        # 工具箱按日志里的「无数据：」「数据缺失」等关键字把状态标成「完成（有提示）」。
+        lines = []
+        module = self.module
+        units = [{"id": "u1", "unitName": "#1"}, {"id": "u2", "unitName": "#2"}]
+        overrides = dict(
+            switch_company=lambda *a: None,
+            get_units=lambda *a: list(units),
+            is_renewable_company=lambda *a: False,
+            fetch_fire_rows=lambda *a: [
+                {"unitId": "u1", "runDate": "2026-11-08", "onlineEle": []},
+                {"unitId": "u2", "runDate": "2026-11-08",
+                 "onlineEle": [None] * 3 + [1.5] * 21}],
+            log=lines.append,
+        )
+        with patch.multiple(module, **overrides), patch.object(module.time, "sleep"):
+            rows = module.collect_date_rows("2026-11-08", SimpleNamespace(close=Mock()),
+                                            [{"tenantId": "t", "name": "海门电厂"}],
+                                            module.Config(request_delay_seconds=0))
+        self.assertEqual(len(rows), 48)
+        text = "\n".join(lines)
+        self.assertIn("无数据：", text)
+        self.assertIn("数据缺失：3 个时段", text)
+        # 界面判定用到的关键字必须在同一份日志里出现。
+        self.assertTrue(any(marker in text for marker in ("跳过", "回读不一致", "读取失败", "数据缺失", "无数据：")))
+
+    def test_blank_summary_lists_only_fully_blank_units(self):
+        rows = [
+            {"company": "华能（潮州潮安）新能源有限责任公司", "unit": "华归光伏电站",
+             "time": f"{hour:02d}:00", "onlineEle": None} for hour in range(24)
+        ] + [
+            {"company": "海门电厂", "unit": "海门#1机组",
+             "time": f"{hour:02d}:00", "onlineEle": 0.0 if hour == 0 else None} for hour in range(24)
+        ]
+        self.assertEqual(self.module.blank_unit_labels(rows), ["潮安 / 华归光伏电站"])
+        lines = []
+        with patch.object(self.module, "log", lines.append):
+            self.module.log_blank_summary("2026-11-08", rows)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("2026-11-08 有 1 个机组当日无数据：潮安 / 华归光伏电站", lines[0])
+        with patch.object(self.module, "log", lines.append):
+            self.module.log_blank_summary("2026-11-08", rows[24:])
+        self.assertEqual(len(lines), 1)
+
     def test_range_dates_reject_reversed_range_and_cover_both_ends(self):
         self.assertEqual(self.module.range_dates("2026-10-26", "2026-10-28"),
                          ["2026-10-26", "2026-10-27", "2026-10-28"])
