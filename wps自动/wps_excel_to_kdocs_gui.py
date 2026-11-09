@@ -45,6 +45,13 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_PATH = DATA_DIR / "wps_excel_to_kdocs_config.json"
 DEFAULT_CONFIG_PATH = BASE_DIR / "wps_excel_to_kdocs_config.defaults.json"
 PROFILE_DIR = DATA_DIR / "wps-browser-profile"
+WPS_AUTH_STATE_PATH = DATA_DIR / "wps-auth-state.json"
+WPS_AUTH_STATE_SCHEMA = "wps_auth_state"
+WPS_AUTH_STATE_VERSION = 1
+WPS_AUTH_COOKIE_DOMAINS = ("kdocs.cn", "wps.cn")
+WPS_AUTH_COOKIE_FIELDS = (
+    "name", "value", "domain", "path", "expires", "httpOnly", "secure", "sameSite",
+)
 WPS_CHROME_PID_PATH = DATA_DIR / "wps-chrome.pid"
 WPS_CHROME_STATE_PATH = DATA_DIR / "wps-chrome-state.json"
 WPS_CHROME_LAUNCH_VERSION = 6
@@ -141,6 +148,149 @@ def read_wps_login_status(context) -> WpsLoginStatus:
     return WpsLoginStatus("unknown", "暂时无法确认，请检查网络后刷新登录状态。")
 
 
+def wps_login_cookies(context) -> list[dict[str, Any]]:
+    """Return only the cookies that carry the WPS/KDocs login session."""
+    try:
+        cookies = context.cookies()
+    except Exception:
+        return []
+    return [
+        cookie
+        for cookie in cookies
+        if isinstance(cookie, dict)
+        and cookie.get("name")
+        and any(
+            domain in str(cookie.get("domain") or "")
+            for domain in WPS_AUTH_COOKIE_DOMAINS
+        )
+    ]
+
+
+def save_wps_auth_state(context, log=lambda _message: None) -> bool:
+    """Persist the WPS login cookies outside the browser profile.
+
+    Chrome flushes its cookie database on a timer and on a clean shutdown. The
+    dedicated browser is restarted from the login window into the headless
+    background run right after a QR login, and that restart used to drop the
+    freshly issued session: the next status check asked the user to scan again.
+    Keeping an own copy makes the login survive any restart.
+    """
+    cookies = wps_login_cookies(context)
+    if not cookies:
+        return False
+    signature = json.dumps(cookies, ensure_ascii=False, sort_keys=True)
+    try:
+        existing = json.loads(WPS_AUTH_STATE_PATH.read_text(encoding="utf-8"))
+        if isinstance(existing, dict) and json.dumps(
+            existing.get("cookies"), ensure_ascii=False, sort_keys=True
+        ) == signature:
+            return False
+    except (OSError, ValueError):
+        pass
+    payload = {
+        "schema": WPS_AUTH_STATE_SCHEMA,
+        "version": WPS_AUTH_STATE_VERSION,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+        "cookies": cookies,
+    }
+    try:
+        WPS_AUTH_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temporary = WPS_AUTH_STATE_PATH.with_name(WPS_AUTH_STATE_PATH.name + ".tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        try:
+            os.chmod(temporary, 0o600)
+        except OSError:
+            pass
+        os.replace(temporary, WPS_AUTH_STATE_PATH)
+    except OSError as exc:
+        log(f"WPS 登录状态未能保存：{exc}")
+        return False
+    return True
+
+
+def load_wps_auth_cookies() -> list[dict[str, Any]]:
+    """Read the saved WPS cookies, dropping anything already expired."""
+    try:
+        payload = json.loads(WPS_AUTH_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(payload, dict) or payload.get("schema") != WPS_AUTH_STATE_SCHEMA:
+        return []
+    cookies = payload.get("cookies")
+    if not isinstance(cookies, list):
+        return []
+    now = time_module.time()
+    usable: list[dict[str, Any]] = []
+    for cookie in cookies:
+        if not isinstance(cookie, dict) or not cookie.get("name") or not cookie.get("domain"):
+            continue
+        expires = cookie.get("expires")
+        if isinstance(expires, (int, float)) and 0 < expires < now:
+            continue
+        cleaned = {key: cookie[key] for key in WPS_AUTH_COOKIE_FIELDS if key in cookie}
+        if cleaned:
+            usable.append(cleaned)
+    return usable
+
+
+def reload_wps_pages(context) -> int:
+    """Reload already opened KDocs/WPS pages after cookies were re-applied.
+
+    A restarted browser loads its start page before the saved cookies are put
+    back, so that page still shows the logged-out state until it reloads.
+    """
+    reloaded = 0
+    try:
+        pages = list(context.pages)
+    except Exception:
+        return 0
+    for page in pages:
+        try:
+            if not any(domain in page.url for domain in WPS_AUTH_COOKIE_DOMAINS):
+                continue
+            page.reload(wait_until="commit", timeout=15000)
+            reloaded += 1
+        except Exception:
+            continue
+    return reloaded
+
+
+def restore_wps_auth_state(context) -> int:
+    """Re-apply the saved login cookies to a freshly started browser."""
+    cookies = load_wps_auth_cookies()
+    if not cookies:
+        return 0
+    # Match on name and domain only: a cookie the browser already holds may be
+    # fresher than the saved copy, so it must not be overwritten.
+    present = {
+        (cookie.get("domain"), cookie.get("name")) for cookie in wps_login_cookies(context)
+    }
+    missing = [
+        cookie
+        for cookie in cookies
+        if (cookie.get("domain"), cookie.get("name")) not in present
+    ]
+    if not missing:
+        return 0
+    try:
+        context.add_cookies(missing)
+        restored = len(missing)
+    except Exception:
+        # One cookie the browser refuses must not block the rest of the session.
+        restored = 0
+        for cookie in missing:
+            try:
+                context.add_cookies([cookie])
+                restored += 1
+            except Exception:
+                continue
+    if restored:
+        reload_wps_pages(context)
+    return restored
+
+
 def check_wps_login_status(browser_mode: str, cdp_url: str, log) -> WpsLoginStatus:
     # A copied browser profile is not proof of login: cookies may be encrypted
     # for the previous Mac. Existing profiles must be verified online.
@@ -153,10 +303,14 @@ def check_wps_login_status(browser_mode: str, cdp_url: str, log) -> WpsLoginStat
             playwright, browser_mode, cdp_url, log, for_login_check=True
         )
         try:
-            return read_wps_login_status(context)
+            status = read_wps_login_status(context)
+            if status.state == "logged_in":
+                # Confirmed login: keep a copy before the browser can be restarted.
+                save_wps_auth_state(context, log)
         finally:
             if close_context:
                 context.close()
+    return status
 
 
 def normalize_cell_value(value: Any) -> Any:
@@ -1049,12 +1203,41 @@ def managed_chrome_is_running(pid: int) -> bool:
     return bool(state) and not state.startswith("Z")
 
 
+def close_managed_chrome_window(pid: int, timeout_seconds: float) -> bool:
+    """Ask a visible dedicated Chrome to close itself instead of killing it.
+
+    `taskkill /F` ends the process before Chrome's shutdown sequence runs, so
+    cookies issued moments earlier (a just-finished QR login) never reach the
+    profile database. Posting WM_CLOSE through taskkill without `/F` lets the
+    browser flush cookies and session storage first. Headless instances have no
+    window, so the graceful attempt only applies to the login window.
+    """
+    if managed_chrome_is_headless(pid):
+        return False
+    try:
+        subprocess.run(
+            ["taskkill.exe", "/PID", str(pid), "/T"],
+            capture_output=True,
+            timeout=min(timeout_seconds, 5),
+            **hidden_process_options(),
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    deadline = time_module.monotonic() + min(timeout_seconds, 6)
+    while process_is_alive(pid) and time_module.monotonic() < deadline:
+        time_module.sleep(0.2)
+    return not process_is_alive(pid)
+
+
 def stop_managed_chrome(pid: int, log, reason: str, timeout_seconds: float = 8) -> None:
     log(f"正在重启专用浏览器：{reason}")
     if sys.platform == "win32":
         if process_is_alive(pid):
             if not is_managed_chrome_command(managed_chrome_command(pid)):
                 raise RuntimeError("进程已不属于 WPS 专用浏览器，已停止关闭操作。")
+            # A visible window may hold a login that has not been flushed yet.
+            close_managed_chrome_window(pid, timeout_seconds)
+        if process_is_alive(pid):
             subprocess.run(["taskkill.exe", "/PID", str(pid), "/T", "/F"],
                            capture_output=True, timeout=timeout_seconds,
                            **hidden_process_options())
@@ -1331,6 +1514,11 @@ def open_browser_context(
                 endpoint, timeout=CDP_CONNECT_TIMEOUT_MS
             )
             context = browser.contexts[0] if browser.contexts else browser.new_context()
+        if browser_mode == "managed_cdp":
+            # The dedicated browser is restarted between the login window and
+            # the headless run; re-apply the saved session before probing or
+            # reading, otherwise a restart looks like an expired login.
+            restore_wps_auth_state(context)
         return browser, context, False
 
     raise ValueError(

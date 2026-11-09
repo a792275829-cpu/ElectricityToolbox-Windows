@@ -10,6 +10,8 @@
 南方分公司电力市场日报/.state/
 **/.browser-profile-uploader/
 **/wps-browser-profile/
+**/wps-auth-state.json
+**/wps-auth-state.json.tmp
 **/wps-chrome.pid
 **/wps-chrome-state.json
 **/测试样例/
