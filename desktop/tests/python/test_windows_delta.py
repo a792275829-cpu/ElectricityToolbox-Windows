@@ -177,6 +177,19 @@ class PatchTests(unittest.TestCase):
         with self.assertRaisesRegex(UpdateError, '变化|不匹配'):
             self.delta.apply_patch(stage, archive, '1.0.1', '1.0.2')
 
+    def test_installer_added_webview_loader_never_blocks_a_delta(self):
+        """安装程序给真实安装补的 WebView2Loader.dll 不参与比对：静默基线里没有这个文件。"""
+        archive = self.patch()
+        self.assertNotIn('WebView2Loader.dll', self.delta.inventory(self.old))
+        (self.old / 'WebView2Loader.dll').unlink()  # 静默安装（/S /UPDATE）的基线没有该 DLL
+        stage = self.root / 'real-installation'
+        self.delta.clone_installation(self.old, stage)
+        (stage / 'WebView2Loader.dll').write_bytes(b'loader added by the installer')
+        self.delta.apply_patch(stage, archive, '1.0.1', '1.0.2')
+        self.assertEqual(self.delta.inventory(stage), self.delta.inventory(self.new))
+        self.assertEqual((stage / 'WebView2Loader.dll').read_bytes(),
+                         b'loader added by the installer')
+
     def test_additional_source_backed_bytecode_is_removed_only_from_the_stage(self):
         archive = self.patch()
         cache = self.old / 'payload/app/__pycache__'

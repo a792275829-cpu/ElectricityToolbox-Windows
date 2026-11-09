@@ -85,7 +85,9 @@ fn verify(root:&Path,expected:&BTreeMap<String,Entry>)->Result<(),String> {
         }}Ok(())
     }
     inspect(root,&mut 0)?;validate(expected)?;let mut actual=BTreeMap::new();
-    for name in ["electricity-toolbox.exe","WebView2Loader.dll","uninstall.exe","payload"] {
+    // WebView2Loader.dll is not managed: a real installation contains it while a silent
+    // baseline install (/S /UPDATE) does not, so it must never decide the comparison.
+    for name in ["electricity-toolbox.exe","uninstall.exe","payload"] {
         let path=root.join(name);if path.try_exists().map_err(|e|e.to_string())?{walk(root,&path,&mut actual)?;}
     }
     if &actual!=expected{return Err("Windows 增量程序文件校验失败，请改用完整安装包".into());}

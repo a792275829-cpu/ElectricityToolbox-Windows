@@ -125,9 +125,16 @@ def _walk(root):
 
 
 def inventory(root, cancel=None):
+    """Managed program files only.
+
+    WebView2Loader.dll is deliberately excluded: the installer adds it for real
+    installations, while a silent baseline install (/S /UPDATE) does not create it.
+    Including it made every real installation differ from the patch baseline, so
+    deltas were always rejected and fell back to the full installer.
+    """
     root, result = _io_path(root), {}
     _plain(root)
-    for top in ('electricity-toolbox.exe', 'WebView2Loader.dll', 'uninstall.exe', 'payload'):
+    for top in ('electricity-toolbox.exe', 'uninstall.exe', 'payload'):
         path = root / top
         if not path.exists():
             continue
