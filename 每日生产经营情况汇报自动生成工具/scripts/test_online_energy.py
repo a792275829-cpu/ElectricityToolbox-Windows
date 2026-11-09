@@ -5,12 +5,15 @@ import unittest
 from pathlib import Path
 
 from openpyxl import Workbook
+from docx.shared import RGBColor
 
 from generate_red_marked_report import (
     build_online_energy_text,
+    build_online_pending_segments,
     load_online_energy_summary,
     load_online_price_summary,
     parse_float,
+    replace_paragraph_segments,
 )
 
 
@@ -88,6 +91,54 @@ class OnlineEnergyTests(unittest.TestCase):
         energy = load_online_energy_summary("2026-11-05", self.path)
 
         self.assertEqual(energy["total"], 0)
+
+    def test_pending_segments_update_price_when_energy_missing(self) -> None:
+        # 电量未出数（「快报」J 列为 0）时，电量句改为待补提示并标红，
+        # 均价句仍按「快报  (日前)」更新为黑字，不再整段冻结在模板旧值。
+        _build_workbook(self.path, fire=(0, 0, 0), qingyuan=0, offshore=0, tuolian=0, guihu=0)
+        energy = load_online_energy_summary("2026-11-09", self.path)
+        prices = load_online_price_summary("2026-11-09", self.path)
+
+        self.assertEqual(energy["total"], 0)
+        segments = build_online_pending_segments("2026-11-09", prices)
+
+        self.assertEqual([red for _, red in segments], [True, False])
+        self.assertEqual(segments[0][0], "11月9日分公司上网电量待补充（当日尚未出数）；")
+        self.assertEqual(
+            segments[1][0],
+            "分公司日前均价300厘/千瓦时，其中汕头1629厘、海门3479厘、东莞847厘、"
+            "海上风电676厘、鮀莲598厘、归湖576厘/千瓦时。",
+        )
+
+    def test_pending_paragraph_marks_only_energy_red(self) -> None:
+        from docx import Document
+
+        prices = {
+            "averagePrice": 45.08,
+            "companies": {
+                "汕头": 409.57, "海门": -50.0, "东莞": 434.26,
+                "海上风电": 407.23, "鮀莲": 371.39, "归湖": 372.41,
+            },
+        }
+        document = Document()
+        paragraph = document.add_paragraph("11月3日分公司上网电量6228万千瓦时；分公司日前均价160厘/千瓦时。")
+        paragraph.runs[0].font.color.rgb = RGBColor(0xFF, 0, 0)
+
+        replace_paragraph_segments(
+            paragraph, build_online_pending_segments("2026-11-09", prices)
+        )
+
+        self.assertEqual(
+            [(run.text, str(run.font.color.rgb)) for run in paragraph.runs],
+            [
+                ("11月9日分公司上网电量待补充（当日尚未出数）；", "FF0000"),
+                (
+                    "分公司日前均价45厘/千瓦时，其中汕头410厘、海门-50厘、东莞434厘、"
+                    "海上风电407厘、鮀莲371厘、归湖372厘/千瓦时。",
+                    "000000",
+                ),
+            ],
+        )
 
     def test_placeholders_are_blank_not_invalid(self) -> None:
         # 停机、未投产、计划口径的单元格写作斜杠／横线，与空白同义。

@@ -931,10 +931,23 @@ def load_online_energy_summary(date_text: str, workbook_path: Path | None = None
     }
 
 
-def build_online_energy_text(date_text: str, energy: dict[str, Any], price_summary: dict[str, Any]) -> str:
-    """上网电量句：分项取「快报」J/K 列，日前均价取「快报（日前）」。"""
-    c = energy["companies"]
+def format_ahead_price_sentence(price_summary: dict[str, Any]) -> str:
+    """日前均价句：分公司均价取「快报  (日前)」G 列，新能源取 H 列。"""
     p = price_summary["companies"]
+    return (
+        f"分公司日前均价{fmt_number(price_summary['averagePrice'])}厘/千瓦时，其中"
+        f"汕头{fmt_number(p['汕头'])}厘、"
+        f"海门{fmt_number(p['海门'])}厘、"
+        f"东莞{fmt_number(p['东莞'])}厘、"
+        f"海上风电{fmt_number(p['海上风电'])}厘、"
+        f"鮀莲{fmt_number(p['鮀莲'])}厘、"
+        f"归湖{fmt_number(p['归湖'])}厘/千瓦时。"
+    )
+
+
+def build_online_energy_text(date_text: str, energy: dict[str, Any], price_summary: dict[str, Any]) -> str:
+    """上网电量句：分项取「快报」J/K 列，日前均价取「快报  (日前)」。"""
+    c = energy["companies"]
     shantou, haimen, dongguan = c["汕头"], c["海门"], c["东莞"]
     offshore, solar, qingyuan = c["海上风电"], c["光伏"], c["清远"]
     return (
@@ -945,14 +958,23 @@ def build_online_energy_text(date_text: str, energy: dict[str, Any], price_summa
         f"海上风电{fmt_number(offshore)}万、"
         f"光伏{fmt_number(solar)}万千瓦时、"
         f"清远{fmt_number(qingyuan)}万千瓦时；"
-        f"分公司日前均价{fmt_number(price_summary['averagePrice'])}厘/千瓦时，其中"
-        f"汕头{fmt_number(p['汕头'])}厘、"
-        f"海门{fmt_number(p['海门'])}厘、"
-        f"东莞{fmt_number(p['东莞'])}厘、"
-        f"海上风电{fmt_number(p['海上风电'])}厘、"
-        f"鮀莲{fmt_number(p['鮀莲'])}厘、"
-        f"归湖{fmt_number(p['归湖'])}厘/千瓦时。"
+        f"{format_ahead_price_sentence(price_summary)}"
     )
+
+
+def build_online_pending_segments(
+    date_text: str, price_summary: dict[str, Any]
+) -> list[tuple[str, bool]]:
+    """D-1 上网电量未出数时的段落分段：电量留待补提示（红字），日前均价照常更新（黑字）。
+
+    均价与电量原本同属一段，电量取不到时整段被冻结，导致「快报  (日前)」已有的
+    均价数一并停在模板旧值。这里把两者拆开：电量缺失只影响电量句，且以红字提
+    示待补，均价仍按当日工作簿重写为黑字。
+    """
+    return [
+        (f"{date_label(date_text)}分公司上网电量待补充（当日尚未出数）；", True),
+        (format_ahead_price_sentence(price_summary), False),
+    ]
 
 
 def _cell_number(sheet, row: int, column: int) -> float | None:
@@ -1575,6 +1597,18 @@ def replace_paragraph(paragraph, text: str, *, keep_red: bool = False) -> None:
         run.font.color.rgb = RGBColor(0, 0, 0)
 
 
+def replace_paragraph_segments(paragraph, segments) -> None:
+    """按 [(文本, 是否红字)] 分段重写段落，用于同段内混色（如电量待补红、均价黑）。"""
+    template_run = paragraph.runs[0] if paragraph.runs else None
+    for run_idx in range(len(paragraph.runs) - 1, -1, -1):
+        paragraph._element.remove(paragraph.runs[run_idx]._element)
+    for text, red in segments:
+        run = paragraph.add_run(text)
+        if template_run is not None:
+            copy_run_format(template_run, run)
+        run.font.color.rgb = RGBColor(0xFF, 0, 0) if red else RGBColor(0, 0, 0)
+
+
 def replace_cell_text(cell, text: str, *, highlight_negative: bool = False) -> None:
     paragraph = cell.paragraphs[0]
     replace_paragraph(paragraph, text)
@@ -2172,16 +2206,14 @@ def generate(
         if online_energy_error is None:
             online_energy_error = (
                 f"{date_label(plan['actualOnlineEnergyDate'])} 的上网电量为 0（尚未出数），"
-                "上网电量段保留模板原文"
+                "电量句改为待补提示"
             )
-        log(f"上网电量未取数，整段保留模板原文：{online_energy_error}")
-        # 数字沿用模板（红字提示待补），但日期必须落到 D-1，避免看起来像前几天的量。
-        replace_paragraph(
+        log(f"上网电量未取数，电量句改为待补提示（红字），日前均价仍按「快报  (日前)」更新：{online_energy_error}")
+        # 电量缺失只冻结电量句，均价与日期照常更新：两者原本同属一段，一旦整段保留
+        # 模板原文，均价会连同旧数一起留在报告里，看不出与表格数据不一致。
+        replace_paragraph_segments(
             online_paragraph,
-            replace_leading_month_day(
-                online_paragraph.text, date_label(plan["actualOnlineEnergyDate"])
-            ),
-            keep_red=True,
+            build_online_pending_segments(plan["actualOnlineEnergyDate"], online_prices),
         )
     replace_paragraph(day_ahead_paragraph, build_day_ahead_clearing_text(plan["dayAheadDate"], day_ahead_clearing))
 
@@ -2291,7 +2323,7 @@ def generate(
         "dailyClearingError": daily_clearing_error,
         "weatherError": weather_error,
         "knownGaps": [
-            "上网电量取 D-1 出清情况工作簿「快报」表：火电三厂与清远取 J 列，新能源取 K 列，总数为 J7＋新能源合计；D-1 尚未出数（全为 0）时整段保留模板原文并保持红字。",
+            "上网电量取 D-1 出清情况工作簿「快报」表：火电三厂与清远取 J 列，新能源取 K 列，总数为 J7＋新能源合计；D-1 尚未出数（全为 0）时，电量句改写为「上网电量待补充」并标红，日前均价仍按「快报  (日前)」更新为黑字。",
             "P14 日前出清电量和日前价格来自报告日出清情况 Excel；火电取快报（日前）F/G，新能源按表头取 G/H，清远计划电量按「清远上网电量」表头与「合计」标签动态定位基础信息 AA/AC 行后除以10，并计入分公司总电量。",
             "P29 未来三天最高负荷来源尚未确认，暂不替换。",
             "日清分表取 D-2 日出清情况工作簿「快报」表；分公司现货偏差收益按各厂合计（汕头/东莞取现货偏差合计边际贡献，海门取三项偏差边际贡献之和）。",
