@@ -16,16 +16,34 @@ from toolbox_native_excel import load_value_workbook as _load_value_workbook
 _workbooks: ContextVar[dict | None] = ContextVar("report_workbooks", default=None)
 
 
+def _cache_key(path, kwargs):
+    source = Path(path).expanduser().resolve()
+    state = source.stat()
+    return (source, state.st_mtime_ns, state.st_size, tuple(sorted(kwargs.items())))
+
+
 def load_workbook(path, **kwargs):
     cache = _workbooks.get()
     if cache is None:
         return _load_workbook(path, **kwargs)
-    source = Path(path).expanduser().resolve()
-    state = source.stat()
-    key = (source, state.st_mtime_ns, state.st_size, tuple(sorted(kwargs.items())))
+    key = _cache_key(path, kwargs)
+    source = key[0]
     if key not in cache:
         cache[key] = _load_workbook(source, **kwargs)
     return cache[key]
+
+
+def cached_workbook(path, **kwargs):
+    """Return an input already loaded by the caller's scope, without loading it.
+
+    Lets a light-weight reader reuse the full styled workbook that CLI
+    validation or the pipeline has already opened, instead of opening a second
+    handle for the same file. Returns ``None`` outside a reuse scope.
+    """
+    cache = _workbooks.get()
+    if cache is None:
+        return None
+    return cache.get(_cache_key(path, kwargs))
 
 
 def reuse_workbook_inputs(function):
@@ -50,9 +68,8 @@ def load_value_workbook(path, **kwargs):
     cache = _workbooks.get()
     if cache is None:
         return _load_value_workbook(path, selected=("基础信息", "新", "汕头", "海门", "东莞"), **kwargs)
-    source = Path(path).expanduser().resolve()
-    state = source.stat()
-    key = (source, state.st_mtime_ns, state.st_size, tuple(sorted(kwargs.items())))
+    key = _cache_key(path, kwargs)
+    source = key[0]
     if key in cache:
         return cache[key]
     value_key = (*key, "values")

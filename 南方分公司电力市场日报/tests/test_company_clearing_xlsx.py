@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from datetime import date, datetime, time
 from pathlib import Path
+from unittest import mock
 
 TOOL_DIR = Path(__file__).resolve().parents[1]
 ROOT = TOOL_DIR.parent
@@ -23,6 +24,7 @@ for entry in (str(ROOT), str(TOOL_DIR)):
 import openpyxl  # noqa: E402
 
 from gd_power_report import company_clearing_xlsx as MODULE  # noqa: E402
+from gd_power_report import workbook_reader  # noqa: E402
 
 
 def report_sheet(title: str = MODULE.SHEET_NAME):
@@ -211,6 +213,114 @@ class WorkbookFileTests(unittest.TestCase):
                 MODULE.validate_report_workbook(wrong)
             with self.assertRaisesRegex(ValueError, "不存在或格式不正确"):
                 MODULE.validate_report_workbook(Path(folder) / "无.xlsx")
+
+
+class ReportDateReaderTests(unittest.TestCase):
+    """The D-day full-day clearing tables must not make date inference slow."""
+
+    def make_workbook(self, folder: Path, *, full_day_rows: int = 0) -> Path:
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.title = MODULE.SHEET_NAME
+        sheet["A4"] = "日前市场简析"
+        sheet["A6"] = datetime(2026, 11, 9)
+        sheet["A70"] = "实时市场简析"
+        sheet["Q4"] = "占位"
+        # The added full-day clearing detail lives inside the report sheet and
+        # carries formulas/styles; expanding all of it used to cost seconds.
+        for row in range(200, 200 + full_day_rows):
+            for column in range(1, 21):
+                sheet.cell(row, column).value = f"={row}.{column}" if column > 1 else f"{row}:00"
+        path = folder / "出清情况（分公司2026.11.9）.xlsx"
+        workbook.save(path)
+        workbook.close()
+        return path
+
+    def track_loads(self):
+        calls: list[bool | None] = []
+        original = workbook_reader.load_workbook
+
+        def tracked(path, **kwargs):
+            calls.append(kwargs.get("read_only"))
+            return original(path, **kwargs)
+
+        return calls, mock.patch.object(MODULE, "load_workbook", side_effect=tracked)
+
+    def test_standalone_date_read_never_expands_the_workbook(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.make_workbook(Path(folder), full_day_rows=1200)
+            calls, patcher = self.track_loads()
+            with patcher:
+                self.assertEqual(MODULE.infer_report_date(path), date(2026, 11, 9))
+            self.assertEqual(calls, [True])
+
+    def test_all_date_cells_keep_their_order_on_the_read_only_path(self):
+        for coordinate in ("A6", "A2", "A7"):
+            with self.subTest(coordinate=coordinate), tempfile.TemporaryDirectory() as folder:
+                workbook = openpyxl.Workbook()
+                workbook.active.title = MODULE.SHEET_NAME
+                workbook.active[coordinate] = "2026/11/9"
+                path = Path(folder) / "出清情况.xlsx"
+                workbook.save(path)
+                workbook.close()
+                self.assertEqual(MODULE.infer_report_date(path), date(2026, 11, 9))
+
+    def test_caller_workbook_is_reused_instead_of_loaded_again(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.make_workbook(Path(folder))
+            loads: list[bool | None] = []
+            original = workbook_reader._load_workbook
+
+            def counted(inner_path, **kwargs):
+                loads.append(kwargs.get("read_only"))
+                return original(inner_path, **kwargs)
+
+            @workbook_reader.reuse_workbook_inputs
+            def scenario():
+                workbook_reader.load_workbook(path, data_only=True, read_only=False)
+                return MODULE.infer_report_date(path)
+
+            with mock.patch.object(workbook_reader, "_load_workbook", side_effect=counted):
+                detected = scenario()
+            self.assertEqual(detected, date(2026, 11, 9))
+            self.assertEqual(loads, [False])
+
+    def test_legacy_sheet_names_keep_the_full_parser(self):
+        with tempfile.TemporaryDirectory() as folder:
+            workbook = openpyxl.Workbook()
+            sheet = workbook.active
+            sheet.title = "快报 (1)"
+            sheet["A4"] = "日前市场简析"
+            sheet["A6"] = datetime(2026, 11, 9)
+            sheet["A70"] = "实时市场简析"
+            sheet["Q4"] = "占位"
+            path = Path(folder) / "出清情况.xlsx"
+            workbook.save(path)
+            workbook.close()
+            calls, patcher = self.track_loads()
+            with patcher:
+                self.assertEqual(MODULE.infer_report_date(path), date(2026, 11, 9))
+            self.assertEqual(calls, [True, False])
+
+    def test_unsupported_read_only_channel_falls_back_to_full_parser(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.make_workbook(Path(folder))
+            original = workbook_reader.load_workbook
+
+            def flaky(inner_path, **kwargs):
+                if kwargs.get("read_only"):
+                    raise RuntimeError("read-only channel unsupported")
+                return original(inner_path, **kwargs)
+
+            with mock.patch.object(MODULE, "load_workbook", side_effect=flaky):
+                self.assertEqual(MODULE.infer_report_date(path), date(2026, 11, 9))
+
+    def test_toolbox_date_entry_point_shares_the_fast_reader(self):
+        from gd_power_report import report_dates
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.make_workbook(Path(folder), full_day_rows=300)
+            self.assertEqual(report_dates.infer_report_date(path), date(2026, 11, 9))
 
 
 class SummaryRowTests(unittest.TestCase):

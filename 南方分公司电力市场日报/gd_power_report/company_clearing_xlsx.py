@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from xml.etree import ElementTree
 
-from gd_power_report.workbook_reader import load_workbook, reuse_workbook_inputs
+from gd_power_report.workbook_reader import cached_workbook, load_workbook, reuse_workbook_inputs
 from openpyxl.cell.cell import MergedCell
 from openpyxl.styles.colors import COLOR_INDEX
 from openpyxl.utils import get_column_letter, range_boundaries
@@ -682,11 +682,8 @@ def validate_report_workbook(path: str | Path) -> Path:
     return source
 
 
-@reuse_workbook_inputs
-def infer_report_date(path: str | Path) -> date:
-    source = _workbook_source(path)
-    workbook = load_workbook(source, data_only=True, read_only=False)
-    sheet = _select_report_sheet(workbook)
+def _report_date_from_sheet(sheet: Any, source: Path) -> date:
+    """A6 -> A2 -> A7 -> filename, shared by every date-reading path."""
     for coordinate in ("A6", "A2", "A7"):
         detected = _as_date(sheet[coordinate].value)
         if detected:
@@ -695,6 +692,37 @@ def infer_report_date(path: str | Path) -> date:
     if match:
         return date(int(match["year"]), int(match["month"]), int(match["day"]))
     raise ValueError("无法从“新快报”工作表识别报告日期。")
+
+
+@reuse_workbook_inputs
+def infer_report_date(path: str | Path) -> date:
+    """Read only the date cells, never the full-day clearing tables.
+
+    The D-day full-day clearing tables made the input workbook much larger.
+    ``read_only=False`` builds every cell, style and merged range of those
+    tables just to read A6/A2/A7, so the toolbox date hint grew to seconds.
+    Standalone calls (the GUI) use a streaming read-only handle; callers that
+    already hold the full workbook (CLI validation, pipeline) reuse it instead
+    of opening a second handle. Legacy workbooks without the ``新快报`` sheet
+    still go through the full parser, whose sheet selection depends on merged
+    headers and must keep its original behaviour and error messages.
+    """
+    source = _workbook_source(path)
+    caller_workbook = cached_workbook(source, data_only=True, read_only=False)
+    if caller_workbook is not None:
+        return _report_date_from_sheet(_select_report_sheet(caller_workbook), source)
+
+    try:
+        light = load_workbook(source, data_only=True, read_only=True)
+        if SHEET_NAME in light.sheetnames:
+            return _report_date_from_sheet(light[SHEET_NAME], source)
+    except ValueError:
+        raise  # 真实的日期/工作表错误保持原口径，不静默回退
+    except Exception:
+        pass  # 只读通道不兼容时回退完整解析
+
+    workbook = load_workbook(source, data_only=True, read_only=False)
+    return _report_date_from_sheet(_select_report_sheet(workbook), source)
 
 
 @reuse_workbook_inputs
