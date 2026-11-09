@@ -22,6 +22,23 @@ from windows_delta import INDEX_NAME, cleanup_stage, install_version, prepare_up
 WINDOWS_REPOSITORY = "a792275829-cpu/ElectricityToolbox-Windows"
 
 
+def unblock_file(path):
+    """Drop the mark-of-the-web that makes SmartScreen block unsigned helpers.
+
+    Every downloaded file is verified against its release SHA-256 before use,
+    and the helper is copied from that verified tree, so Zone.Identifier only
+    adds an unreliable reputation check. This also covers files a user copied
+    in from a browser download. Missing streams and permission errors are not
+    update failures; the helper still starts through CreateProcess.
+    """
+    if os.name != 'nt':
+        return
+    try:
+        os.remove(f'{path}:Zone.Identifier')
+    except (FileNotFoundError, OSError):
+        pass
+
+
 def installer_name(tag):
     return f"ElectricityToolbox_{tag.removeprefix('v')}_windows_x64_setup.exe"
 
@@ -124,6 +141,7 @@ class WindowsUpdater(GitHubUpdater):
             if cancel.is_set():raise Cancelled('已取消下载')
             with path.open('rb') as stream:actual=hashlib.file_digest(stream,'sha256').hexdigest()
             if count!=size or actual!=expected[7:].lower():raise UpdateError('更新文件校验失败，请重新下载')
+            unblock_file(path)
             return path
         except BaseException:
             path.unlink(missing_ok=True)
@@ -238,6 +256,7 @@ class WindowsUpdater(GitHubUpdater):
             raise UpdateError('增量更新计划不匹配')
         helper_source = prepared.staging_dir/'payload/app/电力工具箱/bin/toolbox-service.exe' if prepared else service
         shutil.copy2(helper_source, helper)
+        unblock_file(helper)
         token = prepared.token if prepared else str(uuid.uuid4())
         self._plan = Path(path).parent/'plan.json'
         self._token = token
@@ -257,7 +276,11 @@ class WindowsUpdater(GitHubUpdater):
             if self._status().get('state') == 'ready' and self._helper.poll() is None:
                 return True
             if self._helper.poll() is not None:
-                detail = (self._plan.parent/'helper.log').read_text(encoding='utf-8',errors='replace')[-1200:]
+                detail = (self._plan.parent/'helper.log').read_text(encoding='utf-8',errors='replace')[-1200:].strip()
+                if not detail:
+                    detail = ('进程没有任何输出，可能被 Windows 安全中心 / SmartScreen 阻止。'
+                              '请在「病毒和威胁防护 → 保护历史」中允许 toolbox-update.exe，'
+                              '并将安装目录加入排除项，或改用完整安装包手动安装。')
                 raise UpdateError('Windows 安装助手未完成准备：'+detail)
             time.sleep(.02)
         raise UpdateError('Windows 安装助手准备超时，未替换程序')

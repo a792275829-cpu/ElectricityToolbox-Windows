@@ -12,6 +12,8 @@
 - 修复更新 0.1.34 后提示「内置 Python 不完整，请重新安装完整发行版」：安装助手替换程序后校验内置 Python/Node、任务服务与业务桥接文件，缺失或被替换时自动恢复旧程序并报出具体文件；此前 Tauri 宿主在后端启动失败时仍存活，仅凭重启进程存活会把坏安装判为成功并删除旧版备份
 - 验证：新增 3 条运行时校验 Rust 单测与 1 条缺内置 Python 回滚端到端用例；Rust 测试子集 10/10、Windows 增量与更新器 Python 单测 35/35 通过；注册表相关 2 条单测与端到端用例受本机 reg.exe 安全策略拦截未验证
 - 打包入口 build.ps1 在 NSIS 前强制校验 payload：版本须与 desktop/package.json 一致、内置 toolbox-service.exe 须与清单哈希一致且不早于 Rust 源码，避免跳过 prepare_payload.py 把旧更新逻辑打进新版本；验证：新增 6 条 payload 新鲜度单测通过，当前工作副本的 0.1.34 payload 已被按预期拦截，build.ps1 语法与 version.py check 通过
+- 针对 Windows SmartScreen／安全中心拦截内置运行环境：更新器在下载文件与更新助手通过 SHA-256 校验后清除 Zone.Identifier，助手无输出即退出时明确提示安全软件拦截；启动故障窗口列出缺失路径和「保护历史还原／排除目录／重装完整包」步骤；新增 repair_smartscreen.ps1 恢复工具与安装说明
+- 验证：新增 2 条 MOTW 清除单测随更新器 22/22 通过，payload 新鲜度 6/6、更新 UI 21/21 通过；Tauri 宿主 cargo check --release 通过；repair_smartscreen.ps1 语法解析与对真实 payload 实跑通过（正确读出 0.1.34 版本并列出缺失文件）
 
 ## [0.1.34] - 2026-11-09
 - 修复 WPS 写入工具登录后仍被反复要求扫码：登录 Cookie 在浏览器 profile 外另存一份，专用浏览器重启后自动回填并刷新已打开文档页

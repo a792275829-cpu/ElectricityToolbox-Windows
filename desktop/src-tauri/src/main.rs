@@ -66,7 +66,12 @@ impl Backend {
         } else if cfg!(debug_assertions) {
             root.join(platform::venv_python())
         } else {
-            return Err("内置 Python 不完整，请重新安装完整发行版。".into());
+            return Err(format!(
+                "内置 Python 不完整：{}\n\
+                 常见原因是 Windows 安全中心 / SmartScreen 拦截或隔离了内置运行环境。\n\
+                 请在「病毒和威胁防护 → 保护历史」还原该文件，将安装目录加入排除项，再重新运行完整安装包。",
+                bundled.display()
+            ));
         };
         if !python.is_file() {
             return Err(format!("Python 环境未初始化，请先运行 {}。", platform::setup_script()));

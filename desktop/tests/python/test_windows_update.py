@@ -15,7 +15,7 @@ from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[3]
 sys.path[:0]=[str(ROOT),str(ROOT/'desktop/python'),str(ROOT/'电力工具箱')]
 from github_update import Cancelled, UpdateError
-from windows_update import WindowsUpdater, WINDOWS_REPOSITORY, parse_windows_release
+from windows_update import WindowsUpdater, WINDOWS_REPOSITORY, parse_windows_release, unblock_file
 
 PAYLOAD=b'MZverified-windows-installer'
 def metadata(version='0.1.22'):
@@ -295,5 +295,27 @@ class SharedVersionTests(unittest.TestCase):
                 self.assertIn('版本：0.1.22',console.contents())
                 self.assertEqual(application_version(),'版本 v0.1.22')
             finally:root.destroy()
+
+@unittest.skipUnless(os.name=='nt','Zone.Identifier is a Windows NTFS stream')
+class SmartScreenTests(unittest.TestCase):
+    def test_verified_download_loses_its_mark_of_the_web(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'toolbox-update.exe'
+            path.write_bytes(b'MZverified-helper')
+            stream=f'{path}:Zone.Identifier'
+            with open(stream,'w',encoding='ascii') as target:
+                target.write('[ZoneTransfer]\nZoneId=3\n')
+            unblock_file(path)
+            with self.assertRaises(OSError):
+                open(stream,encoding='ascii').close()
+            self.assertEqual(path.read_bytes(),b'MZverified-helper')
+            unblock_file(path)  # Repeating it must never break an update.
+
+    def test_file_without_mark_of_the_web_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'windows-update-manifest.json'
+            path.write_text('{"format":1}',encoding='utf-8')
+            unblock_file(path)
+            self.assertEqual(path.read_text(encoding='utf-8'),'{"format":1}')
 
 if __name__=='__main__':unittest.main()

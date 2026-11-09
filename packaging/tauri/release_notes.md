@@ -6,4 +6,6 @@ Windows 10 / 11 x64 下载 `ElectricityToolbox_<版本>_windows_x64_setup.exe` �
 
 `windows-update-manifest.json` 与 `windows-x64.patch.tar.xz` 附件由软件自动选择和校验，无需手动解包；全新安装仍下载完整 EXE。源码压缩包用于开发，不是安装包。
 
+若 Windows SmartScreen 提示「Windows 已保护你的电脑」，请选择「更多信息 → 仍要运行」；企业策略阻止时请联系管理员放行。若更新后提示「内置 Python 不完整」，通常是 Windows 安全中心／SmartScreen 隔离了 `payload\runtime\python\python.exe`：到「病毒和威胁防护 → 保护历史」还原该文件、把安装目录加入排除项，再重新运行完整安装包；也可运行 `packaging/windows/repair_smartscreen.ps1` 检查缺失文件并清除下载锁定。
+
 macOS 版是独立仓库与独立发布通道，本仓库只发布 Windows x64 安装包。
