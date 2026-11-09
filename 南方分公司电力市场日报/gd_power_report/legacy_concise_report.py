@@ -226,10 +226,14 @@ def prepare_legacy_concise_context(report_data: dict[str, Any]) -> dict[str, Any
 
 
 def render_legacy_concise_report(
-    output_dir: Path, report_data: dict[str, Any]
+    output_dir: Path,
+    report_data: dict[str, Any],
+    *,
+    context: dict[str, Any] | None = None,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
-    context = prepare_legacy_concise_context(report_data)
+    if context is None:
+        context = prepare_legacy_concise_context(report_data)
     template_dir = Path(__file__).parent / "templates"
     env = Environment(
         loader=FileSystemLoader(template_dir),

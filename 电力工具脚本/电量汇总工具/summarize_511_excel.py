@@ -192,31 +192,32 @@ def _collect_station_units(station_dirs, logger):
 
 
 def parse_workbook(file_path: Path) -> list[tuple[str, list[NumericCell], list[NumericCell]]]:
-    if backend_mode() != "python":
-        workbook = load_value_workbook(file_path, data_only=True, read_only=True)
-        try:
-            sheets = []
-            for worksheet in workbook.worksheets:
-                worksheet.reset_dimensions()
-                sheets.append({"name": worksheet.title, "rows": [
-                    [{"value": str(cell.value) if not isinstance(cell.value, (str, int, float, bool, type(None))) else cell.value,
-                      "number_format": normalize_number_format(cell.number_format)} for cell in row]
-                    for row in worksheet.iter_rows()
-                ]})
-            result = invoke_domain("trading", "summary_parse", {"filename": file_path.name, "sheets": sheets})
-            if result is not None:
-                return [(item["unit_name"], [NumericCell(**cell) for cell in item["energy"]],
-                         [NumericCell(**cell) for cell in item["price"]]) for item in result]
-        finally:
-            workbook.close()
+    # 一次打开、一次 iter_rows：native 分支用 value/number_format 字典，
+    # Python 回退分支复用同一批 Cell 对象，避免 summary_parse 未命中时重开工作簿。
     workbook = load_value_workbook(file_path, data_only=True, read_only=True)
-    result: list[tuple[str, list[NumericCell], list[NumericCell]]] = []
     try:
+        sheets = []
         for worksheet in workbook.worksheets:
             # Some exported files contain stale worksheet dimensions.
             worksheet.reset_dimensions()
-            rows = worksheet.iter_rows()
-            header_row = next(rows, ())
+            rows = [list(row) for row in worksheet.iter_rows()]
+            sheets.append((worksheet.title, rows))
+        if backend_mode() != "python":
+            payload = [
+                {"name": title, "rows": [
+                    [{"value": str(cell.value) if not isinstance(cell.value, (str, int, float, bool, type(None))) else cell.value,
+                      "number_format": normalize_number_format(cell.number_format)} for cell in row]
+                    for row in rows
+                ]}
+                for title, rows in sheets
+            ]
+            result = invoke_domain("trading", "summary_parse", {"filename": file_path.name, "sheets": payload})
+            if result is not None:
+                return [(item["unit_name"], [NumericCell(**cell) for cell in item["energy"]],
+                         [NumericCell(**cell) for cell in item["price"]]) for item in result]
+        result: list[tuple[str, list[NumericCell], list[NumericCell]]] = []
+        for title, rows in sheets:
+            header_row = rows[0] if rows else ()
             headers = [str(cell.value or "").strip() for cell in header_row]
             time_col = find_column(headers, "时刻")
             energy_col = find_column(headers, "电量")
@@ -227,27 +228,27 @@ def parse_workbook(file_path: Path) -> list[tuple[str, list[NumericCell], list[N
 
             energy_by_hour = {}
             price_by_hour = {}
-            for row in rows:
+            for row in rows[1:]:
                 if len(row) < time_col:
                     continue
                 slot = normalize_time(row[time_col - 1].value)
                 if slot not in TIME_SLOTS:
                     continue
                 if slot in energy_by_hour:
-                    raise ValueError(f"{file_path.name} / {worksheet.title}：时段重复 {slot}，停止汇总")
+                    raise ValueError(f"{file_path.name} / {title}：时段重复 {slot}，停止汇总")
                 try:
                     energy_by_hour[slot] = read_numeric_cell(row[energy_col - 1])
                     price_by_hour[slot] = read_numeric_cell(row[price_col - 1])
                 except (IndexError, ValueError, TypeError) as exc:
-                    raise ValueError(f"{file_path.name} / {worksheet.title} / {slot}：电量或电价缺失或无效") from exc
+                    raise ValueError(f"{file_path.name} / {title} / {slot}：电量或电价缺失或无效") from exc
 
             missing = [slot for slot in TIME_SLOTS if slot not in energy_by_hour]
             if missing:
-                raise ValueError(f"{file_path.name} / {worksheet.title}：缺少时段 {', '.join(missing)}")
+                raise ValueError(f"{file_path.name} / {title}：缺少时段 {', '.join(missing)}")
 
             result.append(
                 (
-                    extract_unit_name(worksheet.title),
+                    extract_unit_name(title),
                     [energy_by_hour[slot] for slot in TIME_SLOTS],
                     [price_by_hour[slot] for slot in TIME_SLOTS],
                 )

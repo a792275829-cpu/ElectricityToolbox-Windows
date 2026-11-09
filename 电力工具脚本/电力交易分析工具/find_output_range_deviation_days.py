@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import math
 import re
 import sys
@@ -168,12 +169,15 @@ def workbook_hour_deviations(path: Path, unit_filters: list[str] | None = None) 
         if result is not None:
             return [HourDeviation(**row) for row in result]
         rows = []
+        range_cache = {}
         for unit, hourly_points in builder.hourly.items():
             if unit_filters and not any(unit_filter in unit for unit_filter in unit_filters):
                 continue
             card = builder.offer_cards.get(unit)
             if not card:
                 continue
+            # card 常含 list/dict 不可哈希；同仓 _offer_domain_cache 用稳定签名。
+            card_signature = json.dumps(card, sort_keys=True)
             plant_rate = card["plant_rate"]
             for item in hourly_points:
                 for market_type, mwh_key, price_key in (
@@ -186,7 +190,10 @@ def workbook_hour_deviations(path: Path, unit_filters: list[str] | None = None) 
                         continue
 
                     plant_output = 0.0 if abs(clearing_mwh) <= 0.05 else clearing_mwh / (1 - plant_rate)
-                    normal_range = normal_output_range(card, clearing_mwh, clearing_price)
+                    range_key = (card_signature, clearing_mwh, clearing_price)
+                    if range_key not in range_cache:
+                        range_cache[range_key] = normal_output_range(card, clearing_mwh, clearing_price)
+                    normal_range = range_cache[range_key]
                     deviation_mw = output_range_distance(normal_range, plant_output)
                     if math.isnan(deviation_mw):
                         continue

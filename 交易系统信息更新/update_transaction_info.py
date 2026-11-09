@@ -404,8 +404,9 @@ def inspect_workbook_tail(path: Path) -> WorkbookTail:
     return next(reversed(_read_workbook_groups(path).values())).tail
 
 
-def resolve_start_date(path: Path, requested: date | None) -> date:
-    groups = _read_workbook_groups(path)
+def resolve_start_date(path: Path, requested: date | None, *, groups: dict[date, WorkbookGroup] | None = None) -> date:
+    if groups is None:
+        groups = _read_workbook_groups(path)
     pending = [day for day, group in groups.items()
                if any(value in (None, "") for value, _ in group.cells.values())]
     expected = min(pending) if pending else max(groups) + timedelta(days=1)
@@ -418,11 +419,13 @@ def resolve_start_date(path: Path, requested: date | None) -> date:
     return expected
 
 
-def _pending_dates(path: Path, start_date: date | None, end_date: date, *, overwrite: bool) -> tuple[date, ...]:
-    groups = _read_workbook_groups(path)
+def _pending_dates(path: Path, start_date: date | None, end_date: date, *, overwrite: bool,
+                   groups: dict[date, WorkbookGroup] | None = None) -> tuple[date, ...]:
+    if groups is None:
+        groups = _read_workbook_groups(path)
     tail_day = max(groups)
     if start_date is not None:
-        resolve_start_date(path, start_date)
+        resolve_start_date(path, start_date, groups=groups)
         if end_date < start_date:
             raise ValueError("结束日期不能早于开始日期。")
     history = [day for day, group in groups.items()
@@ -479,14 +482,31 @@ def xlsx_sheet_paths(path: Path) -> dict[str, str]:
     return result
 
 
-def _row_xml(xml_text: str, row_number: int) -> str:
-    pattern = re.compile(
-        rf'<row\b(?=[^>]*\br="{row_number}")[^>]*>.*?</row>', re.DOTALL
-    )
-    match = pattern.search(xml_text)
-    if match is None:
+_ROW_XML_PATTERN = re.compile(r'<row\b(?=[^>]*\br="(\d+)")[^>]*>.*?</row>', re.DOTALL)
+_CELL_STYLE_PATTERN = re.compile(r'\bs="([^"]+)"')
+_CELL_OPENING_PATTERN = re.compile(r'<c\b[^>]*\br="([A-Z]+)\d+"')
+_CELL_PREFIX_PATTERN = re.compile(r"[A-Z]+")
+_CELL_PATTERN_CACHE: dict[str, re.Pattern[str]] = {}
+
+
+def _build_row_index(xml_text: str) -> dict[str, str]:
+    index: dict[str, str] = {}
+    for match in _ROW_XML_PATTERN.finditer(xml_text):
+        index.setdefault(match.group(1), match.group(0))
+    return index
+
+
+def _row_xml(xml_text: str, row_number: int, *, row_index: dict[str, str] | None = None) -> str:
+    if row_index is None:
+        key = str(row_number)
+        for match in _ROW_XML_PATTERN.finditer(xml_text):
+            if match.group(1) == key:
+                return match.group(0)
         raise RuntimeError(f"工作表 XML 未找到模板第 {row_number} 行。")
-    return match.group(0)
+    row_xml = row_index.get(str(row_number))
+    if row_xml is None:
+        raise RuntimeError(f"工作表 XML 未找到模板第 {row_number} 行。")
+    return row_xml
 
 
 def _renumber_row(row_xml: str, source_row: int, target_row: int) -> str:
@@ -500,10 +520,14 @@ def _renumber_row(row_xml: str, source_row: int, target_row: int) -> str:
 
 
 def _cell_pattern(cell_ref: str) -> re.Pattern[str]:
-    return re.compile(
-        rf'<c\b(?=[^>]*\br="{re.escape(cell_ref)}")[^>]*(?:>.*?</c>|/>)',
-        re.DOTALL,
-    )
+    pattern = _CELL_PATTERN_CACHE.get(cell_ref)
+    if pattern is None:
+        pattern = re.compile(
+            rf'<c\b(?=[^>]*\br="{re.escape(cell_ref)}")[^>]*(?:>.*?</c>|/>)',
+            re.DOTALL,
+        )
+        _CELL_PATTERN_CACHE[cell_ref] = pattern
+    return pattern
 
 
 def _replace_numeric_cell(row_xml: str, cell_ref: str, value: int | float) -> str:
@@ -512,15 +536,15 @@ def _replace_numeric_cell(row_xml: str, cell_ref: str, value: int | float) -> st
     if match is None:
         # Excel 会省略无样式的空白输入单元格；按列序只插入本次需要的数值格，
         # 保留该行其它单元格与行属性，不再因为缺格直接报错。
-        column = column_index_from_string(re.match(r"[A-Z]+", cell_ref)[0])
+        column = column_index_from_string(_CELL_PREFIX_PATTERN.match(cell_ref)[0])
         insertion = row_xml.rfind("</row>")
-        for existing in re.finditer(r'<c\b[^>]*\br="([A-Z]+)\d+"', row_xml):
+        for existing in _CELL_OPENING_PATTERN.finditer(row_xml):
             if column_index_from_string(existing[1]) > column:
                 insertion = existing.start()
                 break
         replacement = f'<c r="{cell_ref}"><v>{format(float(value), ".15g")}</v></c>'
         return row_xml[:insertion] + replacement + row_xml[insertion:]
-    style_match = re.search(r'\bs="([^"]+)"', match.group(0))
+    style_match = _CELL_STYLE_PATTERN.search(match.group(0))
     style = f' s="{style_match.group(1)}"' if style_match else ""
     replacement = f'<c r="{cell_ref}"{style}><v>{format(float(value), ".15g")}</v></c>'
     return row_xml[: match.start()] + replacement + row_xml[match.end() :]
@@ -533,12 +557,13 @@ def _build_group_rows(
     target_start: int,
     pair: DailyLoadPair,
     epoch,
+    row_index: dict[str, str] | None = None,
 ) -> str:
     rows: list[str] = []
     for offset, category in enumerate(CATEGORY_ORDER):
         source_row = template_start + offset
         target_row = target_start + offset
-        row_xml = _renumber_row(_row_xml(xml_text, source_row), source_row, target_row)
+        row_xml = _renumber_row(_row_xml(xml_text, source_row, row_index=row_index), source_row, target_row)
         if offset == 0:
             row_xml = _replace_numeric_cell(
                 row_xml, f"C{target_row}", to_excel(pair.day_ahead_date, epoch)
@@ -585,6 +610,7 @@ def patch_sheet_xml(
         return native, first_row, first_row + (len(pairs) - 1) * GROUP_HEIGHT + 5
     xml_text = xml_bytes.decode("utf-8")
     first_row = template_start + GROUP_HEIGHT
+    row_index = _build_row_index(xml_text)
     appended: list[str] = []
     for index, pair in enumerate(pairs):
         target_start = first_row + index * GROUP_HEIGHT
@@ -595,6 +621,7 @@ def patch_sheet_xml(
                 target_start=target_start,
                 pair=pair,
                 epoch=epoch,
+                row_index=row_index,
             )
         )
     if "</sheetData>" not in xml_text:
@@ -749,13 +776,15 @@ def verify_workbook(path: Path, prepared: PreparedWorkbook) -> None:
             raw.close()
 
 
-def prepare_workbook(path: Path, pairs: Iterable[DailyLoadPair], *, overwrite: bool = False) -> PreparedWorkbook:
+def prepare_workbook(path: Path, pairs: Iterable[DailyLoadPair], *, overwrite: bool = False,
+                     groups: dict[date, WorkbookGroup] | None = None) -> PreparedWorkbook:
     original = Path(path).expanduser().resolve()
     pair_tuple = tuple(pairs)
     if not pair_tuple:
         raise ValueError("没有可写入的日期数据。")
     source_fingerprint = workbook_fingerprint(original)
-    groups = _read_workbook_groups(original)
+    if groups is None:
+        groups = _read_workbook_groups(original)
     tail = next(reversed(groups.values())).tail
     days = [pair.day_ahead_date for pair in pair_tuple]
     if days != sorted(set(days)):
@@ -835,7 +864,8 @@ def update_workbook(
 ) -> PreparedWorkbook | None:
     original = Path(workbook_path).expanduser().resolve()
     source_fingerprint = workbook_fingerprint(original)
-    days = _pending_dates(original, start_date, end_date, overwrite=overwrite)
+    groups = _read_workbook_groups(original)
+    days = _pending_dates(original, start_date, end_date, overwrite=overwrite, groups=groups)
     if not days:
         log("无需更新：所选日期范围没有待补空值或新日期。")
         return None
@@ -844,7 +874,7 @@ def update_workbook(
         raise RuntimeError("抓取日期与待更新日期不一致，停止写入。")
     assert_workbook_unchanged(original, source_fingerprint)
     # 与 Mac 一致：覆盖口径由 overwrite 参数决定，不再因未显式指定起始日期而降级。
-    prepared = prepare_workbook(original, pairs, overwrite=overwrite)
+    prepared = prepare_workbook(original, pairs, overwrite=overwrite, groups=groups)
     backup = commit_prepared_workbook(prepared, create_backup=create_backup)
     log(f"已更新 {prepared.original}：日前 {days[0]} 至 {days[-1]}，实际日期为日前 D-3；"
         f"历史写入 {len(prepared.cell_expectations)} 格，新增 {len(prepared.pairs)} 组。")

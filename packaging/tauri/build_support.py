@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import stat
 import subprocess
 import tarfile
 import urllib.request
@@ -14,13 +15,14 @@ NODE_VERSION = "22.23.3"
 PLAYWRIGHT_VERSION = "1.55.0"
 
 
-def normalize_permissions(root: Path) -> None:
+def normalize_permissions(root: Path, paths=None) -> None:
     """Make bundled files readable after PKG installation changes their owner."""
-    for path in (root, *root.rglob("*")):
-        if path.is_symlink():
+    for path in (root, *root.rglob("*")) if paths is None else (root, *paths):
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
             continue
-        mode = path.stat().st_mode
-        path.chmod(0o755 if path.is_dir() or mode & 0o111 else 0o644)
+        mode = info.st_mode
+        path.chmod(0o755 if stat.S_ISDIR(mode) or mode & 0o111 else 0o644)
 
 
 EXCLUDED_PARTS = {".git", ".venv", "node_modules", "dist", "__pycache__", ".codegraph",
@@ -51,7 +53,7 @@ def exportable(relative: Path) -> bool:
             and not relative.name.startswith("~$"))
 
 
-def export_source(destination: Path, *, predicate=exportable) -> int:
+def export_source(destination: Path, *, predicate=exportable, collected=None) -> int:
     raw = subprocess.check_output(["git", "ls-files", "-co", "--exclude-standard", "-z"], cwd=ROOT)
     count = 0
     for name in sorted(set(raw.decode("utf-8").split("\0"))):
@@ -64,6 +66,8 @@ def export_source(destination: Path, *, predicate=exportable) -> int:
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
+        if collected is not None:
+            collected.append(relative.as_posix())
         count += 1
     return count
 

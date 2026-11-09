@@ -7,6 +7,7 @@ from ..diagnostics import (
     DiagnosticCheck,
     DiagnosticLevel,
     DiagnosticReport,
+    cached_environment_checks,
     diagnose_environment,
     diagnose_path,
 )
@@ -93,10 +94,13 @@ class DiagnosticCenterPanel(ttk.Frame):
             row=0, column=1, sticky="ew", padx=(4, 0)
         )
 
-        self.refresh()
+        self._refresh_cached()
+
+    def _refresh_cached(self) -> None:
+        self._render(DiagnosticReport(cached_environment_checks(self.paths)))
 
     def refresh(self) -> None:
-        self._render(diagnose_environment(self.paths))
+        self._render(DiagnosticReport(cached_environment_checks(self.paths, force=True)))
 
     def _two_line_height(self) -> int:
         """Pixel height of two Muted.TLabel lines, unaffected by current text."""

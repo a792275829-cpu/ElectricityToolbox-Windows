@@ -48,12 +48,12 @@ def _normalize(frame: pd.DataFrame) -> pd.DataFrame:
 def load_model_data(path: Path | str) -> pd.DataFrame:
     source = read_model_frame(path)
     frame = _normalize(drop_unavailable_model_columns(source))
-    validate_quarter_hour_grain(frame)
+    validate_quarter_hour_grain(frame, _normalized=frame)
     return frame
 
 
-def _validate_quarter_hour_grain_python(frame: pd.DataFrame) -> None:
-    normalized = _normalize(frame)
+def _validate_quarter_hour_grain_python(frame: pd.DataFrame, _normalized=None) -> None:
+    normalized = _normalize(frame) if _normalized is None else _normalized
     if normalized.duplicated(["日期", "时刻"]).any():
         raise ValueError("日期+时刻存在重复记录")
     counts = normalized.groupby("日期", observed=True)["时刻"].nunique()
@@ -69,8 +69,8 @@ def _validate_quarter_hour_grain_python(frame: pd.DataFrame) -> None:
         raise ValueError(f"日期不连续，缺少: {missing.strftime('%Y-%m-%d').tolist()}")
 
 
-def _split_labeled_prediction_dates_python(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    normalized = _normalize(frame)
+def _split_labeled_prediction_dates_python(frame: pd.DataFrame, _normalized=None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    normalized = _normalize(frame) if _normalized is None else _normalized
     completeness = normalized.groupby("日期", observed=True)[TARGET].apply(lambda s: s.notna().all())
     partial = normalized.groupby("日期", observed=True)[TARGET].apply(lambda s: s.notna().any() and s.isna().any())
     if partial.any():
@@ -87,19 +87,19 @@ def _native_frame_payload(frame):
             "target": [None if pd.isna(v) else 1.0 for v in frame[TARGET]]}
 
 
-def validate_quarter_hour_grain(frame):
+def validate_quarter_hour_grain(frame, _normalized=None):
     invoke = _invoke_forecast
-    normalized = _normalize(frame)
+    normalized = _normalize(frame) if _normalized is None else _normalized
     if invoke("forecast", "grain", _native_frame_payload(normalized)) is None:
-        _validate_quarter_hour_grain_python(frame)
+        _validate_quarter_hour_grain_python(frame, _normalized=normalized)
 
 
-def split_labeled_prediction_dates(frame):
+def split_labeled_prediction_dates(frame, _normalized=None):
     invoke = _invoke_forecast
-    normalized = _normalize(frame)
+    normalized = _normalize(frame) if _normalized is None else _normalized
     result = invoke("forecast", "labeled", _native_frame_payload(normalized))
     if result is None:
-        return _split_labeled_prediction_dates_python(frame)
+        return _split_labeled_prediction_dates_python(frame, _normalized=normalized)
     return normalized.iloc[result["labeled"]].copy(), normalized.iloc[result["future"]].copy()
 
 

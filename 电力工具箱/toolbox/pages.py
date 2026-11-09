@@ -399,8 +399,8 @@ class ReportPage(ToolPage):
         return commands.word_report(self.paths, report_date, online, day_ahead, daily, template)
 
     @staticmethod
-    def find_workbook_for_day(target_day: date) -> Path | None:
-        return file_rules.find_workbook_for_day(target_day)
+    def find_workbook_for_day(target_day: date, *, scan: dict[date, Path] | None = None) -> Path | None:
+        return file_rules.find_workbook_for_day(target_day, scan=scan)
 
     def auto_fill(self) -> None:
         try:
@@ -416,8 +416,9 @@ class ReportPage(ToolPage):
             self.daily_workbook,
         )
         missing: list[str] = []
+        scan = file_rules.scan_clearing_files()
         for variable, target_day in zip(variables, target_dates):
-            workbook = self.find_workbook_for_day(target_day)
+            workbook = self.find_workbook_for_day(target_day, scan=scan)
             if workbook is None:
                 missing.append(target_day.isoformat())
             else:

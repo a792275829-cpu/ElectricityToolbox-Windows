@@ -53,11 +53,14 @@ fn parse_worker_error(text: &str) -> Option<Value> {
     }
     if detail.is_empty() { None } else { Some(Value::Object(detail)) }
 }
-fn event(state: &mut State, id: &str, kind: &str, message: &str) {
+fn event_redacted(state: &mut State, id: &str, kind: &str, message: &str) {
     state.sequence += 1;
-    let message: String = redact(message).chars().take(16000).collect();
+    let message: String = message.chars().take(16000).collect();
     state.journal.push_back(json!({"sequence":state.sequence,"task_id":id,"kind":kind,"message":message,"progress":null}));
     while state.journal.len() > 2000 { state.journal.pop_front(); }
+}
+fn event(state: &mut State, id: &str, kind: &str, message: &str) {
+    event_redacted(state, id, kind, &redact(message));
 }
 fn transition(shared: &Shared, id: &str, mut phase: &str, mut result: Value, mut error: Option<String>) {
     let mut state = shared.lock().unwrap();
@@ -65,16 +68,17 @@ fn transition(shared: &Shared, id: &str, mut phase: &str, mut result: Value, mut
     if matches!(phase, "succeeded" | "failed") && state.tasks.get(id).is_some_and(|task| task.cancelled.load(Ordering::Acquire)) {
         phase = "cancelled"; result = Value::Null; error = None;
     }
+    let redacted_error = error.as_ref().map(|e| redact(e));
     if let Some(task) = state.tasks.get_mut(id) {
         task.value["state"] = json!(phase);
         task.value["result"] = result.clone();
-        task.value["error"] = json!(error.as_ref().map(|e| redact(e)));
+        task.value["error"] = json!(redacted_error.clone());
         if phase != "failed" { task.value["error_detail"] = Value::Null; }
-        task.value["message"] = json!(error.as_ref().map(|e| redact(e)).unwrap_or_else(||
+        task.value["message"] = json!(redacted_error.clone().unwrap_or_else(||
             if phase == "succeeded" { redact(result["message"].as_str().unwrap_or("已完成")) }
             else if phase == "cancelled" { "任务已取消".to_string() } else { String::new() }));
     }
-    if let Some(error) = error { event(&mut state, id, "error", &error); }
+    if let Some(text) = &redacted_error { event_redacted(&mut state, id, "error", text); }
     event(&mut state, id, "state", phase);
 }
 
@@ -177,7 +181,7 @@ fn run_worker(config: Config, shared: Shared, id: String, prepared: Value, reque
                             trace.extend(safe.chars().take(16000usize.saturating_sub(trace.chars().count())));
                         }
                         if line.starts_with("无数据：") { no_data = Some(line.trim().to_string()); }
-                        event(&mut shared.lock().unwrap(), &id, "log", &safe);
+                        event_redacted(&mut shared.lock().unwrap(), &id, "log", &safe);
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,

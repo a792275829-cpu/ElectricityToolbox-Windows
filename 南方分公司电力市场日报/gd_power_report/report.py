@@ -8,6 +8,15 @@ from typing import Any
 
 
 
+# _classify_appendix_rows runs these per cell; compile them once at import.
+_APPENDIX_INNER_SPACE_RE = re.compile(
+    r"(?<=[\u3400-\u4dbf\u4e00-\u9fff])[\r\n\t ]+(?=[\u3400-\u4dbf\u4e00-\u9fff])"
+)
+_WHITESPACE_RE = re.compile(r"\s+")
+_CHINESE_4_6_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]{4,6}")
+_UNIT_PAIR_RE = re.compile(r"#\d+#\d+机组")
+_CHINESE_4_5_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]{4,5}")
+_NUMBER_TEXT_RE = re.compile(r"-?\d+(?:\.\d+)?")
 WEEKDAYS = "一二三四五六日"
 HIDDEN_SUMMARY_CARD_LABELS = {"节点电价区间"}
 REALTIME_SUMMARY_CARD_ORDER = [
@@ -420,35 +429,25 @@ def _classify_appendix_rows(
             source_column += colspan
             cell_value = cell.get("value")
             if isinstance(cell_value, str) and not preserve_source_labels:
-                cell_value = re.sub(
-                    r"(?<=[\u3400-\u4dbf\u4e00-\u9fff])[\r\n\t ]+(?=[\u3400-\u4dbf\u4e00-\u9fff])",
-                    "",
-                    cell_value,
-                )
+                cell_value = _APPENDIX_INNER_SPACE_RE.sub("", cell_value)
             cell["value"] = (
                 cell_value
                 if preserve_source_labels
                 else APPENDIX_HEADER_LABELS.get(cell_value, cell_value)
             )
             cell_text = str(cell.get("value") or "").strip()
-            compact_chinese_text = re.sub(r"\s+", "", cell_text)
+            compact_chinese_text = _WHITESPACE_RE.sub("", cell_text)
             cell["compact_tall_cell"] = (
                 colspan == 1
                 and rowspan == 1
                 and bool(
-                    re.fullmatch(
-                        r"[\u3400-\u4dbf\u4e00-\u9fff]{4,6}",
-                        compact_chinese_text,
-                    )
-                    or re.fullmatch(r"#\d+#\d+机组", cell_text)
+                    _CHINESE_4_6_RE.fullmatch(compact_chinese_text)
+                    or _UNIT_PAIR_RE.fullmatch(cell_text)
                 )
             )
             cell["wrap_parts"] = (
                 [compact_chinese_text[:2], compact_chinese_text[2:]]
-                if re.fullmatch(
-                    r"[\u3400-\u4dbf\u4e00-\u9fff]{4,5}",
-                    compact_chinese_text,
-                )
+                if _CHINESE_4_5_RE.fullmatch(compact_chinese_text)
                 else []
             )
             if compact_chinese_text in {
@@ -460,7 +459,7 @@ def _classify_appendix_rows(
             normalized = str(cell.get("value") or "").strip().replace(",", "")
             cell["kind"] = (
                 "number"
-                if re.fullmatch(r"-?\d+(?:\.\d+)?", normalized)
+                if _NUMBER_TEXT_RE.fullmatch(normalized)
                 else "text"
             )
         active_rowspans = {

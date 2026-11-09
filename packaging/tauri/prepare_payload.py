@@ -221,7 +221,8 @@ def prepare(target: str, runtime_from: Path | None = None, forecast_workbook: Pa
     if source.exists():
         shutil.rmtree(source)
     source.mkdir(parents=True)
-    build_support.export_source(source, predicate=runtime_source)
+    collected = []
+    build_support.export_source(source, predicate=runtime_source, collected=collected)
     prepare_price_xlsx(source, target)
     validate_runtime_assets(source)
     defaults = payload / "defaults"
@@ -338,17 +339,21 @@ def prepare(target: str, runtime_from: Path | None = None, forecast_workbook: Pa
     # Remove only the former generated layout when reusing a local staging folder.
     shutil.rmtree(payload / "workspace", ignore_errors=True)
     (payload / "prepare_workspace.py").unlink(missing_ok=True)
-    for path in list(payload.rglob("__pycache__")):
-        shutil.rmtree(path)
+    all_paths = sorted(payload.rglob("*"))
+    for path in all_paths:
+        if path.name == "__pycache__":
+            shutil.rmtree(path)
+    kept = [p for p in all_paths if "__pycache__" not in p.relative_to(payload).parts]
     version = json.loads((ROOT / "desktop/package.json").read_text())["version"]
+    candidates = sorted({source / rel for rel in collected} |
+                        {p for p in kept if p.is_relative_to(source)})
     files = {
         p.relative_to(source).as_posix(): build_support.sha256(p)
-        for p in sorted(source.rglob("*"))
-        if p.is_file()
+        for p in candidates if p.is_file()
     }
     default_hashes = {
         p.relative_to(defaults).as_posix(): build_support.sha256(p)
-        for p in sorted(defaults.rglob("*")) if p.is_file()
+        for p in kept if p.is_file() and p.is_relative_to(defaults)
     }
     build = hashlib.sha256(json.dumps(
         {"files": files, "default_hashes": default_hashes}, sort_keys=True,
@@ -365,7 +370,7 @@ def prepare(target: str, runtime_from: Path | None = None, forecast_workbook: Pa
     (payload / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    build_support.normalize_permissions(payload)
+    build_support.normalize_permissions(payload, paths=[*kept, payload / "manifest.json"])
     if target == native:
         run(
             [

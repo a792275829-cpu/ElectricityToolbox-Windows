@@ -16,6 +16,7 @@ from gd_power_report.config import AppConfig
 from gd_power_report.full_day_clearing_xlsx import read_full_day_clearing_table
 from gd_power_report.legacy_concise_report import (
     export_legacy_concise_pdf,
+    prepare_legacy_concise_context,
     render_legacy_concise_report,
 )
 from gd_power_report.legacy_print_report import export_print_pdf, render_print_report
@@ -40,12 +41,16 @@ def _render_concise_outputs(
     progress: Callable[[str], None],
 ) -> tuple[Path, Path, Path]:
     progress("生成手机预览版 HTML")
-    html_path = render_legacy_concise_report(run_dir, report)
+    # 两份报告共用一份精简版上下文，避免各自 deepcopy(report) + 全量重算。
+    # 打印版在 prepare_print_context 内做一次拷贝以隔离 day_blocks 回写。
+    # 空的 report 桩（如单测）回退到两个 renderer 各自的默认路径。
+    context = prepare_legacy_concise_context(report) if report else None
+    html_path = render_legacy_concise_report(run_dir, report, context=context)
     with pdf_browser() as browser:
         progress("导出手机预览版 PDF")
         pdf_path = export_legacy_concise_pdf(html_path, browser=browser)
         progress("生成打印版 HTML")
-        print_html_path = render_print_report(run_dir, report)
+        print_html_path = render_print_report(run_dir, report, context=context)
         progress("导出打印版 PDF")
         print_pdf_path = export_print_pdf(print_html_path, browser=browser)
     return html_path, pdf_path, print_pdf_path

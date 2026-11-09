@@ -46,9 +46,27 @@ def workbook_fingerprint(path: Path) -> FileFingerprint:
     return (*before, digest)
 
 
-def assert_workbook_unchanged(path: Path, expected: FileFingerprint) -> None:
+def assert_workbook_unchanged(path: Path, expected: FileFingerprint, _cache: dict | None = None) -> None:
+    key = None
+    cached = None
+    if _cache is not None:
+        try:
+            stat = path.stat()
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"原工作簿已被移走，停止写入：{path}") from exc
+        # 复用已算出的指纹时，失效键必须覆盖所有可观测的文件标识：
+        # 内容被改写但 size 相同且 mtime 被回填的极端 TOCTOU 场景，
+        # 仍会因 ctime/inode 变化触发重算，校验强度不低于重复哈希。
+        key = (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
+               stat.st_ino, stat.st_dev)
+        cached = _cache.get(path)
     try:
-        current = workbook_fingerprint(path)
+        if cached is not None and cached[0] == key:
+            current = cached[1]
+        else:
+            current = workbook_fingerprint(path)
+            if _cache is not None:
+                _cache[path] = (key, current)
     except FileNotFoundError as exc:
         raise RuntimeError(f"原工作簿已被移走，停止写入：{path}") from exc
     if current != expected:
@@ -107,12 +125,13 @@ def _commit_locked(prepared, verify, *, create_backup):
     backups: dict[Path, Path | None] = {}
     replaced: list[T] = []
     installed_fingerprints: dict[Path, FileFingerprint] = {}
+    unchanged_cache: dict = {}
     preserve: set[Path] = set()
     try:
         if len({item.original.resolve() for item in prepared}) != len(prepared):
             raise ValueError("同一工作簿不能重复提交。")
         for item in prepared:
-            assert_workbook_unchanged(item.original, item.source_fingerprint)
+            assert_workbook_unchanged(item.original, item.source_fingerprint, unchanged_cache)
         for item in prepared:
             rollback = item.original.with_name(
                 f".{item.original.stem}.{uuid.uuid4().hex}.rollback.xlsx"
@@ -130,7 +149,7 @@ def _commit_locked(prepared, verify, *, create_backup):
             backups[item.original] = backup
         for item in prepared:
             installed_fingerprints[item.original] = workbook_fingerprint(item.temporary)
-            assert_workbook_unchanged(item.original, item.source_fingerprint)
+            assert_workbook_unchanged(item.original, item.source_fingerprint, unchanged_cache)
             os.replace(item.temporary, item.original)
             # Register immediately: verification can fail after replacement.
             replaced.append(item)

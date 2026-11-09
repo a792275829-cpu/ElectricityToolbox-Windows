@@ -18,15 +18,27 @@ A4_WIDTH_PT = 595.28
 A4_HEIGHT_PT = 841.89
 
 
-def prepare_print_context(report_data: dict[str, Any]) -> dict[str, Any]:
-    context = prepare_legacy_concise_context(report_data)
+def prepare_print_context(
+    report_data: dict[str, Any], *, context: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    if context is None:
+        context = prepare_legacy_concise_context(report_data)
+    else:
+        # Share the concise renderer's context, but isolate the day_blocks
+        # re-assignment below so the concise side keeps its own day_blocks.
+        context = dict(context)
     context["day_blocks"] = split_print_table_blocks(context["day_blocks"])
     return context
 
 
-def render_print_report(output_dir: Path, report_data: dict[str, Any]) -> Path:
+def render_print_report(
+    output_dir: Path,
+    report_data: dict[str, Any],
+    *,
+    context: dict[str, Any] | None = None,
+) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
-    context = prepare_print_context(report_data)
+    context = prepare_print_context(report_data, context=context)
     template_dir = Path(__file__).parent / "templates"
     environment = Environment(
         loader=FileSystemLoader(template_dir),

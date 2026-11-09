@@ -117,15 +117,16 @@ def installed(installer):
 def build_one(old,new,assets,full_size):
     base,target=install_version(old),install_version(new)
     patch=assets/patch_name(base,target)
-    edge=create_patch(old,new,patch)
+    inventories={}
+    edge=create_patch(old,new,patch,inventories)
     if edge['size']>=full_size:
         patch.unlink();return None
-    before=inventory(old)
+    before,after=inventories['before'],inventories['after']
     with tempfile.TemporaryDirectory(prefix='ElectricityToolboxDeltaVerify-') as folder:
         stage=Path(folder)/'restored'
         counts=clone_installation(old,stage)
         apply_patch(stage,patch,base,target)
-        if inventory(stage)!=inventory(new) or inventory(old)!=before:
+        if inventory(stage)!=after or inventory(old)!=before:
             raise UpdateError('Windows 补丁还原或旧版保护验证失败')
     edge['browser_download_url']=f'https://github.com/{REPOSITORY}/releases/download/v{target}/{patch.name}'
     print(json.dumps(dict(base=base,target=target,patch_bytes=edge['size'],full_bytes=full_size,**counts)),flush=True)

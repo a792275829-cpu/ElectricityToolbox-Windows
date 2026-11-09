@@ -179,8 +179,9 @@ class ToolboxService:
             if tool == "report":
                 day = parse_date_input(str(params.get("report_date", "")))
                 result = {}
+                scan = file_rules.scan_clearing_files()
                 for key, target in zip(("online_workbook", "day_ahead_workbook", "daily_workbook"), (day-timedelta(days=1), day, day-timedelta(days=2))):
-                    path = file_rules.find_workbook_for_day(target)
+                    path = file_rules.find_workbook_for_day(target, scan=scan)
                     if path:
                         result[key] = str(path)
                 return result

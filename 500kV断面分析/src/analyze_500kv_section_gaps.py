@@ -3,6 +3,9 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from collections import defaultdict
+from contextlib import contextmanager
+from functools import wraps
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -19,6 +22,55 @@ MIN_SECTION_INTERVALS = 4
 # The toolkit launcher and standalone CLI share the same native domain adapter.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from toolbox_native_domain import invoke as _native_invoke
+
+
+# One pipeline (or one run_many batch) parses the same topology text several
+# times (dedupe/analyze/build). A scope-local cache reuses the single disk read
+# and the single ("sections", "topology") native call. Results are keyed by the
+# text content itself, so different files (or changed content) never collide.
+_TOPOLOGY_SESSION: dict | None = None
+
+
+@contextmanager
+def topology_cache_scope():
+    global _TOPOLOGY_SESSION
+    previous = _TOPOLOGY_SESSION
+    if previous is None:
+        _TOPOLOGY_SESSION = {"text": {}, "native": {}}
+    try:
+        yield _TOPOLOGY_SESSION
+    finally:
+        _TOPOLOGY_SESSION = previous
+
+
+def with_topology_cache(function):
+    """Decorator form of topology_cache_scope for a whole batch/pipeline run."""
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with topology_cache_scope():
+            return function(*args, **kwargs)
+    return wrapped
+
+
+def _topology_text(path: Path) -> str:
+    session = _TOPOLOGY_SESSION
+    if session is None:
+        return Path(path).read_text(encoding="utf-8")
+    key = str(Path(path).resolve())
+    texts = session["text"]
+    if key not in texts:
+        texts[key] = Path(path).read_text(encoding="utf-8")
+    return texts[key]
+
+
+def _topology_native(text: str):
+    session = _TOPOLOGY_SESSION
+    if session is None:
+        return _native_invoke("sections", "topology", {"text": text})
+    natives = session["native"]
+    if text not in natives:
+        natives[text] = _native_invoke("sections", "topology", {"text": text})
+    return natives[text]
 
 
 @dataclass(frozen=True)
@@ -168,7 +220,7 @@ def _calculate_reference(edges, time_headers, price_rows, threshold):
 
 
 def parse_topology_edges(topology_path: Path) -> tuple[list[TopologyEdge], list[tuple[str, str, str]]]:
-    native = _native_invoke("sections", "topology", {"text": Path(topology_path).read_text(encoding="utf-8")})
+    native = _topology_native(_topology_text(topology_path))
     if native is not None:
         return [TopologyEdge(**edge) for edge in native["edges"]], [tuple(row) for row in native["duplicates"]]
     return _parse_topology_edges_reference(topology_path)
@@ -181,7 +233,7 @@ def _parse_topology_edges_reference(topology_path: Path) -> tuple[list[TopologyE
     seen: set[tuple[str, str]] = set()
     skipped_duplicates = []
 
-    for raw_line in Path(topology_path).read_text(encoding="utf-8").splitlines():
+    for raw_line in _topology_text(topology_path).splitlines():
         line = raw_line.strip()
         if not in_section:
             in_section = bool(SECTION_2_RE.match(line))
@@ -311,9 +363,12 @@ def normalize_price_node_name(name: object) -> str:
 
 
 def summarize_edges(records: list[dict[str, object]], time_headers: list[str]) -> list[dict[str, object]]:
+    grouped: dict[object, list[dict[str, object]]] = defaultdict(list)
+    for record in records:
+        grouped[record["edge"]].append(record)
     rows = []
     for edge in sorted({str(record["edge"]) for record in records}):
-        edge_records = [record for record in records if record["edge"] == edge]
+        edge_records = grouped.get(edge, [])
         max_record = max(edge_records, key=lambda record: float(record["abs_diff"]))
         direction_counts = _direction_counts(edge_records)
         main_direction = max(direction_counts.items(), key=lambda item: (item[1], item[0]))[0]
@@ -337,9 +392,12 @@ def summarize_edges(records: list[dict[str, object]], time_headers: list[str]) -
 
 
 def summarize_groups(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    grouped: dict[object, list[dict[str, object]]] = defaultdict(list)
+    for record in records:
+        grouped[record["group"]].append(record)
     rows = []
     for group in sorted({str(record["group"]) for record in records}):
-        group_records = [record for record in records if record["group"] == group]
+        group_records = grouped.get(group, [])
         rows.append(
             {
                 "group": group,

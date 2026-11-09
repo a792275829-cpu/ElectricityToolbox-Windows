@@ -1350,16 +1350,17 @@ def update_province_excel_for_upload(
         else:
             updated_formula = replace_capacity_in_formula(current_formula, capacity_average)
             formula_result = evaluate_simple_excel_formula(updated_formula)
-            worksheet["C2"].value = updated_formula
+            worksheet["C2"].value = (
+                int(round(formula_result))
+                if abs(formula_result - round(formula_result)) < 0.000001
+                else formula_result
+            )
             if hasattr(workbook, "calculation"):
                 workbook.calculation.fullCalcOnLoad = True
                 workbook.calculation.forceFullCalc = True
         workbook.save(target_path)
     finally:
         workbook.close()
-
-    if isinstance(current_formula, str) and current_formula.startswith("="):
-        write_formula_result_as_value(target_path, worksheet.title, "C2", formula_result)
 
     log(f"省内数据已更新：{target_path}")
     return [

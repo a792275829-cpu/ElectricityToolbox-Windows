@@ -217,15 +217,18 @@ def select_dated_record(records, target: date, *, label: str):
     return matching[0]
 
 
-def find_date_row(sheet, target: date, *, extend: bool = False) -> int:
-    resolved_dates: dict[int, date] = {}
-    formula_pattern = re.compile(r"^=\$?A\$?(\d+)\s*([+-])\s*(\d+)$", re.IGNORECASE)
+_FORMULA_ROW_PATTERN = re.compile(r"^=\$?A\$?(\d+)\s*([+-])\s*(\d+)$", re.IGNORECASE)
+_YEAR_TITLE_PATTERN = re.compile(r"^(\d{4})年")
+_MONTH_SUMMARY_PATTERN = re.compile(r"\d+月|合计|汇总|小计")
 
+
+def _scan_date_rows(sheet) -> dict[int, date]:
+    resolved_dates: dict[int, date] = {}
     for row in range(1, sheet.max_row + 1):
         value = sheet.cell(row=row, column=1).value
         parsed = parse_cell_date(value)
         if parsed is None and isinstance(value, str):
-            match = formula_pattern.match(value.strip())
+            match = _FORMULA_ROW_PATTERN.match(value.strip())
             if match:
                 ref_row = int(match.group(1))
                 delta = int(match.group(3))
@@ -236,7 +239,31 @@ def find_date_row(sheet, target: date, *, extend: bool = False) -> int:
                     parsed = ref_date + timedelta(days=delta)
         if parsed is not None:
             resolved_dates[row] = parsed
-    matches = [row for row, day in resolved_dates.items() if day == target]
+    return resolved_dates
+
+
+class _SheetDateIndex:
+    """Per-sheet date map built once per write session (date -> rows, last row, year)."""
+
+    def __init__(self, sheet):
+        self.resolved_dates = _scan_date_rows(sheet)
+        self.date_rows: dict[date, list[int]] = {}
+        for row, day in self.resolved_dates.items():
+            self.date_rows.setdefault(day, []).append(row)
+        year_match = _YEAR_TITLE_PATTERN.match(sheet.title)
+        self.year = int(year_match.group(1)) if year_match else None
+
+
+def find_date_row(sheet, target: date, *, extend: bool = False) -> int:
+    write_session = _active_write_session.get()
+    if write_session is not None and getattr(sheet, "parent", None) is write_session.workbook:
+        index = write_session.date_index(sheet)
+        use_cache = True
+    else:
+        index = _SheetDateIndex(sheet)
+        use_cache = False
+    resolved_dates = index.resolved_dates
+    matches = index.date_rows.get(target, [])
     if len(matches) > 1:
         raise RuntimeError(f"{sheet.title} 日期重复：{target.isoformat()}")
     if matches:
@@ -244,12 +271,12 @@ def find_date_row(sheet, target: date, *, extend: bool = False) -> int:
     if extend and resolved_dates:
         last_row = max(resolved_dates)
         last_date = resolved_dates[last_row]
-        year = re.match(r"^(\d{4})年", sheet.title)
-        if year and target.year != int(year[1]):
+        year = index.year
+        if year is not None and target.year != year:
             raise RuntimeError(f"{sheet.title} 不支持写入 {target.year} 年，请选择对应年度模板。")
         if target > max(resolved_dates.values()) and last_date == max(resolved_dates.values()):
             if (target.month != last_date.month and any(
-                isinstance(cells[0].value, str) and re.search(r"\d+月|合计|汇总|小计", cells[0].value)
+                isinstance(cells[0].value, str) and _MONTH_SUMMARY_PATTERN.search(cells[0].value)
                 for cells in sheet.iter_rows(min_col=1, max_col=1)
             )):
                 raise RuntimeError(f"{sheet.title} 跨月接续涉及月份汇总，请先补齐对应月份模板。")
@@ -274,6 +301,11 @@ def find_date_row(sheet, target: date, *, extend: bool = False) -> int:
                 if session is not None:
                     session.record(cell)
             log(f"{sheet.title}：接续 {last_date + timedelta(days=1)} 至 {target} 的日期行。")
+            if use_cache:
+                for row in range(last_row + 1, final_row + 1):
+                    day = last_date + timedelta(days=row - last_row)
+                    index.resolved_dates[row] = day
+                    index.date_rows.setdefault(day, []).append(row)
             return final_row
     raise RuntimeError(f"{sheet.title} 未找到日期行：{target.isoformat()}")
 
@@ -302,6 +334,14 @@ class WorkbookWriteSession:
         self.source_fingerprint = None
         self.date_rows: dict[tuple[str, date], int] = {}
         self.expected_cells: dict[tuple[str, str], tuple[Any, str]] = {}
+        self._sheet_date_indexes: dict[Any, _SheetDateIndex] = {}
+
+    def date_index(self, sheet) -> _SheetDateIndex:
+        index = self._sheet_date_indexes.get(sheet)
+        if index is None:
+            index = _SheetDateIndex(sheet)
+            self._sheet_date_indexes[sheet] = index
+        return index
 
     def get_workbook(self):
         if self.workbook is None:

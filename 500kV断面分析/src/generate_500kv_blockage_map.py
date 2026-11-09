@@ -9,7 +9,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from src.analyze_500kv_section_gaps import analyze_section_gaps
+from src.analyze_500kv_section_gaps import analyze_section_gaps, topology_cache_scope
 from src.build_500kv_map_html import build_map_html
 from src.deduplicate_500kv_prices import process_workbook
 
@@ -67,27 +67,28 @@ def _run_pipeline(
 ) -> BlockageMapResult:
     if topology_path.suffix.lower() == '.json':
         return _run_editor_pipeline(topology_path, raw_price_path, output_dir, threshold, html_path)
-    dedupe_result = process_workbook(
-        raw_price_path,
-        processed_price_path,
-        topology_path=topology_path,
-    )
-    analysis_result = analyze_section_gaps(
-        topology_path=topology_path,
-        workbook_path=processed_price_path,
-        output_dir=output_dir,
-        threshold=threshold,
-        export_workbook=False,
-    )
-    build_map_html(
-        topology_path=topology_path,
-        original_price_path=raw_price_path,
-        processed_price_path=processed_price_path,
-        analysis_path=analysis_result.output_path,
-        output_path=html_path,
-        analysis_data=analysis_result.data,
-        threshold=threshold,
-    )
+    with topology_cache_scope():
+        dedupe_result = process_workbook(
+            raw_price_path,
+            processed_price_path,
+            topology_path=topology_path,
+        )
+        analysis_result = analyze_section_gaps(
+            topology_path=topology_path,
+            workbook_path=processed_price_path,
+            output_dir=output_dir,
+            threshold=threshold,
+            export_workbook=False,
+        )
+        build_map_html(
+            topology_path=topology_path,
+            original_price_path=raw_price_path,
+            processed_price_path=processed_price_path,
+            analysis_path=analysis_result.output_path,
+            output_path=html_path,
+            analysis_data=analysis_result.data,
+            threshold=threshold,
+        )
 
     return BlockageMapResult(
         html_path=html_path,

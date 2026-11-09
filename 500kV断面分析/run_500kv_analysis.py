@@ -9,6 +9,7 @@ MODULE_ROOT = Path(__file__).resolve().parent
 if str(MODULE_ROOT) not in sys.path:
     sys.path.insert(0, str(MODULE_ROOT))
 
+from src.analyze_500kv_section_gaps import with_topology_cache
 from src.generate_500kv_blockage_map import generate_blockage_map
 from toolbox_trade_batch import plan_batch_outputs
 
@@ -20,6 +21,7 @@ def result_html_name(source: Path) -> str:
     return f"{Path(source).stem}_500kV分析.html"
 
 
+@with_topology_cache
 def run_many(
     raw_price_paths: list[Path],
     output_root: Path,

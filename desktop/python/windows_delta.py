@@ -159,12 +159,14 @@ def install_version(root):
     return _version(value.get('version'))
 
 
-def create_patch(old, new, output):
+def create_patch(old, new, output, inventories=None):
     old, new, output = _io_path(old), _io_path(new), Path(output)
     base, target = install_version(old), install_version(new)
     if version_parts(base) >= version_parts(target):
         raise UpdateError('Windows 补丁目标必须高于基准版本')
     before, after = inventory(old), inventory(new)
+    if inventories is not None:
+        inventories['before'], inventories['after'] = before, after
     manifest = dict(format=FORMAT, platform=PLATFORM, base=base, target=target, before=before, after=after)
     raw = json.dumps(manifest, ensure_ascii=False, sort_keys=True).encode('utf-8')
     if len(raw) > MAX_MANIFEST:

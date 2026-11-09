@@ -162,7 +162,11 @@ def _domain_value(value):
     return value
 
 
-def _domain_sheets(workbook, names=None):
+def _domain_sheets(workbook, names=None, cache=None):
+    if cache is not None:
+        return {name: cache[name]
+                for name in (names if names is not None else workbook.sheetnames)
+                if name in cache}
     return {name: [[_domain_value(value) for value in row]
                    for row in workbook[name].iter_rows(values_only=True)]
             for name in (names if names is not None else workbook.sheetnames)
@@ -178,6 +182,7 @@ class ReportBuilder:
         self.hourly = {}
         self.offer_cards = {}
         self.compare_mode = "dayahead_vs_ml"
+        self._domain_sheet_cache = None
         self.companies = {
             "汕头": ["汕头#1机组", "汕头#2机组", "汕头#3机组"],
             "海门": list(HAIMEN_UNIT_NAMES),
@@ -194,8 +199,11 @@ class ReportBuilder:
         try:
             domain = None
             if backend_mode() != "python":
+                # 一次性物化并缓存全部工作表；native 未命中时各 _parse_*
+                # 从缓存取子集，避免对相同 sheet 重复 iter_rows。
+                self._domain_sheet_cache = _domain_sheets(self.wb)
                 domain = invoke_domain("trading", "report", {
-                    "sheets": _domain_sheets(self.wb), "companies": self.companies,
+                    "sheets": self._domain_sheet_cache, "companies": self.companies,
                 })
             if domain is None:
                 self._parse_summary()
@@ -232,7 +240,7 @@ class ReportBuilder:
 
     def _parse_summary(self):
         if backend_mode() != "python":
-            result = invoke_domain("trading", "report_summary", {"sheets": _domain_sheets(self.wb, ("日前", "新", "快报")), "available_sheets": self.wb.sheetnames})
+            result = invoke_domain("trading", "report_summary", {"sheets": _domain_sheets(self.wb, ("日前", "新", "快报"), self._domain_sheet_cache), "available_sheets": self.wb.sheetnames})
             if result is not None:
                 self.summary.update(result)
                 return
@@ -359,7 +367,7 @@ class ReportBuilder:
 
     def _parse_offer_cards(self):
         if backend_mode() != "python":
-            result = invoke_domain("trading", "report_offers", {"rows": _domain_sheets(self.wb, ("运行补偿",))["运行补偿"]})
+            result = invoke_domain("trading", "report_offers", {"rows": _domain_sheets(self.wb, ("运行补偿",), self._domain_sheet_cache)["运行补偿"]})
             if result is not None:
                 return result
         ws_comp = self.wb["运行补偿"]
@@ -407,7 +415,7 @@ class ReportBuilder:
 
     def _parse_blocks(self, sheet_name, company_name):
         if backend_mode() != "python":
-            result = invoke_domain("trading", "report_blocks", {"rows": _domain_sheets(self.wb, (sheet_name,))[sheet_name], "company": company_name})
+            result = invoke_domain("trading", "report_blocks", {"rows": _domain_sheets(self.wb, (sheet_name,), self._domain_sheet_cache)[sheet_name], "company": company_name})
             if result is not None:
                 return {unit: result["hourly"][unit] for unit in result["unit_order"]}
         ws = self.wb[sheet_name]
@@ -500,7 +508,7 @@ class ReportBuilder:
 
     def _parse_renewables(self):
         if backend_mode() != "python":
-            result = invoke_domain("trading", "report_renewables", {"sheets": _domain_sheets(self.wb, RENEWABLE_UNITS)})
+            result = invoke_domain("trading", "report_renewables", {"sheets": _domain_sheets(self.wb, RENEWABLE_UNITS, self._domain_sheet_cache)})
             if result is not None:
                 self.hourly.update({unit: result["hourly"][unit] for unit in RENEWABLE_UNITS})
                 self.summary.update(result["summary"])

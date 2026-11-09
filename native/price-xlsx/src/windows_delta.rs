@@ -75,23 +75,46 @@ fn walk(root:&Path,path:&Path,actual:&mut BTreeMap<String,Entry>)->Result<(),Str
     if info.is_dir(){for child in fs::read_dir(path).map_err(|e|e.to_string())?{walk(root,&child.map_err(|e|e.to_string())?.path(),actual)?;}}
     Ok(())
 }
-fn verify(root:&Path,expected:&BTreeMap<String,Entry>)->Result<(),String> {
-    fn inspect(path:&Path,count:&mut usize)->Result<(),String>{
+fn collect(root:&Path)->Result<Vec<(PathBuf,fs::Metadata)>,String> {
+    fn visit(path:&Path,out:&mut Vec<(PathBuf,fs::Metadata)>,count:&mut usize)->Result<(),String>{
         *count+=1;if *count>100_000{return Err("Windows 程序目录文件过多".into());}
-        if plain(path)?.is_dir(){for child in fs::read_dir(path).map_err(|e|e.to_string())?{
+        let info=plain(path)?;
+        let is_dir=info.is_dir();
+        out.push((path.to_path_buf(),info));
+        if is_dir{for child in fs::read_dir(path).map_err(|e|e.to_string())?{
             let child=child.map_err(|e|e.to_string())?;
             if !valid_name(&child.file_name().to_string_lossy()){return Err("Windows 程序目录包含不安全文件名".into());}
-            inspect(&child.path(),count)?;
+            visit(&child.path(),out,count)?;
         }}Ok(())
     }
-    inspect(root,&mut 0)?;validate(expected)?;let mut actual=BTreeMap::new();
+    let mut out=Vec::new();visit(root,&mut out,&mut 0)?;Ok(out)
+}
+fn entries(root:&Path,tree:&[(PathBuf,fs::Metadata)],managed_only:bool)->Result<BTreeMap<String,Entry>,String> {
+    let mut result=BTreeMap::new();
+    for (path,_collected) in tree {
+        let name=match path.strip_prefix(root){Ok(relative)=>relative.to_string_lossy().replace('\\',"/"),Err(_)=>continue};
+        if name.is_empty(){continue;}
+        let top=name.split('/').next().unwrap_or("");
+        let belongs=if managed_only{matches!(top,"electricity-toolbox.exe"|"uninstall.exe"|"payload")}
+            else{!managed(&top.to_lowercase())};
+        if !belongs{continue;}
+        if !valid_name(&name)||result.len()>=100_000{return Err("Windows 程序目录无效".into());}
+        // 与原 walk 一致：目录树只遍历一次，但每个路径仍重新 symlink_metadata
+        // 复检，保留收集之后被替换成链接/特殊文件时的拒绝能力。
+        let info=plain(path)?;
+        if info.is_file()&&info.len()>2*1024u64.pow(3){return Err("Windows 程序文件过大".into());}
+        let item=if info.is_dir(){Entry::Dir}else{Entry::File{size:info.len(),sha256:hash(path)?}};
+        result.insert(name,item);
+    }
+    Ok(result)
+}
+fn verify(root:&Path,expected:&BTreeMap<String,Entry>)->Result<Vec<(PathBuf,fs::Metadata)>,String> {
     // WebView2Loader.dll is not managed: a real installation contains it while a silent
     // baseline install (/S /UPDATE) does not, so it must never decide the comparison.
-    for name in ["electricity-toolbox.exe","uninstall.exe","payload"] {
-        let path=root.join(name);if path.try_exists().map_err(|e|e.to_string())?{walk(root,&path,&mut actual)?;}
-    }
+    let tree=collect(root)?;validate(expected)?;
+    let actual=entries(root,&tree,true)?;
     if &actual!=expected{return Err("Windows 增量程序文件校验失败，请改用完整安装包".into());}
-    Ok(())
+    Ok(tree)
 }
 fn version(root:&Path)->Result<String,String> {
     let value:serde_json::Value=serde_json::from_slice(&fs::read(root.join("payload/manifest.json")).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
@@ -110,8 +133,9 @@ pub fn verify_prepared(metadata:&Path,root:&Path,stage:&Path,target:&str)->Resul
     if prepared.format!=1 || prepared.platform!="windows-x64" || prepared.target!=target || prepared.base!=version(root)? || prepared.target!=version(stage)? {
         return Err("Windows 增量版本或平台不匹配".into());
     }
-    verify(root,&prepared.before)?;verify(stage,&prepared.after)?;
-    if extras(root)?!=extras(stage)?{return Err("本地附加文件在准备更新后发生变化，已保留旧程序，请重试".into());}Ok(())
+    let root_tree=verify(root,&prepared.before)?;
+    let stage_tree=verify(stage,&prepared.after)?;
+    if entries(root,&root_tree,false)?!=entries(stage,&stage_tree,false)?{return Err("本地附加文件在准备更新后发生变化，已保留旧程序，请重试".into());}Ok(())
 }
 fn extras(root:&Path)->Result<BTreeMap<String,Entry>,String> {
     let mut entries=BTreeMap::new();

@@ -34,11 +34,19 @@ class TextCandidate:
     score: float
 
 
+_WHITESPACE_RE = re.compile(r"\s+")
+_KV_TRAIL_RE = re.compile(r"500\s*kV.*$", re.IGNORECASE)
+_NON_ALNUM_RE = re.compile(r"[^\u4e00-\u9fffA-Za-z0-9]")
+_SOLAR_SPLIT_RE = re.compile(r"(.{2,})光伏(?:电站|电)?")
+_BUS_SUFFIX_RE = re.compile(r"([\u4e00-\u9fff]{2,8})[ABY]{1,2}")
+_BUS_GLUE_RE = re.compile(r"^([\u4e00-\u9fff]{2,8})[ABY](?:F|D|G|H|N|M|P|Z|\d).*$")
+
+
 def clean_text(text: object) -> str:
     value = unicodedata.normalize("NFKC", str(text or ""))
-    value = re.sub(r"\s+", "", value)
-    value = re.sub(r"500\s*kV.*$", "", value, flags=re.IGNORECASE)
-    return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", value)
+    value = _WHITESPACE_RE.sub("", value)
+    value = _KV_TRAIL_RE.sub("", value)
+    return _NON_ALNUM_RE.sub("", value)
 
 
 def name_variants(text: object, *, ocr: bool = False) -> set[str]:
@@ -46,7 +54,7 @@ def name_variants(text: object, *, ocr: bool = False) -> set[str]:
     variants = {value}
     # Workbook normalization can leave “光伏电” while a wrapped map label
     # ends its first line at “光伏”. Retain the facility type in the alias.
-    solar = re.fullmatch(r"(.{2,})光伏(?:电站|电)?", value)
+    solar = _SOLAR_SPLIT_RE.fullmatch(value)
     if solar:
         variants.add(solar.group(1) + "光伏")
     for suffix in FACILITY_SUFFIXES:
@@ -62,12 +70,12 @@ def name_variants(text: object, *, ocr: bool = False) -> set[str]:
     if ocr and len(value) >= 3 and value[-1:] in {"A", "B", "Y"}:
         variants.add(value[:-1])
     if ocr:
-        buses = re.fullmatch(r"([\u4e00-\u9fff]{2,8})[ABY]{1,2}", value)
+        buses = _BUS_SUFFIX_RE.fullmatch(value)
         if buses:
             variants.add(buses.group(1))
     if ocr:
         # OCR 偶尔会把母线字母后的线路字符黏到站名上。
-        match = re.match(r"^([\u4e00-\u9fff]{2,8})[ABY](?:F|D|G|H|N|M|P|Z|\d).*$", value)
+        match = _BUS_GLUE_RE.match(value)
         if match:
             variants.add(match.group(1))
     expanded = set(variants)
@@ -106,9 +114,12 @@ def _record_texts(record: dict[str, object]) -> list[tuple[str, str]]:
     return texts
 
 
-def candidate_score(node_name: str, text: str, source: str, category: str) -> float:
-    node_variants = name_variants(node_name)
-    text_variants = name_variants(text, ocr=True)
+def candidate_score(node_name: str, text: str, source: str, category: str,
+                    node_variants=None, text_variants=None) -> float:
+    if node_variants is None:
+        node_variants = name_variants(node_name)
+    if text_variants is None:
+        text_variants = name_variants(text, ocr=True)
     if node_variants & text_variants:
         base = {"primary": 1.0, "ppocrv6": 0.96, "alternative": 0.92}[source]
         return base if category == "node" else base - 0.12
@@ -131,12 +142,18 @@ def candidate_score(node_name: str, text: str, source: str, category: str) -> fl
 
 def match_text_candidates(node_name: str, records: list[dict[str, object]]) -> list[TextCandidate]:
     best_by_record: dict[str, TextCandidate] = {}
+    node_variants = name_variants(node_name)
+    text_variant_cache: dict[str, set[str]] = {}
     for record in records:
         if record.get("status") in {"ignored", "omission"}:
             continue
         category = str(record.get("category", ""))
         for text, source in _record_texts(record):
-            score = candidate_score(node_name, text, source, category)
+            if text not in text_variant_cache:
+                text_variant_cache[text] = name_variants(text, ocr=True)
+            score = candidate_score(node_name, text, source, category,
+                                    node_variants=node_variants,
+                                    text_variants=text_variant_cache[text])
             if score < 0.67:
                 continue
             record_id = str(record.get("id", ""))

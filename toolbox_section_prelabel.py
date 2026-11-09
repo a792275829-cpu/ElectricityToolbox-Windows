@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import lru_cache
 from io import BytesIO
 import json
 import math
@@ -29,15 +30,22 @@ def tiles(width, height, size=1500, overlap=300):
 
 def deduplicate(records):
     result = []
+    by_text = {}
     for r in sorted(records, key=lambda r: (not r.get('pre_recrop', False), -r['confidence'])):
         b = r['box']; x, y = b['x']+b['width']/2, b['y']+b['height']/2
-        if any(r['text'] == o['text'] and math.hypot(x-o['box']['x']-o['box']['width']/2, y-o['box']['y']-o['box']['height']/2) < 30 for o in result):
-            existing = next(o for o in result if r['text'] == o['text'] and math.hypot(x-o['box']['x']-o['box']['width']/2, y-o['box']['y']-o['box']['height']/2) < 30)
+        bucket = by_text.setdefault(r['text'], [])
+        existing = None
+        for o in bucket:
+            if math.hypot(x-o['box']['x']-o['box']['width']/2, y-o['box']['y']-o['box']['height']/2) < 30:
+                existing = o
+                break
+        if existing is not None:
             existing.setdefault('views', []).extend(v for v in r.get('views', []) if v not in existing.get('views', []))
             existing.setdefault('view_disagreements', []).extend(d for d in r.get('view_disagreements', []) if d not in existing.get('view_disagreements', []))
             existing['ocr_conflict'] = existing.get('ocr_conflict', False) or r.get('ocr_conflict', False)
             continue
         result.append(r)
+        bucket.append(r)
     return result
 
 
@@ -222,9 +230,21 @@ def external_recognize(image, station_names, enhanced, base_records=None, edge_o
         return json.loads((root/'result.json').read_text())
 
 
+@lru_cache(maxsize=32)
+def _variant_index(names):
+    index = {}
+    for name in names:
+        for variant in name_variants(name):
+            index.setdefault(variant, set()).add(name)
+    return index
+
+
+def _hits_from_index(index, text):
+    return set().union(*(index.get(v, set()) for v in name_variants(text, ocr=True)))
+
+
 def vocabulary_hits(text, station_names):
-    variants = name_variants(text, ocr=True)
-    return {name for name in station_names if variants & name_variants(name)}
+    return _hits_from_index(_variant_index(tuple(station_names)), text)
 
 
 def retry_difficult(image, records, station_names, read_crop, limit=120):
@@ -345,12 +365,9 @@ def merged_label_proposals(records, station_names, *, min_confidence=.9):
     its text before it can participate in name matching or circle association.
     """
     proposals = []
-    index = {}
-    for name in station_names:
-        for variant in name_variants(name):
-            index.setdefault(variant, set()).add(name)
+    index = _variant_index(tuple(station_names))
     def hits(value):
-        return set().union(*(index.get(v, set()) for v in name_variants(value, ocr=True)))
+        return _hits_from_index(index, value)
     for record in records:
         raw = record['text']
         if record.get('confidence', 0) < min_confidence or record.get('status') in ('ignored', 'omission'):
@@ -405,12 +422,9 @@ def recover_merged_labels(image, records, station_names, read_crop):
 
 def joined_label_proposals(records, station_names):
     """Adjacent fragments or a facility suffix propose pixels, never corrected text."""
-    index = {}
-    for name in station_names:
-        for variant in name_variants(name):
-            index.setdefault(variant, set()).add(name)
+    index = _variant_index(tuple(station_names))
     def hits(text):
-        return set().union(*(index.get(v, set()) for v in name_variants(text, ocr=True)))
+        return _hits_from_index(index, text)
     eligible = [r for r in records if r.get('confidence', 0) >= .3
                 and r.get('status') not in ('ignored', 'omission') and not r.get('ocr_conflict')
                 and re.fullmatch(r'[\u4e00-\u9fff]{1,8}[ABY]?', r['text'])]

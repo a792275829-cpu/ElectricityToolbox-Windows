@@ -43,6 +43,11 @@ ALIASES = {
     "太平岭": {"太平"},
 }
 
+_WS_RE = re.compile(r"\s+")
+_KV_SUFFIX_RE = re.compile(r"500\s*kV.*$", re.IGNORECASE)
+_NON_ALNUM_RE = re.compile(r"[^\u4e00-\u9fffA-Za-z0-9]")
+_OCR_BUS_VARIANT_RE = re.compile(r"^([\u4e00-\u9fff]{2,8})[ABY](?:F|D|G|H|N|M|P|Z|\d).*$")
+
 
 @dataclass(frozen=True)
 class TextCandidate:
@@ -88,9 +93,9 @@ def parse_topology_edges_light(path: Path) -> tuple[list[tuple[str, str, str]], 
 
 def clean_text(text: object) -> str:
     value = unicodedata.normalize("NFKC", str(text or ""))
-    value = re.sub(r"\s+", "", value)
-    value = re.sub(r"500\s*kV.*$", "", value, flags=re.IGNORECASE)
-    return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", value)
+    value = _WS_RE.sub("", value)
+    value = _KV_SUFFIX_RE.sub("", value)
+    return _NON_ALNUM_RE.sub("", value)
 
 
 def name_variants(text: object, *, ocr: bool = False) -> set[str]:
@@ -110,7 +115,7 @@ def name_variants(text: object, *, ocr: bool = False) -> set[str]:
         variants.add(value[:-1])
     if ocr:
         # OCR 偶尔会把母线字母后的线路字符黏到站名上。
-        match = re.match(r"^([\u4e00-\u9fff]{2,8})[ABY](?:F|D|G|H|N|M|P|Z|\d).*$", value)
+        match = _OCR_BUS_VARIANT_RE.match(value)
         if match:
             variants.add(match.group(1))
     expanded = set(variants)
@@ -123,6 +128,9 @@ def name_variants(text: object, *, ocr: bool = False) -> set[str]:
 
 
 def levenshtein(left: str, right: str) -> int:
+    # The caller only distinguishes distance == 1; any larger value is equivalent.
+    if abs(len(left) - len(right)) > 1:
+        return 2
     previous = list(range(len(right) + 1))
     for row, char_left in enumerate(left, 1):
         current = [row]
@@ -134,6 +142,10 @@ def levenshtein(left: str, right: str) -> int:
                     previous[column - 1] + (char_left != char_right),
                 )
             )
+        # Along each DP diagonal values never decrease, so once a whole row is
+        # above 1 the final distance can no longer be 0 or 1.
+        if min(current) > 1:
+            return 2
         previous = current
     return previous[-1]
 
@@ -149,9 +161,19 @@ def _record_texts(record: dict[str, object]) -> list[tuple[str, str]]:
     return texts
 
 
-def candidate_score(node_name: str, text: str, source: str, category: str) -> float:
-    node_variants = name_variants(node_name)
-    text_variants = name_variants(text, ocr=True)
+def candidate_score(
+    node_name: str,
+    text: str,
+    source: str,
+    category: str,
+    *,
+    node_variants: set[str] | None = None,
+    text_variants: set[str] | None = None,
+) -> float:
+    if node_variants is None:
+        node_variants = name_variants(node_name)
+    if text_variants is None:
+        text_variants = name_variants(text, ocr=True)
     if node_variants & text_variants:
         base = {"primary": 1.0, "ppocrv6": 0.96, "alternative": 0.92}[source]
         return base if category == "node" else base - 0.12
@@ -173,13 +195,22 @@ def candidate_score(node_name: str, text: str, source: str, category: str) -> fl
 
 
 def match_text_candidates(node_name: str, records: list[dict[str, object]]) -> list[TextCandidate]:
+    node_variants = name_variants(node_name)
+    text_variants_cache: dict[str, set[str]] = {}
     best_by_record: dict[str, TextCandidate] = {}
     for record in records:
         if record.get("status") in {"ignored", "omission"}:
             continue
         category = str(record.get("category", ""))
         for text, source in _record_texts(record):
-            score = candidate_score(node_name, text, source, category)
+            text_variants = text_variants_cache.get(text)
+            if text_variants is None:
+                text_variants = name_variants(text, ocr=True)
+                text_variants_cache[text] = text_variants
+            score = candidate_score(
+                node_name, text, source, category,
+                node_variants=node_variants, text_variants=text_variants,
+            )
             if score < 0.67:
                 continue
             record_id = str(record.get("id", ""))

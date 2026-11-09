@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import sys
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -331,3 +332,23 @@ def diagnose_environment(paths: ToolPaths) -> DiagnosticReport:
     checks.append(_rust_backend_check())
     checks.append(_browser_check())
     return DiagnosticReport(tuple(checks))
+
+
+# 运行期不变的环境探测结果按工作目录缓存：重复构造诊断面板时不再重复做
+# 17 个路径检查、磁盘/浏览器缓存与 nvm/fnm 目录扫描。用户主动重新检查时
+# 用 force=True 强制重算；检查项相同，检查时间由调用方组装报告时取当前时刻。
+_ENVIRONMENT_CHECKS: dict[Path, tuple[DiagnosticCheck, ...]] = {}
+_ENVIRONMENT_LOCK = threading.Lock()
+
+
+def cached_environment_checks(paths: ToolPaths, *, force: bool = False) -> tuple[DiagnosticCheck, ...]:
+    """返回一次环境探测的检查项；命中缓存时跳过重复的文件系统扫描。"""
+    key = Path(paths.workspace)
+    with _ENVIRONMENT_LOCK:
+        if not force:
+            cached = _ENVIRONMENT_CHECKS.get(key)
+            if cached is not None:
+                return cached
+        checks = diagnose_environment(paths).checks
+        _ENVIRONMENT_CHECKS[key] = checks
+        return checks

@@ -76,11 +76,15 @@ class DashboardPage(ttk.Frame):
             self.after_cancel(self._after_id)
             self._after_id = None
         snapshots = self.registry.snapshots()
-        counts = {
-            "运行中": sum(item.state in {TaskState.CREATED, TaskState.RUNNING, TaskState.CANCELLING} for item in snapshots),
-            "已完成": sum(item.state is TaskState.SUCCEEDED for item in snapshots),
-            "失败": sum(item.state is TaskState.FAILED for item in snapshots),
-        }
+        counts = {"运行中": 0, "已完成": 0, "失败": 0}
+        for item in snapshots:
+            state = item.state
+            if state in {TaskState.CREATED, TaskState.RUNNING, TaskState.CANCELLING}:
+                counts["运行中"] += 1
+            elif state is TaskState.SUCCEEDED:
+                counts["已完成"] += 1
+            elif state is TaskState.FAILED:
+                counts["失败"] += 1
         for label, count in counts.items():
             value = str(count)
             if self.metric_vars[label].get() != value:

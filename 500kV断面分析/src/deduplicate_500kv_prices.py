@@ -154,26 +154,17 @@ def process_workbook(
         topology_sheet_title: str | None = None
         topology_time_headers: list[str] | None = None
 
-        for sheet in source.worksheets:
-            rows = sheet.iter_rows(values_only=True)
-            try:
-                header = next(rows)
-            except StopIteration:
-                continue
-
-            column_map = _column_map(header)
-            if column_map is None:
-                continue
-
+        # Python 回退直接复用首遍已物化的 sheets（rows 已过滤空行、并归一为
+        # [node, data_item, *time_values]），避免再用 iter_rows 全表重读一遍。
+        for sheet in sheets:
+            sheet_title = sheet["name"]
+            time_headers = sheet["headers"]
             processed_sheets += 1
             output_rows = []
-            for row in rows:
-                if _is_empty_row(row):
-                    continue
-
-                node_name = _cell(row, column_map["node"])
-                data_item = _cell(row, column_map["data_item"])
-                price_values = tuple(_cell(row, index) for index in column_map["time_columns"])
+            for row in sheet["rows"]:
+                node_name = row[0]
+                data_item = row[1]
+                price_values = tuple(row[2:])
 
                 topology_node = (
                     match_node(node_name)
@@ -185,10 +176,10 @@ def process_workbook(
                         removed_rows += 1
                         continue
 
-                    current_time_headers = list(column_map["time_headers"])
+                    current_time_headers = list(time_headers)
                     if topology_time_headers is None:
                         topology_time_headers = current_time_headers
-                        topology_sheet_title = sheet.title
+                        topology_sheet_title = sheet_title
                     elif topology_time_headers != current_time_headers:
                         raise ValueError("包含拓扑节点的工作表分时时间列不一致，无法合并")
 
@@ -230,8 +221,8 @@ def process_workbook(
                 kept_rows += 1
 
             if output_rows:
-                output_sheet = output.create_sheet(_safe_sheet_title(sheet.title, output.sheetnames))
-                output_sheet.append(["节点名称", "数据项", *column_map["time_headers"]])
+                output_sheet = output.create_sheet(_safe_sheet_title(sheet_title, output.sheetnames))
+                output_sheet.append(["节点名称", "数据项", *time_headers])
                 for output_row in output_rows:
                     output_sheet.append(output_row)
 

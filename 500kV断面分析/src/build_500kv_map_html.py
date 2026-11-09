@@ -18,6 +18,7 @@ from src.analyze_500kv_section_gaps import (
     match_price_rows,
     parse_topology_edges,
     read_price_workbook,
+    _topology_text,
 )
 from src.classify_500kv_nodes import topology_inventory
 from src.node_city_catalog import NODE_CITY, city_pair_label, price_hierarchy
@@ -232,11 +233,19 @@ def build_map_html(
         if node_positions_path is not None
         else topology_path.parent / "data" / "500kv_node_positions.json"
     )
+    node_cities = {}
     if discovered_positions_path.exists():
+        positions_payload = json.loads(discovered_positions_path.read_text(encoding='utf-8'))
         coordinates, coordinate_metadata = _build_diagram_coordinates(
             topology_nodes,
             discovered_positions_path,
+            payload=positions_payload,
         )
+        node_cities = {
+            n['name']: n['city']
+            for n in positions_payload.get('nodes', [])
+            if n.get('city')
+        }
     else:
         coordinates = _build_coordinates(topology_nodes, node_regions)
         coordinate_metadata = {
@@ -244,10 +253,6 @@ def build_map_html(
             "coordinate_source": "公开站址与片区相对方位",
             "node_positions_path": "",
         }
-    node_cities = {}
-    if discovered_positions_path.exists():
-        records = json.loads(discovered_positions_path.read_text(encoding='utf-8')).get('nodes', [])
-        node_cities = {n['name']: n['city'] for n in records if n.get('city')}
     severity_by_edge = _build_edge_payloads(
         edges,
         edge_summary,
@@ -332,7 +337,7 @@ def _read_sheet_dicts(path: Path, sheet_name: str) -> list[dict[str, object]]:
 
 
 def _parse_node_regions(topology_path: Path) -> dict[str, str]:
-    text = Path(topology_path).read_text(encoding="utf-8")
+    text = _topology_text(topology_path)
     lines = text.splitlines()
     in_section = False
     current_region = ""
@@ -389,8 +394,11 @@ def _build_coordinates(nodes: list[str], node_regions: dict[str, str]) -> dict[s
 def _build_diagram_coordinates(
     nodes: list[str],
     positions_path: Path,
+    *,
+    payload: dict | None = None,
 ) -> tuple[dict[str, dict[str, object]], dict[str, object]]:
-    payload = json.loads(Path(positions_path).read_text(encoding="utf-8"))
+    if payload is None:
+        payload = json.loads(Path(positions_path).read_text(encoding="utf-8"))
     image = payload.get("image", {})
     image_width = float(image.get("width", 0))
     image_height = float(image.get("height", 0))
@@ -670,6 +678,7 @@ def _build_flow_directions(
                     "windows": _flow_windows(
                         [str(row["time"]) for row in direction_items],
                         time_headers,
+                        time_index,
                     ),
                     "max_abs_diff": max(
                         float(row.get("abs_diff", 0) or 0) for row in direction_items
@@ -688,8 +697,11 @@ def _build_flow_directions(
     return result
 
 
-def _flow_windows(times: list[str], time_headers: list[str]) -> str:
-    time_index = {time: index for index, time in enumerate(time_headers)}
+def _flow_windows(
+    times: list[str], time_headers: list[str], time_index: dict[str, int] | None = None
+) -> str:
+    if time_index is None:
+        time_index = {time: index for index, time in enumerate(time_headers)}
     indexes = sorted({time_index[time] for time in times})
     windows = []
     start = previous = indexes[0]

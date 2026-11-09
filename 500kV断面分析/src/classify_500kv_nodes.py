@@ -13,7 +13,13 @@ from openpyxl import load_workbook
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.analyze_500kv_section_gaps import normalize_price_node_name, parse_topology_edges, _native_invoke
+from src.analyze_500kv_section_gaps import (
+    normalize_price_node_name,
+    parse_topology_edges,
+    _native_invoke,
+    _topology_native,
+    _topology_text,
+)
 from src.node_city_catalog import REGIONS, USER_CONFIRMED_CITIES
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
@@ -42,14 +48,15 @@ def labelled_rows(sheet, required: tuple[str, ...]):
 
 
 def topology_inventory(path: Path):
-    native = _native_invoke("sections", "topology", {"text": path.read_text(encoding="utf-8")})
+    text = _topology_text(path)
+    native = _topology_native(text)
     if native is not None:
         return set(native["nodes"]), set(native["connected"])
     edges, _ = parse_topology_edges(path)
     connected = {name for edge in edges for name in (edge.a, edge.b)}
     declared = set()
     active = False
-    for raw in path.read_text(encoding="utf-8").splitlines():
+    for raw in text.splitlines():
         line = raw.strip()
         if re.match(r"^##\s+1\.", line):
             active = True

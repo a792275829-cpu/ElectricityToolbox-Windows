@@ -449,6 +449,42 @@ def _iter_dated_rows(sheet, *, epoch: datetime, max_column: int = 1):
         yield row, cells, parsed
 
 
+class _SheetScan:
+    """One _iter_dated_rows pass cached for all plan_* helpers of a sheet."""
+
+    def __init__(self, sheet, *, epoch: datetime):
+        self.dated_rows: dict[date, int] = {}
+        self.content_rows: set[int] = set()
+        self.parsed_by_row: dict[int, date | None] = {}
+        self.values_by_row: dict[int, tuple] = {}
+        self.formats_by_row: dict[int, tuple[str, ...]] = {}
+        self.a_formats_by_row: dict[int, str] = {}
+        inherited_a = "General"
+        inherited_formats = ["General"] * 24
+        last_row = 1
+        for row, cells, parsed in _iter_dated_rows(
+            sheet, epoch=epoch, max_column=max(sheet.max_column or 1, 25)
+        ):
+            last_row = row
+            self.parsed_by_row[row] = parsed
+            if parsed is not None:
+                self.dated_rows[parsed] = row
+            if any(cell.value not in (None, "") for cell in cells):
+                self.content_rows.add(row)
+            a_cell = cells[0]
+            if getattr(a_cell, "has_style", False):
+                inherited_a = str(getattr(a_cell, "number_format", None) or "General")
+            self.a_formats_by_row[row] = inherited_a
+            for index, cell in enumerate(cells[1:25]):
+                if getattr(cell, "has_style", False):
+                    inherited_formats[index] = str(cell.number_format or "General")
+            self.values_by_row[row] = tuple(cell.value for cell in cells[1:25])
+            self.formats_by_row[row] = tuple(inherited_formats)
+        self.last_row = last_row
+        self.final_a_format = inherited_a
+        self.final_formats = tuple(inherited_formats)
+
+
 def date_row_index(sheet, *, epoch: datetime) -> dict[date, int]:
     return {parsed: row for row, _, parsed in _iter_dated_rows(sheet, epoch=epoch)
             if parsed is not None}
@@ -470,11 +506,18 @@ def effective_number_format(sheet, row: int, column: int) -> str:
     return effective_number_formats(sheet, (row,), column)[row]
 
 
-def effective_number_formats(sheet, rows: Iterable[int], column: int) -> dict[int, str]:
+def effective_number_formats(sheet, rows: Iterable[int], column: int, *, scan: _SheetScan | None = None) -> dict[int, str]:
     """Resolve inherited formats in one forward scan, including styled blanks."""
     requested = set(rows)
     result = {row: "General" for row in requested}
     if not requested or max(requested) < 2:
+        return result
+    if scan is not None and column == 1:
+        for row in requested:
+            if row in scan.a_formats_by_row:
+                result[row] = scan.a_formats_by_row[row]
+            elif row > scan.last_row:
+                result[row] = scan.final_a_format
         return result
     inherited = "General"
     last_row = 1
@@ -492,18 +535,23 @@ def effective_number_formats(sheet, rows: Iterable[int], column: int) -> dict[in
     return result
 
 
-def plan_date_extensions(sheet, prices: dict[date, tuple[float, ...]], *, epoch) -> dict[int, date]:
+def plan_date_extensions(sheet, prices: dict[date, tuple[float, ...]], *, epoch,
+                         scan: _SheetScan | None = None) -> dict[int, date]:
     if not prices:
         return {}
-    dated_rows = {}
-    content_rows = set()
-    for row, cells, parsed in _iter_dated_rows(
-        sheet, epoch=epoch, max_column=max(sheet.max_column or 1, 25)
-    ):
-        if parsed is not None:
-            dated_rows[parsed] = row
-        if any(cell.value not in (None, "") for cell in cells):
-            content_rows.add(row)
+    if scan is not None:
+        dated_rows = scan.dated_rows
+        content_rows = scan.content_rows
+    else:
+        dated_rows = {}
+        content_rows = set()
+        for row, cells, parsed in _iter_dated_rows(
+            sheet, epoch=epoch, max_column=max(sheet.max_column or 1, 25)
+        ):
+            if parsed is not None:
+                dated_rows[parsed] = row
+            if any(cell.value not in (None, "") for cell in cells):
+                content_rows.add(row)
     if not dated_rows:
         raise RuntimeError(f"{sheet.title} 没有可接续的日期行。")
     last_date = max(dated_rows)
@@ -528,6 +576,7 @@ def plan_price_sheet(
     *,
     overwrite: bool,
     date_extensions: dict[int, date] | None = None,
+    scan: _SheetScan | None = None,
 ) -> tuple[
     list[CellExpectation],
     list[date],
@@ -538,21 +587,31 @@ def plan_price_sheet(
         raise RuntimeError(f"Excel 中未找到工作表：{sheet_name}")
     sheet = workbook[sheet_name]
     if not prices:
-        date_row_index(sheet, epoch=workbook.epoch)
+        if scan is None:
+            date_row_index(sheet, epoch=workbook.epoch)
         return [], [], [], {}
     snapshots = {}
-    inherited_formats = ["General"] * 24
     date_extensions = date_extensions or {}
-    for row, cells, parsed in _iter_dated_rows(sheet, epoch=workbook.epoch, max_column=25):
-        for index, cell in enumerate(cells[1:]):
-            if getattr(cell, "has_style", False):
-                inherited_formats[index] = str(cell.number_format or "General")
-        parsed = date_extensions.get(row, parsed)
-        if parsed in prices:
-            snapshots[parsed] = (row, [cell.value for cell in cells[1:]], tuple(inherited_formats))
+    if scan is not None:
+        for row, parsed in scan.parsed_by_row.items():
+            effective_date = date_extensions.get(row, parsed)
+            if effective_date in prices:
+                snapshots[effective_date] = (row, list(scan.values_by_row[row]),
+                                             scan.formats_by_row[row])
+        final_formats = scan.final_formats
+    else:
+        inherited_formats = ["General"] * 24
+        for row, cells, parsed in _iter_dated_rows(sheet, epoch=workbook.epoch, max_column=25):
+            for index, cell in enumerate(cells[1:]):
+                if getattr(cell, "has_style", False):
+                    inherited_formats[index] = str(cell.number_format or "General")
+            parsed = date_extensions.get(row, parsed)
+            if parsed in prices:
+                snapshots[parsed] = (row, [cell.value for cell in cells[1:]], tuple(inherited_formats))
+        final_formats = tuple(inherited_formats)
     for row, day in date_extensions.items():
         if day in prices and day not in snapshots:
-            snapshots[day] = (row, [None] * 24, tuple(inherited_formats))
+            snapshots[day] = (row, [None] * 24, final_formats)
     expectations: list[CellExpectation] = []
     updated: list[date] = []
     skipped: list[date] = []
@@ -622,26 +681,65 @@ def _column_name(number: int) -> str:
     return chr(ord("A") + number - 1)
 
 
+_CELL_INDEX_PATTERN = re.compile(
+    r'<c\b(?=[^>]*\br="([A-Z]+)(\d+)")[^>]*?(?:/>|>.*?</c>)',
+    flags=re.DOTALL,
+)
+_STYLE_ATTR_PATTERN = re.compile(r'\bs="([^"]+)"')
+_CELL_PATTERN_CACHE: dict[str, re.Pattern[str]] = {}
+_NEAREST_PATTERN_CACHE: dict[str, re.Pattern[str]] = {}
+
+
 def _cell_pattern(cell_ref: str) -> re.Pattern[str]:
-    escaped = re.escape(cell_ref)
-    return re.compile(
-        rf'<c\b(?=[^>]*\br="{escaped}")[^>]*?(?:/>|>.*?</c>)',
-        flags=re.DOTALL,
-    )
+    pattern = _CELL_PATTERN_CACHE.get(cell_ref)
+    if pattern is None:
+        escaped = re.escape(cell_ref)
+        pattern = re.compile(
+            rf'<c\b(?=[^>]*\br="{escaped}")[^>]*?(?:/>|>.*?</c>)',
+            flags=re.DOTALL,
+        )
+        _CELL_PATTERN_CACHE[cell_ref] = pattern
+    return pattern
 
 
 def _style_from_cell_xml(cell_xml: str) -> str | None:
-    match = re.search(r'\bs="([^"]+)"', cell_xml)
+    match = _STYLE_ATTR_PATTERN.search(cell_xml)
     return match.group(1) if match else None
 
 
-def _nearest_prior_style(xml_text: str, column: str, row_number: int) -> str | None:
-    pattern = re.compile(
-        rf'<c\b(?=[^>]*\br="{re.escape(column)}(\d+)")[^>]*?(?:/>|>.*?</c>)',
-        flags=re.DOTALL,
-    )
+def _build_cell_index(xml_text: str) -> dict[str, dict[int, tuple]]:
+    """One finditer over the sheet: column -> row -> (style, start, end, cell_xml)."""
+    index: dict[str, dict[int, tuple]] = {}
+    for match in _CELL_INDEX_PATTERN.finditer(xml_text):
+        column = match.group(1)
+        row = int(match.group(2))
+        cell_xml = match.group(0)
+        style_match = _STYLE_ATTR_PATTERN.search(cell_xml)
+        style = style_match.group(1) if style_match else None
+        index.setdefault(column, {})[row] = (style, match.start(), match.end(), cell_xml)
+    return index
+
+
+def _nearest_prior_style(xml_text: str, column: str, row_number: int, *,
+                         cell_index: dict[str, dict[int, tuple]] | None = None) -> str | None:
     best_row = -1
     best_style: str | None = None
+    if cell_index is not None:
+        for candidate_row, entry in cell_index.get(column, {}).items():
+            if candidate_row >= row_number or candidate_row <= best_row:
+                continue
+            style = entry[0]
+            if style is not None:
+                best_row = candidate_row
+                best_style = style
+        return best_style
+    pattern = _NEAREST_PATTERN_CACHE.get(column)
+    if pattern is None:
+        pattern = re.compile(
+            rf'<c\b(?=[^>]*\br="{re.escape(column)}(\d+)")[^>]*?(?:/>|>.*?</c>)',
+            flags=re.DOTALL,
+        )
+        _NEAREST_PATTERN_CACHE[column] = pattern
     for match in pattern.finditer(xml_text):
         candidate_row = int(match.group(1))
         if candidate_row >= row_number or candidate_row <= best_row:
@@ -665,6 +763,7 @@ def extend_sheet_dates(xml_bytes: bytes, dates: dict[int, date], *, epoch) -> by
     if not dates:
         return xml_bytes
     xml_text = xml_bytes.decode("utf-8")
+    cell_index = _build_cell_index(xml_text)
     first_row = min(dates)
     for merged in re.finditer(r'<mergeCell\b[^>]*\bref="([^"]+)"', xml_text):
         min_col, min_row, _, max_row = range_boundaries(merged.group(1))
@@ -689,7 +788,7 @@ def extend_sheet_dates(xml_bytes: bytes, dates: dict[int, date], *, epoch) -> by
             row_xml = opening + "</row>"
         cell_ref = f"A{row}"
         cell = _cell_pattern(cell_ref).search(row_xml)
-        style = (_style_from_cell_xml(cell.group(0)) if cell else None) or _nearest_prior_style(xml_text, "A", row)
+        style = (_style_from_cell_xml(cell.group(0)) if cell else None) or _nearest_prior_style(xml_text, "A", row, cell_index=cell_index)
         replacement = _numeric_cell_xml(cell_ref, to_excel(day, epoch), style)
         if cell:
             row_xml = row_xml[:cell.start()] + replacement + row_xml[cell.end():]
@@ -699,7 +798,7 @@ def extend_sheet_dates(xml_bytes: bytes, dates: dict[int, date], *, epoch) -> by
         for column in range(2, 26):
             reference = f"{_column_name(column)}{row}"
             if not _cell_pattern(reference).search(row_xml):
-                style = _nearest_prior_style(xml_text, _column_name(column), row)
+                style = _nearest_prior_style(xml_text, _column_name(column), row, cell_index=cell_index)
                 if style is not None:
                     row_xml = row_xml.replace("</row>", f'<c r="{reference}" s="{style}"/></row>', 1)
         if match:
@@ -727,6 +826,7 @@ def patch_sheet_xml(
     if native is not None:
         return native
     xml_text = xml_bytes.decode("utf-8")
+    cell_index = _build_cell_index(xml_text)
     for row_number, values in sorted(row_values.items()):
         row_pattern = re.compile(
             rf'(<row\b(?=[^>]*\br="{row_number}")[^>]*>)(.*?)(</row>)',
@@ -751,7 +851,7 @@ def patch_sheet_xml(
                 replacement = _numeric_cell_xml(cell_ref, value, style)
                 content = content[: existing.start()] + replacement + content[existing.end() :]
             else:
-                style = _nearest_prior_style(xml_text, column, row_number)
+                style = _nearest_prior_style(xml_text, column, row_number, cell_index=cell_index)
                 content += _numeric_cell_xml(cell_ref, value, style)
 
         replacement_row = opening + content + closing
@@ -872,12 +972,17 @@ def prepare_workbook(prices: TargetPrices, *, overwrite: bool) -> PreparedWorkbo
         )
     try:
         epoch = workbook.epoch
+        scans = {
+            name: _SheetScan(workbook[name], epoch=epoch)
+            for name in (DAY_AHEAD_SHEET, REAL_TIME_SHEET)
+            if name in workbook.sheetnames
+        }
         extensions = {
-            name: plan_date_extensions(workbook[name], values, epoch=epoch)
+            name: plan_date_extensions(workbook[name], values, epoch=epoch, scan=scans.get(name))
             for name, values in ((DAY_AHEAD_SHEET, prices.day_ahead), (REAL_TIME_SHEET, prices.real_time))
             if name in workbook.sheetnames
         }
-        date_formats = {name: effective_number_formats(workbook[name], dates, 1)
+        date_formats = {name: effective_number_formats(workbook[name], dates, 1, scan=scans.get(name))
                         for name, dates in extensions.items() if dates}
         date_expectations = tuple(
             DateExpectation(name, row, day, date_formats[name][row])
@@ -885,11 +990,11 @@ def prepare_workbook(prices: TargetPrices, *, overwrite: bool) -> PreparedWorkbo
         )
         day_expectations, day_updated, day_skipped, day_rows = plan_price_sheet(
             workbook, DAY_AHEAD_SHEET, prices.day_ahead, overwrite=overwrite,
-            date_extensions=extensions.get(DAY_AHEAD_SHEET),
+            date_extensions=extensions.get(DAY_AHEAD_SHEET), scan=scans.get(DAY_AHEAD_SHEET),
         )
         real_expectations, real_updated, real_skipped, real_rows = plan_price_sheet(
             workbook, REAL_TIME_SHEET, prices.real_time, overwrite=overwrite,
-            date_extensions=extensions.get(REAL_TIME_SHEET),
+            date_extensions=extensions.get(REAL_TIME_SHEET), scan=scans.get(REAL_TIME_SHEET),
         )
         expectations = tuple(day_expectations + real_expectations)
     finally:

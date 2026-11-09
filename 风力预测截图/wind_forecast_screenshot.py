@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -204,7 +205,11 @@ def fetch_forecast_rows(context, run_date: str, config: Config, auth) -> list[Fo
     return select_seven_rows(payload["data"])
 
 
+@lru_cache(maxsize=None)
 def _font(size: int, *, bold: bool = False):
+    # 缓存键为 (size, bold)。macOS 分支首个候选 Songti.ttc 的 index 由 bold
+    # 决定（0/6），随 bold 一起进入键，故 index 差异不会串；非 macOS 分支的
+    # set_variation_by_axes(700/400) 也按 bold 分开。字体选择顺序与异常回退不变。
     if sys.platform == "darwin":
         candidates = (
             ("/System/Library/Fonts/Supplemental/Songti.ttc", 0 if bold else 6),

@@ -174,6 +174,9 @@ MANUAL_SECTION_SPECS = (
 
 SECTION_STOP_PREFIXES = ("一、", "二、", "三、", "四、", "五、", "表1", "表2", "下表为")
 
+# 出清情况工作簿文件名里的日期（如 2026.11.6），与 PLANT_STRATEGY_PATTERN 一样提到模块级只编译一次。
+CLEARING_WORKBOOK_DATE_PATTERN = re.compile(r"(?<!\d)(\d{4})\.(\d{1,2})\.(\d{1,2})(?!\d)")
+
 PLANT_STRATEGY_LABELS = ("汕头厂", "海门厂", "东莞厂")
 EAST_GUANGDONG_PREFIX = "粤东区域"
 PLANT_STRATEGY_PATTERN = re.compile(
@@ -254,7 +257,7 @@ def load_plant_strategies(workbook_path: Path | None, *,
     if source is None:
         return {}
     try:
-        workbook = load_workbook(source, read_only=True, data_only=True)
+        workbook = _open_clearing_workbook(source)
     except Exception as exc:
         log(f"三厂策略：打不开工作簿 {source.name}：{exc}")
         return {}
@@ -362,7 +365,7 @@ def read_workbook_run_date(workbook_path: Path | None) -> str | None:
     if not workbook_path:
         return None
     try:
-        workbook = load_workbook(workbook_path, read_only=True, data_only=True)
+        workbook = _open_clearing_workbook(workbook_path)
     except Exception:
         return None
     value: Any = None
@@ -587,15 +590,28 @@ def find_first_column_row(sheet, labels: tuple[str, ...]) -> int:
 def find_clearing_workbook(date_text: str, workbook_dir: Path = CLEARING_WORKBOOK_DIR) -> Path:
     dt = datetime.strptime(date_text, "%Y-%m-%d")
     date_token = f"{dt.year}.{dt.month}.{dt.day}"
-    date_pattern = re.compile(r"(?<!\d)(\d{4})\.(\d{1,2})\.(\d{1,2})(?!\d)")
-    candidates = [
-        path
-        for path in workbook_dir.glob("*.xlsx")
-        if not path.name.startswith("~$")
-        and any(tuple(map(int, match.groups())) == (dt.year, dt.month, dt.day)
-                for match in date_pattern.finditer(path.stem))
-        and "\u51fa\u6e05\u60c5\u51b5" in path.name
-    ]
+    wanted = (dt.year, dt.month, dt.day)
+    cache = _clearing_inputs.get()
+    # 索引只在本次生成的 clearing_input_cache 作用域内有效，退出即失效，下次生成会
+    # 重新 glob，不会漏掉期间新增的工作簿。键含 dir，按文件名里的 (date) 分组；
+    # 取用时仍按文件 mtime 实时取最新，筛选条件与原列表推导完全一致。
+    index_key = ("clearing_workbook_index", str(workbook_dir))
+    if cache is not None and index_key in cache:
+        index = cache[index_key]
+    else:
+        index = {}
+        for path in workbook_dir.glob("*.xlsx"):
+            if path.name.startswith("~$") or "出清情况" not in path.name:
+                continue
+            days = {
+                tuple(map(int, match.groups()))
+                for match in CLEARING_WORKBOOK_DATE_PATTERN.finditer(path.stem)
+            }
+            for day in days:
+                index.setdefault(day, []).append(path)
+        if cache is not None:
+            cache[index_key] = index
+    candidates = index.get(wanted, [])
     if not candidates:
         raise FileNotFoundError(f"未找到 {date_token} 的出清情况 Excel：{workbook_dir}")
     return max(candidates, key=lambda path: path.stat().st_mtime)
@@ -617,6 +633,88 @@ def clearing_input_cache():
         _clearing_inputs.reset(token)
 
 
+class _ClearingSheetSnapshot:
+    """工作簿表的只读纯数据快照，提供与 openpyxl iter_rows(values_only=True) 等价的行数据。"""
+
+    def __init__(self, rows, width):
+        self._rows = rows
+        self._width = width
+
+    def iter_rows(self, min_row=1, max_row=None, min_col=1, max_col=None, values_only=False):
+        stop = len(self._rows) if max_row is None else min(max_row, len(self._rows))
+        end = self._width if max_col is None else max_col
+        expected = max(0, end - min_col + 1)
+        for row in self._rows[min_row - 1:stop]:
+            values = tuple(row[min_col - 1:end])
+            if len(values) < expected:
+                values += (None,) * (expected - len(values))
+            yield values
+
+    @property
+    def max_row(self):
+        return len(self._rows)
+
+    @property
+    def max_column(self):
+        return self._width
+
+
+class _ClearingWorkbookSnapshot:
+    """一次 load_workbook 读出的纯数据快照（不持有句柄），供同一次生成内多处取数复用。"""
+
+    _WIDTH = 30  # 现有取数路径最大只读到第 30 列（基础信息）
+    _MAX_WIDTH = 256  # 防御模板格式把 max_column 拖得很宽，避免物化大量空列
+
+    def __init__(self, source):
+        workbook = load_workbook(source, read_only=True, data_only=True)
+        try:
+            self.sheetnames = list(workbook.sheetnames)
+            self._sheets = {}
+            self._widths = {}
+            # 物化全部工作表，避免只缓存部分表时 __getitem__ 静默返回空数据；
+            # 宽度按各表真实列数取，不人为截断列范围。
+            for name in self.sheetnames:
+                sheet = workbook[name]
+                try:
+                    width = max(self._WIDTH, min(int(sheet.max_column or 0), self._MAX_WIDTH))
+                except (TypeError, ValueError):
+                    width = self._WIDTH
+                self._sheets[name] = list(
+                    sheet.iter_rows(min_col=1, max_col=width, values_only=True)
+                )
+                self._widths[name] = width
+        finally:
+            workbook.close()
+
+    def __getitem__(self, name):
+        if name not in self._sheets:
+            raise KeyError(name)
+        return _ClearingSheetSnapshot(self._sheets[name], self._widths[name])
+
+    def close(self):
+        pass
+
+
+def _open_clearing_workbook(path):
+    """缓存作用域内复用同一份工作簿数据；作用域外直接打开，保持原有读取行为逐字不变。"""
+    cache = _clearing_inputs.get()
+    if cache is None:
+        return load_workbook(path, read_only=True, data_only=True)
+    source = Path(path).resolve()
+    try:
+        info = source.stat()
+    except OSError:
+        # 无法 stat 时退回原路径，让 load_workbook 抛出与原先一致的异常/日志。
+        return load_workbook(path, read_only=True, data_only=True)
+    key = ("snapshot", source, info.st_dev, info.st_ino,
+           info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    snapshot = cache.get(key)
+    if snapshot is None:
+        snapshot = _ClearingWorkbookSnapshot(path)
+        cache[key] = snapshot
+    return snapshot
+
+
 def _read_clearing_values(path):
     source = Path(path).resolve()
     info = source.stat()
@@ -624,7 +722,7 @@ def _read_clearing_values(path):
     cache = _clearing_inputs.get()
     if cache is not None and key in cache:
         return cache[key]
-    workbook = load_workbook(source, read_only=True, data_only=True)
+    workbook = _open_clearing_workbook(source)
     try:
         sheet_name = next((name for name in workbook.sheetnames if "快报" in name and "日前" in name), None)
         if sheet_name is None:
@@ -767,7 +865,7 @@ def load_online_energy_summary(date_text: str, workbook_path: Path | None = None
         workbook_path = find_clearing_workbook(date_text)
     numbers: dict[tuple[int, int], float] = {}
     label_cells: list[tuple] = []
-    workbook = load_workbook(workbook_path, read_only=True, data_only=True)
+    workbook = _open_clearing_workbook(workbook_path)
     try:
         sheet_name = next((name for name in workbook.sheetnames if name.strip() == "快报"), None)
         if sheet_name is None:
@@ -1598,25 +1696,27 @@ def is_current_daily_clearing_table(table) -> bool:
     )
 
 
-def ensure_daily_clearing_table_structure(document, canonical_template_path: Path = LOCAL_TEMPLATE_PATH) -> None:
+def ensure_daily_clearing_table_structure(document, canonical_template_path: Path = LOCAL_TEMPLATE_PATH, canonical=None) -> None:
     if not document.tables:
         raise ValueError("模板中未找到日清分表")
     if is_current_daily_clearing_table(document.tables[0]):
         return
 
-    canonical = Document(canonical_template_path)
+    if canonical is None:
+        canonical = Document(canonical_template_path)
     if not canonical.tables or not is_current_daily_clearing_table(canonical.tables[0]):
         raise ValueError("标准模板中的日清分表结构不完整")
     target = document.tables[0]._tbl
     target.getparent().replace(target, deepcopy(canonical.tables[0]._tbl))
 
 
-def ensure_spot_deviation_analysis(document, canonical_template_path: Path = LOCAL_TEMPLATE_PATH) -> None:
+def ensure_spot_deviation_analysis(document, canonical_template_path: Path = LOCAL_TEMPLATE_PATH, canonical=None) -> None:
     if any(paragraph.text.strip() == "3.现货偏差分析" for paragraph in document.paragraphs):
         return
 
     target_forecast = find_exact_paragraph(document, "五、短期市场预测")
-    canonical = Document(canonical_template_path)
+    if canonical is None:
+        canonical = Document(canonical_template_path)
     source_heading = find_exact_paragraph(canonical, "3.现货偏差分析")
     source_forecast = find_exact_paragraph(canonical, "五、短期市场预测")
     source_start = paragraph_index(canonical, source_heading)
@@ -1630,9 +1730,10 @@ def ensure_spot_deviation_analysis(document, canonical_template_path: Path = LOC
 
 def ensure_qingyuan_template_content(document, canonical_template_path: Path = LOCAL_TEMPLATE_PATH) -> None:
     ensure_qingyuan_startup_paragraphs(document)
-    ensure_daily_clearing_table_structure(document, canonical_template_path)
+    canonical = Document(canonical_template_path)
+    ensure_daily_clearing_table_structure(document, canonical_template_path, canonical=canonical)
     ensure_qingyuan_daily_clearing_row(document.tables[0])
-    ensure_spot_deviation_analysis(document, canonical_template_path)
+    ensure_spot_deviation_analysis(document, canonical_template_path, canonical=canonical)
 
 
 def replace_red_runs(paragraph, values: list[str]) -> None:
@@ -1959,6 +2060,7 @@ def compact_forecast_table(table, *, available_height_cm: float | None = None) -
     return count
 
 
+@clearing_input_cache()
 def generate(
     report_date: str,
     template_path: Path,

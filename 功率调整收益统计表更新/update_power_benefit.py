@@ -69,6 +69,13 @@ def column_layout(station: str) -> dict[str, str]:
 HEADERS = {"C": "功率预测", "J": "功率预测", "K": "日前电量",
            "L": "日前电价", "M": "上网电量", "N": "实时电价"}
 
+# 模块级预编译：inspect_workbook 的日期公式/时刻正则，patch_sparse_sheet 的
+# 单元格/行 XML 正则。避免逐行或逐待插入格重复 re.compile。
+_DATE_FORMULA_RE = re.compile(r"=\$?A\$?(\d+)\s*\+\s*(\d+)", re.I)
+_HOUR_RE = re.compile(r"(\d{1,2}):00(?::00)?")
+_CELL_XML_PATTERN = re.compile(r'<c\b(?=[^>]*\br="([A-Z]+\d+)")[^>]*?(?:/>|>.*?</c>)', re.S)
+_ROW_XML_PATTERN = re.compile(r'(<row\b(?=[^>]*\br="(\d+)")[^>]*>)(.*?)(</row>)', re.S)
+
 
 @dataclass(frozen=True)
 class CellTarget:
@@ -159,7 +166,7 @@ def date_at(sheet, cached, row: int, epoch, seen: set[int] | None = None) -> dat
     """模板 A 列合并日期可含 =A上一日期行+1，缓存缺失也能解析。"""
     value = sheet.cell(row, 1).value
     if isinstance(value, str) and value.startswith("="):
-        match = re.fullmatch(r"=\$?A\$?(\d+)\s*\+\s*(\d+)", value, re.I)
+        match = _DATE_FORMULA_RE.fullmatch(value)
         if match:
             seen = set() if seen is None else seen
             if row in seen:
@@ -177,7 +184,7 @@ def date_at(sheet, cached, row: int, epoch, seen: set[int] | None = None) -> dat
 def hour_of(value: Any) -> int | None:
     if isinstance(value, (datetime, time)):
         return value.hour if value.minute == value.second == value.microsecond == 0 else None
-    match = re.fullmatch(r"(\d{1,2}):00(?::00)?", str(value).strip())
+    match = _HOUR_RE.fullmatch(str(value).strip())
     if match and 0 <= int(match[1]) < 24:
         return int(match[1])
     if isinstance(value, (int, float)) and 0 <= value < 1:
@@ -239,12 +246,15 @@ def inspect_workbook(path: Path, *, end_date: date, start_date: date | None = No
             header_row = next((r for r in range(1, min(sheet.max_row, 20) + 1)
                                if all(re.sub(r"\s+", "", str(sheet[f"{col}{r}"].value or "")) == label
                                       for col, label in headers.items())), None)
+            # 一次批量取 A/B 列，避免逐行 cell(row,1/2) 访问；未选月份页已在上面跳过。
+            ab_values = list(sheet.iter_rows(min_col=1, max_col=2, values_only=True))
             groups: dict[date, dict[int, int]] = {}
             current: date | None = None
             for row in range((header_row or 0) + 1, sheet.max_row + 1):
-                if sheet.cell(row, 1).value is not None:
+                col_a, col_b = ab_values[row - 1]
+                if col_a is not None:
                     current = date_at(sheet, cached[sheet.title], row, workbook.epoch)
-                hour = hour_of(sheet.cell(row, 2).value)
+                hour = hour_of(col_b)
                 if current is None or hour is None:
                     continue
                 # 某些30天月份的模板带第31天占位，归属下月的块不能写入本月。
@@ -466,7 +476,7 @@ def patch_sparse_sheet(data: bytes, changes: dict[str, float]) -> bytes:
     text = expand_replaced_shared_formulas(data.decode("utf-8"), changes)
     original_text = text
     # 自闭合空单元格必须优先匹配，不能吞入后面的单元格或公式。
-    cell_pattern = re.compile(r'<c\b(?=[^>]*\br="([A-Z]+\d+)")[^>]*?(?:/>|>.*?</c>)', re.S)
+    cell_pattern = _CELL_XML_PATTERN
     replaced = set()
     def replace_existing(match):
         coordinate = match[1]
@@ -475,30 +485,56 @@ def patch_sparse_sheet(data: bytes, changes: dict[str, float]) -> bytes:
         replaced.add(coordinate)
         return spot._numeric_cell_xml(coordinate, changes[coordinate], spot._style_from_cell_xml(match[0]))
     text = cell_pattern.sub(replace_existing, text)
+    # 一次扫描建立 row → (起止位置, 开/闭标签, 内容, 已有单元格) 索引，
+    # 避免每个待插入格重新编译正则并对整段 text 做 cell/row 两次全表搜索。
+    row_index = {}
+    for row in _ROW_XML_PATTERN.finditer(text):
+        row_number = int(row[2])
+        if row_number not in row_index:
+            content_start = row.start() + len(row[1])
+            row_index[row_number] = {
+                "start": row.start(), "end": row.end(),
+                "open": row[1], "content": row[3], "close": row[4],
+                "content_start": content_start,
+                "content_end": content_start + len(row[3]),
+                "cells": [],
+            }
+    for cell in cell_pattern.finditer(text):
+        row_number, column_number = openpyxl.utils.cell.coordinate_to_tuple(cell[1])
+        info = row_index.get(row_number)
+        if info is not None and info["content_start"] <= cell.start() < info["content_end"]:
+            info["cells"].append((column_number, cell.start() - info["content_start"]))
+    # 按行分组待插入格；Excel 可省略完全空白的 <c>，插入时保留默认/列继承样式。
+    pending = {}
     for coordinate, value in changes.items():
         if coordinate in replaced:
             continue
-        pattern = re.compile(rf'<c\b(?=[^>]*\br="{re.escape(coordinate)}")[^>]*?(?:/>|>.*?</c>)', re.S)
-        match = pattern.search(text)
-        if match is None:
-            # Excel 可省略完全空白的 <c>，插入时保留其默认/列继承样式。
-            row_number, column_number = openpyxl.utils.cell.coordinate_to_tuple(coordinate)
-            row = re.search(rf'(<row\b(?=[^>]*\br="{row_number}")[^>]*>)(.*?)(</row>)', text, re.S)
-            if row is None:
-                raise ValueError(f"模板缺少目标行 {row_number}，停止写入。")
-            content = row[2]
+        row_number, column_number = openpyxl.utils.cell.coordinate_to_tuple(coordinate)
+        if row_number not in row_index:
+            raise ValueError(f"模板缺少目标行 {row_number}，停止写入。")
+        pending.setdefault(row_number, []).append((column_number, coordinate, value))
+    # 在同一份行内容上按原顺序逐个插入（找第一个列号更大的单元格之前，保持列序），
+    # 再按行位置从后往前替换，避免文本位置漂移；样式索引沿用原值或继承列样式。
+    for row_number, items in pending.items():
+        info = row_index[row_number]
+        content = info["content"]
+        existing = list(info["cells"])
+        for column_number, coordinate, value in items:
             insertion = len(content)
-            for existing in cell_pattern.finditer(content):
-                if openpyxl.utils.cell.coordinate_to_tuple(existing[1])[1] > column_number:
-                    insertion = existing.start()
+            for col, pos in existing:
+                if col > column_number:
+                    insertion = pos
                     break
             replacement = spot._numeric_cell_xml(coordinate, value, None)
             content = content[:insertion] + replacement + content[insertion:]
-            text = text[:row.start()] + row[1] + content + row[3] + text[row.end():]
-            continue
-        # 只替换输入单元格，样式索引沿用原值；公式、图表、缓存及其他部件原样保留。
-        replacement = spot._numeric_cell_xml(coordinate, value, spot._style_from_cell_xml(match[0]))
-        text = text[:match.start()] + replacement + text[match.end():]
+            shift = len(replacement)
+            existing = [(col, pos + shift if pos >= insertion else pos) for col, pos in existing]
+            existing.append((column_number, insertion))
+            existing.sort(key=lambda pair: pair[1])
+        info["content"] = content
+    for row_number in sorted(pending, key=lambda number: row_index[number]["start"], reverse=True):
+        info = row_index[row_number]
+        text = text[:info["start"]] + info["open"] + info["content"] + info["close"] + text[info["end"]:]
     def omit_inputs(match):
         return "" if match[1] in changes else match[0]
     if cell_pattern.sub(omit_inputs, original_text) != cell_pattern.sub(omit_inputs, text):

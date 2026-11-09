@@ -17,10 +17,53 @@ DoneCallback = Callable[[TaskSnapshot], None]
 ACTIVE_STATES = frozenset({TaskState.CREATED, TaskState.RUNNING, TaskState.CANCELLING})
 
 
+class _SnapshotStore(dict):
+    """记录每次写入的 revision，供 snapshots() 判断缓存 tuple 是否失效。"""
+
+    __slots__ = ("revision",)
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.revision = 0
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        super().__setitem__(key, value)
+        self.revision += 1
+
+    def __delitem__(self, key: Any) -> None:
+        super().__delitem__(key)
+        self.revision += 1
+
+    def clear(self) -> None:
+        super().clear()
+        self.revision += 1
+
+    def pop(self, *args: Any) -> Any:
+        result = super().pop(*args)
+        self.revision += 1
+        return result
+
+    def popitem(self) -> Any:
+        result = super().popitem()
+        self.revision += 1
+        return result
+
+    def setdefault(self, key: Any, default: Any = None) -> Any:
+        result = super().setdefault(key, default)
+        self.revision += 1
+        return result
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        super().update(*args, **kwargs)
+        self.revision += 1
+
+
 class TaskEngine:
     def __init__(self, *, event_capacity: int = 0) -> None:
         self._events = EventBuffer(event_capacity)
-        self._snapshots: dict[str, TaskSnapshot] = {}
+        self._snapshots: dict[str, TaskSnapshot] = _SnapshotStore()
+        self._snapshots_cache: tuple[TaskSnapshot, ...] | None = None
+        self._snapshots_revision: int | None = None
         self._tokens: dict[str, CancellationToken] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.Lock()
@@ -110,7 +153,15 @@ class TaskEngine:
 
     def snapshots(self) -> tuple[TaskSnapshot, ...]:
         with self._lock:
-            return tuple(self._snapshots.values())
+            store = self._snapshots
+            if not isinstance(store, _SnapshotStore):
+                # 外部整体替换了 _snapshots；重新纳入 revision 追踪。
+                store = self._snapshots = _SnapshotStore(store)
+            if (self._snapshots_cache is None
+                    or self._snapshots_revision != store.revision):
+                self._snapshots_cache = tuple(store.values())
+                self._snapshots_revision = store.revision
+            return self._snapshots_cache
 
     def active_snapshots(self) -> tuple[TaskSnapshot, ...]:
         return tuple(item for item in self.snapshots() if item.state in ACTIVE_STATES)

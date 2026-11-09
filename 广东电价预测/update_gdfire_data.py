@@ -197,11 +197,15 @@ def apply_period_list(
     records: list[dict[str, object]],
     column: str,
 ) -> None:
+    positions = None
     for record in latest_period_records(records):
         date = pd.Timestamp(str(record["date"])[:10])
         values = [float("nan") if value is None else value for value in record["loadVal"]]
-        mask = frame["日期"].eq(date)
-        frame.loc[mask, column] = values
+        if positions is None:
+            positions = frame.groupby("日期", sort=False).indices
+        rows = positions.get(date)
+        selector = frame.index[rows] if rows is not None else frame["日期"].eq(date)
+        frame.loc[selector, column] = values
 
 
 def apply_price_list(
@@ -210,13 +214,18 @@ def apply_price_list(
     value_key: str,
     column: str,
 ) -> None:
+    positions = None
     for record in records or []:
         values = record.get(value_key) or []
         if not record.get("date") or len(values) != 96:
             continue
         date = pd.Timestamp(str(record["date"])[:10])
         numeric_values = [float("nan") if value is None else value for value in values]
-        frame.loc[frame["日期"].eq(date), column] = numeric_values
+        if positions is None:
+            positions = frame.groupby("日期", sort=False).indices
+        rows = positions.get(date)
+        selector = frame.index[rows] if rows is not None else frame["日期"].eq(date)
+        frame.loc[selector, column] = numeric_values
 
 
 def build_increment(
@@ -374,14 +383,17 @@ def missing_dates(frame: pd.DataFrame, end_date: str) -> list[date]:
     required = ["全省日前平均电价"] + [column for column in normalized.columns
         if column in known and normalized[column].notna().any()]
     groups = dict(tuple(normalized.groupby("日期", sort=False)))
+    # 全表一次数值化与有限性判定，再按日期聚合，避免逐日 reindex+apply+isfinite。
+    numeric = normalized.reindex(columns=required).apply(pd.to_numeric, errors="coerce")
+    finite = np.isfinite(numeric.to_numpy(dtype=float)).all(axis=1)
+    finite_by_date = pd.Series(finite, index=normalized.index).groupby(normalized["日期"], sort=False).all()
     missing = []
     for day in pd.date_range(start, end, freq="D"):
         rows = groups.get(day)
         if rows is None or len(rows) != 96 or set(rows["时刻"]) != slots:
             missing.append(day.date())
             continue
-        values = rows.reindex(columns=required).apply(pd.to_numeric, errors="coerce")
-        if not np.isfinite(values.to_numpy(dtype=float)).all():
+        if not finite_by_date.get(day, False):
             missing.append(day.date())
     return missing
 

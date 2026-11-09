@@ -4,6 +4,7 @@ import re
 from colorsys import hls_to_rgb, rgb_to_hls
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
+from functools import lru_cache
 from math import isfinite
 from pathlib import Path
 from typing import Any, Iterable
@@ -27,6 +28,34 @@ DAY_AHEAD_RANGE = "A6:Q66"
 REALTIME_RANGE = "A68:Q84"
 ERROR_VALUES = {"#DIV/0!", "#REF!", "#NAME?", "#VALUE!", "#N/A", "#NUM!", "#NULL!"}
 WORKBOOK_DATE_RE = re.compile(r"分公司(?P<year>\d{4})\.(?P<month>\d{1,2})\.(?P<day>\d{1,2})")
+
+# _display_value's static pieces: the date-title map and the two number-format
+# regexes are rebuilt/compiled per cell otherwise. _NUMBER_FORMAT_CACHE maps a
+# format string to its parsed (percent decimals, placeholder match, custom flag).
+_DISPLAY_TITLE_FORMATS = {
+    "分公司日前出清复盘": "分公司日前出清复盘",
+    "火电分时明细": "火电分时明细",
+    "新能源分时明细": "新能源分时明细",
+    "分公司实时出清复盘": "分公司实时出清复盘",
+}
+_PERCENT_DECIMALS_RE = re.compile(r"\.([0#]+)%")
+_NUMBER_PLACEHOLDER_RE = re.compile(r"([#0?][#0?,]*)(?:\.([0#?]+))?")
+_NUMBER_FORMAT_CACHE: dict[str, tuple[int, Any, bool]] = {}
+
+
+def _number_format_info(number_format: Any) -> tuple[int, Any, bool]:
+    key = str(number_format)
+    info = _NUMBER_FORMAT_CACHE.get(key)
+    if info is None:
+        decimals_match = _PERCENT_DECIMALS_RE.search(key)
+        format_section = str(number_format or "General").split(";", 1)[0]
+        info = (
+            len(decimals_match.group(1)) if decimals_match else 0,
+            _NUMBER_PLACEHOLDER_RE.search(format_section),
+            key.lower() != "general",
+        )
+        _NUMBER_FORMAT_CACHE[key] = info
+    return info
 
 
 def _is_day_narrative(value: Any) -> bool:
@@ -297,18 +326,27 @@ def _realtime_day_ahead_workbook(
     return None, None
 
 
+@lru_cache(maxsize=4096)
+def _parse_date_text(text: str) -> date | None:
+    # Pure str -> date memoisation: the three strptime attempts, their order
+    # and their return value are unchanged. No workbook state is cached, so a
+    # hit can never be stale across files; 287aae3's date-reading paths keep
+    # their read-only/full-parser behaviour unchanged.
+    for pattern in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"):
+        try:
+            return datetime.strptime(text, pattern).date()
+        except ValueError:
+            pass
+    return None
+
+
 def _as_date(value: Any) -> date | None:
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
         return value
     if isinstance(value, str):
-        text = value.strip()
-        for pattern in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"):
-            try:
-                return datetime.strptime(text, pattern).date()
-            except ValueError:
-                pass
+        return _parse_date_text(value.strip())
     return None
 
 
@@ -419,28 +457,19 @@ def _display_value(value: Any, number_format: str = "General") -> str:
     if _is_excel_error(value):
         return "—"
     if isinstance(value, (datetime, date)):
-        title_formats = {
-            "分公司日前出清复盘": "分公司日前出清复盘",
-            "火电分时明细": "火电分时明细",
-            "新能源分时明细": "新能源分时明细",
-            "分公司实时出清复盘": "分公司实时出清复盘",
-        }
-        for marker, title in title_formats.items():
+        for marker, title in _DISPLAY_TITLE_FORMATS.items():
             if marker in number_format:
                 return f"{title}（{value.year}/{value.month}/{value.day}）"
         return f"{value.month}月{value.day}日"
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if abs(value) >= 1_000_000_000_000:
             return "—"
+        percent_decimals, placeholder, custom_format = _number_format_info(number_format)
         if "%" in number_format:
-            decimals_match = re.search(r"\.([0#]+)%", number_format)
-            decimals = len(decimals_match.group(1)) if decimals_match else 0
-            return f"{float(value) * 100:.{decimals}f}%"
+            return f"{float(value) * 100:.{percent_decimals}f}%"
         if abs(value) < 1e-10:
             return "0"
-        format_section = str(number_format or "General").split(";", 1)[0]
-        placeholder = re.search(r"([#0?][#0?,]*)(?:\.([0#?]+))?", format_section)
-        if placeholder and str(number_format).lower() != "general":
+        if placeholder and custom_format:
             decimal_pattern = placeholder.group(2) or ""
             decimals = len(decimal_pattern)
             rounded = Decimal(str(value)).quantize(
@@ -539,27 +568,42 @@ def _rgb(value: Any, theme_colors: list[str], *, auto: str | None = None) -> str
     return None
 
 
-def _border_rule(side: Any, edge: str, theme_colors: list[str]) -> str | None:
+def _border_rule(
+    side: Any, edge: str, theme_colors: list[str], cache: dict | None = None
+) -> str | None:
     style = getattr(side, "style", None)
     if not style:
         return None
-    width = "1px"
-    line_style = "solid"
-    if style in {"medium", "mediumDashed", "mediumDashDot", "mediumDashDotDot"}:
-        width = "2px"
-    elif style == "thick":
-        width = "3px"
-    elif style == "double":
-        width, line_style = "3px", "double"
-    elif style in {"dashed", "dashDot", "dashDotDot", "slantDashDot"}:
-        line_style = "dashed"
-    elif style in {"dotted", "hair"}:
-        line_style = "dotted"
-    color = _rgb(getattr(side, "color", None), theme_colors, auto="#000000") or "#000000"
-    return f"border-{edge}:{width} {line_style} {color}"
+    color_obj = getattr(side, "color", None)
+    color = _rgb(color_obj, theme_colors, auto="#000000") or "#000000"
+    tint = float(getattr(color_obj, "tint", 0) or 0)
+    key = (style, color, tint)
+    if cache is None:
+        cache = {}
+    decoration = cache.get(key)
+    if decoration is None:
+        width = "1px"
+        line_style = "solid"
+        if style in {"medium", "mediumDashed", "mediumDashDot", "mediumDashDotDot"}:
+            width = "2px"
+        elif style == "thick":
+            width = "3px"
+        elif style == "double":
+            width, line_style = "3px", "double"
+        elif style in {"dashed", "dashDot", "dashDotDot", "slantDashDot"}:
+            line_style = "dashed"
+        elif style in {"dotted", "hair"}:
+            line_style = "dotted"
+        decoration = f"{width} {line_style} {color}"
+        cache[key] = decoration
+    return f"border-{edge}:{decoration}"
 
 
-def _cell_style(cell: Any, theme_colors: list[str]) -> str:
+def _cell_style(
+    cell: Any, theme_colors: list[str], border_cache: dict | None = None
+) -> str:
+    if border_cache is None:
+        border_cache = {}
     rules: list[str] = []
     fill = None
     if getattr(cell.fill, "fill_type", None) == "solid":
@@ -600,7 +644,7 @@ def _cell_style(cell: Any, theme_colors: list[str]) -> str:
     if cell.alignment.indent:
         rules.append(f"padding-left:{3 + int(cell.alignment.indent) * 9}px")
     for edge in ("left", "right", "top", "bottom"):
-        rule = _border_rule(getattr(cell.border, edge), edge, theme_colors)
+        rule = _border_rule(getattr(cell.border, edge), edge, theme_colors, border_cache)
         if rule:
             rules.append(rule)
     if (
@@ -635,6 +679,9 @@ def _table_model(sheet: Any, cell_range: str, theme_colors: list[str]) -> dict[s
                         merged_children.add((row, column))
 
     rows: list[dict[str, Any]] = []
+    # Cache is scoped to this single table parse, so it never leaks across
+    # workbooks (theme_colors is constant within one _table_model call).
+    border_cache: dict = {}
     for row in range(min_row, max_row + 1):
         if sheet.row_dimensions[row].hidden:
             continue
@@ -649,7 +696,7 @@ def _table_model(sheet: Any, cell_range: str, theme_colors: list[str]) -> dict[s
                     "value": _display_value(cell.value, cell.number_format),
                     "rowspan": rowspan,
                     "colspan": colspan,
-                    "style": _cell_style(cell, theme_colors),
+                    "style": _cell_style(cell, theme_colors, border_cache),
                 }
             )
         height = sheet.row_dimensions[row].height
@@ -787,18 +834,38 @@ def _find_company_summary_row(sheet: Any) -> int | None:
     return None
 
 
+def _merged_anchor_map(sheet: Any) -> dict[tuple[int, int], tuple[int, int]]:
+    """Per-sheet (row, col) -> merge anchor lookup, built once per sheet object.
+
+    Cached on the sheet itself so it is isolated per worksheet and is never
+    reused across files; the parser only ever reads merged ranges, so the map
+    cannot go stale within one parse.
+    """
+    cached = getattr(sheet, "_gd_merged_anchor_map", None)
+    if cached is None:
+        anchors: dict[tuple[int, int], tuple[int, int]] = {}
+        for merged in sheet.merged_cells.ranges:
+            anchor = (merged.min_row, merged.min_col)
+            for row in range(merged.min_row, merged.max_row + 1):
+                for column in range(merged.min_col, merged.max_col + 1):
+                    # Keep the first range for a coordinate, matching the
+                    # original linear scan's first-match behaviour.
+                    if (row, column) != anchor and (row, column) not in anchors:
+                        anchors[(row, column)] = anchor
+        sheet._gd_merged_anchor_map = anchors
+        cached = anchors
+    return cached
+
+
 def _merged_header_value(sheet: Any, row: int, column: int) -> Any:
     """Return a header value, including the anchor of a merged header cell."""
 
     cell = sheet.cell(row, column)
     if not isinstance(cell, MergedCell):
         return cell.value
-    for merged in sheet.merged_cells.ranges:
-        if (
-            merged.min_row <= row <= merged.max_row
-            and merged.min_col <= column <= merged.max_col
-        ):
-            return sheet.cell(merged.min_row, merged.min_col).value
+    anchor = _merged_anchor_map(sheet).get((row, column))
+    if anchor is not None:
+        return sheet.cell(anchor[0], anchor[1]).value
     return cell.value
 
 
@@ -828,6 +895,61 @@ def _find_header_column_by_hierarchy(
                 if matches_parent:
                     return column
     return None
+
+
+def _header_column_lookup(sheet: Any, before_row: int, after_row: int = 2):
+    """Scan the header grid once and expose a memoised column lookup.
+
+    Reproduces _find_header_column_by_hierarchy (820-830) exactly: rows in
+    ascending order, columns in ascending order, and the 3-row parent lookback
+    ``range(row - 1, max(0, row - 4), -1)`` with the exact/substring match.
+    A query that finds no column falls back to the original function.
+    """
+    max_column = min(int(sheet.max_column or 1), 80)
+    max_row = min(max(before_row - 1, 1), int(sheet.max_row or 1))
+    scan: dict[tuple[int, int], tuple[str, list[str]]] = {}
+    for row in range(1, max_row + 1):
+        for column in range(1, max_column + 1):
+            headers = [
+                _normalized_label(_merged_header_value(sheet, parent_row, column))
+                for parent_row in range(row - 1, max(0, row - 4), -1)
+            ]
+            scan[(row, column)] = (
+                _normalized_label(sheet.cell(row, column).value),
+                headers,
+            )
+    cache: dict[tuple[str, tuple[str, ...], bool], int | None] = {}
+
+    def lookup(parent: str, children: tuple[str, ...], exact_parent: bool) -> int | None:
+        key = (parent, children, exact_parent)
+        if key in cache:
+            return cache[key]
+        parent_label = _normalized_label(parent)
+        child_labels = {_normalized_label(child) for child in children}
+        column = None
+        for row in range(max(2, after_row), max_row + 1):
+            for candidate in range(1, max_column + 1):
+                child, headers = scan[(row, candidate)]
+                if child not in child_labels:
+                    continue
+                for header in headers:
+                    matches = header == parent_label if exact_parent else parent_label in header
+                    if matches:
+                        column = candidate
+                        break
+                if column is not None:
+                    break
+            if column is not None:
+                break
+        if column is None:
+            column = _find_header_column_by_hierarchy(
+                sheet, parent, children,
+                before_row=before_row, after_row=after_row, exact_parent=exact_parent,
+            )
+        cache[key] = column
+        return column
+
+    return lookup
 
 
 def _find_standalone_header_column(
@@ -877,16 +999,13 @@ def _day_ahead_summary_metrics(sheet: Any) -> dict[str, Any]:
             "day_total_capacity_price": None,
         }
 
+    # One header scan serves every KPI lookup instead of ~11 full rescan passes.
+    lookup = _header_column_lookup(sheet, summary_row)
+
     def value(
         parent: str, *children: str, meaningful: bool = False, exact_parent: bool = False
     ) -> float | None:
-        column = _find_header_column_by_hierarchy(
-            sheet,
-            parent,
-            children,
-            before_row=summary_row,
-            exact_parent=exact_parent,
-        )
+        column = lookup(parent, children, exact_parent)
         if column is None:
             return None
         parser = _meaningful_number if meaningful else _number
@@ -905,9 +1024,7 @@ def _day_ahead_summary_metrics(sheet: Any) -> dict[str, Any]:
     if price_energy == 0:
         price_energy = None
     electricity_fee = value("当日合计", "电能电费", "电能量电费", exact_parent=True)
-    capacity_total_column = _find_header_column_by_hierarchy(
-        sheet, "当日合计", ("容量电费",), before_row=summary_row, exact_parent=True
-    )
+    capacity_total_column = lookup("当日合计", ("容量电费",), True)
     capacity_fee = value("当日合计", "容量电费", exact_parent=True)
     if capacity_total_column is None:
         standalone_capacity_column = _find_standalone_header_column(

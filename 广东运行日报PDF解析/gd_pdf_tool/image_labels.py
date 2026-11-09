@@ -55,6 +55,44 @@ def merge_image_labels(table, labels: list[dict], width: float, height: float) -
     return values
 
 
+# 本次解析内的 OCR 结果缓存：键含 (文件绝对路径, mtime_ns, size, 页号)，
+# 文件被改动即失效，且仅驻留内存、不跨进程保留。
+_LABELS_CACHE = {}
+
+
+def _page_cache_key(page):
+    """Derive a stable (file, page) key; disable caching when identity is unknown."""
+    pdf = getattr(page, "pdf", None)
+    stream = getattr(pdf, "stream", None) if pdf is not None else None
+    name = getattr(stream, "name", None) if stream is not None else None
+    page_number = getattr(page, "page_number", None)
+    if not isinstance(name, str) or not isinstance(page_number, int):
+        return None
+    try:
+        path = Path(name).resolve()
+        stat = path.stat()
+    except (OSError, ValueError, TypeError):
+        return None
+    return (str(path), stat.st_mtime_ns, stat.st_size, page_number)
+
+
+def _recognized_labels(page) -> list[dict]:
+    key = _page_cache_key(page)
+    if key is not None and key in _LABELS_CACHE:
+        return _LABELS_CACHE[key]
+    with tempfile.TemporaryDirectory(prefix="daily-pdf-labels-") as folder:
+        image_path = Path(folder) / "page.png"
+        image = page.to_image(resolution=180).original
+        try:
+            image.save(image_path)
+        finally:
+            image.close()
+        labels = recognize_image_labels(image_path)
+    if key is not None:
+        _LABELS_CACHE[key] = labels
+    return labels
+
+
 def extract_image_label_tables(page) -> list[list[list]]:
     """Recover rasterized headings only on pages with declaration-like tables."""
     if not page.images:
@@ -68,12 +106,5 @@ def extract_image_label_tables(page) -> list[list[list]]:
     ]
     if not tables:
         return []
-    with tempfile.TemporaryDirectory(prefix="daily-pdf-labels-") as folder:
-        image_path = Path(folder) / "page.png"
-        image = page.to_image(resolution=180).original
-        try:
-            image.save(image_path)
-        finally:
-            image.close()
-        labels = recognize_image_labels(image_path)
+    labels = _recognized_labels(page)
     return [merge_image_labels(table, labels, page.width, page.height) for table in tables]

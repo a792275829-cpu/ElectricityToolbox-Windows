@@ -143,6 +143,20 @@ class LogConsole(ttk.Frame):
         self.notice_label.grid(row=2, column=0, sticky="ew", pady=(4, 0))
         self.notice_label.grid_remove()
         self.notice.trace_add("write", lambda *_: self._show_if_nonempty(self.notice_label, self.notice))
+        self._handle = None
+        self.bind("<Destroy>", self._on_destroy)
+
+    def _close_log_handle(self):
+        handle = getattr(self, "_handle", None)
+        self._handle = None
+        if handle is not None:
+            try:
+                handle.close()
+            except OSError:
+                pass
+
+    def _on_destroy(self, _event):
+        self._close_log_handle()
 
     @staticmethod
     def _show_if_nonempty(widget, variable):
@@ -172,6 +186,7 @@ class LogConsole(ttk.Frame):
             self.text.configure(state="normal")
             self.text.delete("1.0", "end")
             self.text.configure(state="disabled")
+        self._close_log_handle()
         self.path = None
         self._log = _LogBuffer()
         if self._expanded_text is not None and self._expanded_text.winfo_exists() and getattr(self, "_view_current", True):
@@ -183,6 +198,7 @@ class LogConsole(ttk.Frame):
             self.directory.mkdir(parents=True, exist_ok=True)
             self.path = self.directory / f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}.log"
             self.path.touch(mode=0o600)
+            self._handle = self.path.open("a", encoding="utf-8")
         except OSError as exc:
             self.storage_error = f"日志未能保存：{exc}"
             if render:
@@ -198,9 +214,12 @@ class LogConsole(ttk.Frame):
         self._log.append(content)
         if self.path is not None:
             try:
-                with self.path.open("a", encoding="utf-8") as handle:
-                    handle.write(content)
+                if self._handle is None:
+                    self._handle = self.path.open("a", encoding="utf-8")
+                self._handle.write(content)
+                self._handle.flush()
             except OSError as exc:
+                self._close_log_handle()
                 self.storage_error = f"日志未能保存：{exc}"
                 if render:
                     self.notice.set(self.storage_error)
@@ -277,6 +296,7 @@ class LogConsole(ttk.Frame):
         # the completion status. Refresh the UI without ending the run twice.
         if not already_finished:
             self.append(self.status.get() + ("\n" + self.failure if self.failure else ""))
+        self._close_log_handle()
 
     def copy_error(self):
         text = redact(f"{self.module}\n{self.status.get()}\n{self.failure}\n\n完整日志：\n{self.contents()}")
