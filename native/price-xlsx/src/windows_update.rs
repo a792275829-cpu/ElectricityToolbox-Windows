@@ -166,6 +166,38 @@ mod implementation {
     #[cfg(test)]
     mod tests {
         use super::*;
+        fn relaunch_plan(dir: &Path) -> Plan {
+            serde_json::from_value(json!({"schema":1,"installer":"unused","size":1,
+                "sha256":"0000000000000000000000000000000000000000000000000000000000000000",
+                "version":"9.1.2","target_dir":dir,"app_home":dir,"processes":[],"token":"test-token"})).unwrap()
+        }
+        fn relaunch_fixture(name: &str, program: &str) -> PathBuf {
+            let dir = std::env::temp_dir().join(format!("toolbox-relaunch-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            fs::copy(PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join(program),
+                     dir.join("electricity-toolbox.exe")).unwrap();
+            dir
+        }
+        #[test]
+        fn relaunch_reports_a_program_that_exits_immediately_instead_of_claiming_success() {
+            // `where` without arguments exits 1 at once: the update must not be
+            // reported as restarted just because a process was created.
+            let dir = relaunch_fixture("crash", "System32/where.exe");
+            let error = relaunch(&relaunch_plan(&dir)).unwrap_err();
+            let _ = fs::remove_dir_all(&dir);
+            assert!(error.contains("第 1 次启动后立即退出"), "{error}");
+            assert!(error.contains("系统外壳"), "{error}");
+        }
+        #[test]
+        fn relaunch_accepts_a_program_that_keeps_running_or_exits_cleanly() {
+            let dir = relaunch_fixture("ok", "System32/cmd.exe");
+            let result = relaunch(&relaunch_plan(&dir));
+            let _ = fs::remove_dir_all(&dir);
+            let (pid, via) = result.unwrap();
+            assert_eq!(via, "spawn");
+            assert!(pid > 0);
+        }
         #[test]
         fn delta_updates_only_matching_quoted_install_location() {
             let reg=PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/reg.exe");
@@ -206,7 +238,7 @@ mod implementation {
             assert!(!command(&reg).args(["query",&key]).status().unwrap().success(),"rollback created an originally absent key");
         }
     }
-    fn install(plan: &Plan, cache: &Path) -> Result<(u32, Option<String>), String> {
+    fn install(plan: &Plan, cache: &Path) -> Result<(u32, &'static str, Option<String>), String> {
         // Keep the verified file locked against writes/deletion until NSIS exits.
         let mut installer = fs::OpenOptions::new().read(true).share_mode(1).open(&plan.installer).map_err(|e| e.to_string())?;
         let mut digest = Sha256::new();
@@ -227,7 +259,7 @@ mod implementation {
         if backup.exists() || failed.exists() { return Err("更新恢复目录已存在".into()); }
         let snapshot = registry_snapshot(cache)?;
         fs::rename(&plan.target_dir, &backup).map_err(|e| format!("旧程序目录暂不能替换，未开始安装：{e}"))?;
-        let outcome = (|| -> Result<u32, String> {
+        let outcome = (|| -> Result<(u32, &'static str), String> {
             let target_text = plan.target_dir.to_str().ok_or("安装路径编码无效")?;
             if target_text.contains(['"', '\r', '\n']) { return Err("安装路径包含无效字符".into()); }
             // NSIS requires /D= to be last and unquoted, including when it has spaces.
@@ -246,20 +278,92 @@ mod implementation {
             }
             relaunch(plan)
         })();
-        let pid = match outcome { Ok(pid) => pid, Err(error) => {
-            if plan.target_dir.exists() { fs::rename(&plan.target_dir, &failed).map_err(|e| format!("{error}；旧版保存在 {}，恢复目录失败：{e}", backup.display()))?; }
-            fs::rename(&backup, &plan.target_dir).map_err(|e| format!("{error}；旧版保存在 {}，自动恢复失败：{e}", backup.display()))?;
-            restore_registry(&snapshot)?;
-            if failed.exists() { let _ = fs::remove_dir_all(&failed); }
-            return Err(format!("{error}；已恢复旧程序，配置和数据保留"));
-        }};
+        let (pid, relaunched_by) = match outcome {
+            Ok(value) => value,
+            Err(error) => {
+                if plan.target_dir.exists() { fs::rename(&plan.target_dir, &failed).map_err(|e| format!("{error}；旧版保存在 {}，恢复目录失败：{e}", backup.display()))?; }
+                fs::rename(&backup, &plan.target_dir).map_err(|e| format!("{error}；旧版保存在 {}，自动恢复失败：{e}", backup.display()))?;
+                restore_registry(&snapshot)?;
+                if failed.exists() { let _ = fs::remove_dir_all(&failed); }
+                return Err(format!("{error}；已恢复旧程序，配置和数据保留"));
+            }
+        };
         // The validated sibling backup contains only the old program, never app_home.
-        Ok((pid, fs::remove_dir_all(&backup).err().map(|e| format!("旧版备份尚未清理：{e}"))))
+        Ok((pid, relaunched_by, fs::remove_dir_all(&backup).err().map(|e| format!("旧版备份尚未清理：{e}"))))
     }
-    fn relaunch(plan: &Plan) -> Result<u32, String> {
+    const RELAUNCH_ATTEMPTS: u32 = 3;
+    const RELAUNCH_GRACE: Duration = Duration::from_millis(1500);
+    fn spawn_app(plan: &Plan) -> std::io::Result<std::process::Child> {
         command(plan.target_dir.join("electricity-toolbox.exe"))
             .current_dir(&plan.target_dir).env("TOOLBOX_APP_HOME", &plan.app_home)
-            .env_remove("TOOLBOX_WORKSPACE").spawn().map(|child| child.id()).map_err(|e| format!("自动启动失败，请重新打开工具箱：{e}"))
+            .env_remove("TOOLBOX_WORKSPACE").spawn()
+    }
+    /// Start the installed version and prove it stayed up.
+    ///
+    /// Creating the process is not restarting the toolbox: a locked file or a
+    /// payload that dies while loading leaves the user with no window at all,
+    /// even though the update itself succeeded. Every attempt therefore waits
+    /// out a startup grace period and only an early non-zero exit counts as a
+    /// failed relaunch, so a transient antivirus lock is retried instead of
+    /// rolling a verified installation back.
+    fn relaunch(plan: &Plan) -> Result<(u32, &'static str), String> {
+        let mut failures: Vec<String> = Vec::new();
+        for attempt in 1..=RELAUNCH_ATTEMPTS {
+            if attempt > 1 { thread::sleep(Duration::from_millis(400 * u64::from(attempt))); }
+            match spawn_app(plan) {
+                Ok(mut child) => {
+                    let pid = child.id();
+                    let deadline = Instant::now() + RELAUNCH_GRACE;
+                    loop {
+                        match child.try_wait() {
+                            // A clean exit means another instance already owns the
+                            // single-instance lock; the toolbox is running.
+                            Ok(Some(status)) if status.code() == Some(0) => return Ok((pid, "spawn")),
+                            Ok(Some(status)) => {
+                                failures.push(format!("第 {attempt} 次启动后立即退出（退出码 {}）", status.code().unwrap_or(-1)));
+                                break;
+                            }
+                            Ok(None) if Instant::now() >= deadline => return Ok((pid, "spawn")),
+                            Ok(None) => thread::sleep(Duration::from_millis(50)),
+                            Err(error) => {
+                                failures.push(format!("第 {attempt} 次无法确认启动状态：{error}"));
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(error) => failures.push(format!("第 {attempt} 次启动失败：{error}")),
+            }
+        }
+        // Endpoint policies sometimes block a direct CreateProcess while still
+        // allowing the shell to start the same file from the installation folder.
+        // `start` reports success before the program runs, so the fallback only
+        // counts when the process actually appears; otherwise the verified
+        // installation is rolled back instead of leaving no window at all.
+        let shell = PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
+            .join("System32/cmd.exe");
+        let status = command(shell).args(["/c", "start", ""])
+            .arg(plan.target_dir.join("electricity-toolbox.exe")).status();
+        let detail = failures.join("；");
+        match status {
+            Ok(status) if status.success() => {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while Instant::now() < deadline {
+                    if app_running() { return Ok((0, "shell")); }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(format!("{detail}；通过系统外壳启动后进程未出现"))
+            }
+            Ok(status) => Err(format!("{detail}；通过系统外壳启动失败（退出码 {}）", status.code().unwrap_or(-1))),
+            Err(error) => Err(format!("{detail}；无法通过系统外壳启动：{error}")),
+        }
+    }
+    fn app_running() -> bool {
+        let tasklist = PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
+            .join("System32/tasklist.exe");
+        command(tasklist).args(["/FI", "IMAGENAME eq electricity-toolbox.exe", "/NH"])
+            .output().map(|output| String::from_utf8_lossy(&output.stdout)
+                .to_ascii_lowercase().contains("electricity-toolbox.exe")).unwrap_or(false)
     }
     fn update_registered_version(plan:&Plan)->Result<(),String> {
         update_registered_version_key(plan,r"Software\Microsoft\Windows\CurrentVersion\Uninstall\电力工具箱")
@@ -300,7 +404,7 @@ mod implementation {
         let handles = validate(&plan, &cache)?;
         report(&cache, &plan, json!({"state":"ready","version":plan.version}))?;
         let mut exited = false;
-        let outcome = (|| -> Result<(u32, Option<String>), String> {
+        let outcome = (|| -> Result<(u32, &'static str, Option<String>), String> {
             let deadline = Instant::now() + Duration::from_secs(30);
             loop {
                 match decision(&cache, &plan).as_deref() {
@@ -321,8 +425,9 @@ mod implementation {
             install(&plan, &cache)
         })();
         match outcome {
-            Ok((pid, warning)) => {
-                report(&cache, &plan, json!({"state":"succeeded","version":plan.version,"relaunch_pid":pid,"cleanup_warning":warning}))
+            Ok((pid, relaunched_by, warning)) => {
+                report(&cache, &plan, json!({"state":"succeeded","version":plan.version,"relaunch_pid":pid,
+                    "relaunch_via":relaunched_by,"cleanup_warning":warning}))
             }
             Err(error) => {
                 let aborted = error == "已取消更新";

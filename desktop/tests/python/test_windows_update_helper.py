@@ -26,13 +26,19 @@ class WindowsHelperTests(unittest.TestCase):
         sleeper_script.write_text('Unicode true\nRequestExecutionLevel user\nSilentInstall silent\nSetCompress off\n'
             f'OutFile "{sleeper}"\nSection\nSleep 20000\nSectionEnd\n',encoding='utf-8-sig')
         subprocess.run([str(MAKENSIS),str(sleeper_script)],check=True,capture_output=True,timeout=30,creationflags=subprocess.CREATE_NO_WINDOW)
-        for name in ('good','fail','badapp','hold'):
+        crash=folder/'crashing-app.exe'
+        crash_script=folder/'crashing-app.nsi'
+        crash_script.write_text('Unicode true\nRequestExecutionLevel user\nSilentInstall silent\nSetCompress off\n'
+            f'OutFile "{crash}"\nSection\nSetErrorLevel 3\nQuit\nSectionEnd\n',encoding='utf-8-sig')
+        subprocess.run([str(MAKENSIS),str(crash_script)],check=True,capture_output=True,timeout=30,creationflags=subprocess.CREATE_NO_WINDOW)
+        for name in ('good','fail','badapp','hold','crash'):
             fail=name=='fail'
             manifest=folder/(name+'.json');manifest.write_text(json.dumps({'version':'9.0.1'}))
             installer=folder/(name+'.exe')
             script=folder/(name+'.nsi')
             binary=SERVICE
             if name=='hold':binary=sleeper
+            if name=='crash':binary=crash
             if name=='badapp':
                 binary=folder/'not-a-program.exe';binary.write_bytes(b'MZinvalid')
             script.write_text('Unicode true\nRequestExecutionLevel user\nSilentInstall silent\nSetCompress off\n'
@@ -153,6 +159,21 @@ class WindowsHelperTests(unittest.TestCase):
         self.launch('badapp');self.commit()
         self.assertEqual(self.status()['state'],'failed',self.status())
         self.assertEqual(json.loads((self.target/'payload/manifest.json').read_text())['version'],'9.0.0')
+
+    def test_relaunch_that_dies_immediately_is_retried_then_rolled_back(self):
+        # Creating the process is not restarting the toolbox: a new version that
+        # exits right away must be retried and, if it never stays up, restored to
+        # the old program instead of reporting a successful update without any
+        # window to show for it.
+        self.launch('crash')
+        (self.cache/'decision.json').write_text(json.dumps({'token':'test-owned','action':'commit'}))
+        for p in self.processes:p.stdin.close()
+        self.helper.wait(timeout=40)
+        status=self.status()
+        self.assertEqual(status['state'],'failed',status)
+        self.assertIn('第 1 次启动后立即退出',status['error'])
+        self.assertEqual(json.loads((self.target/'payload/manifest.json').read_text())['version'],'9.0.0')
+        self.assertEqual((self.home/'keep.txt').read_text(),'KEEP-DATA')
 
     def test_abort_does_not_stop_processes_or_install(self):
         self.launch()
