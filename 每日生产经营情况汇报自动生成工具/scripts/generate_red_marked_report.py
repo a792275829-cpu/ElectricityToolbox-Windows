@@ -633,12 +633,22 @@ def clearing_input_cache():
         _clearing_inputs.reset(token)
 
 
+class _SnapshotCell:
+    """只读单元格：只暴露 .value，与 openpyxl Cell 的取值接口一致。"""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value):
+        self.value = value
+
+
 class _ClearingSheetSnapshot:
     """工作簿表的只读纯数据快照，提供与 openpyxl iter_rows(values_only=True) 等价的行数据。"""
 
-    def __init__(self, rows, width):
+    def __init__(self, rows, width, title=""):
         self._rows = rows
         self._width = width
+        self.title = title
 
     def iter_rows(self, min_row=1, max_row=None, min_col=1, max_col=None, values_only=False):
         stop = len(self._rows) if max_row is None else min(max_row, len(self._rows))
@@ -649,6 +659,13 @@ class _ClearingSheetSnapshot:
             if len(values) < expected:
                 values += (None,) * (expected - len(values))
             yield values
+
+    def cell(self, row, column):
+        """1 基坐标，越界返回空值，语义同 Worksheet.cell；取值不再重扫整表。"""
+        if row < 1 or column < 1 or row > len(self._rows):
+            return _SnapshotCell(None)
+        values = self._rows[row - 1]
+        return _SnapshotCell(values[column - 1] if column <= len(values) else None)
 
     @property
     def max_row(self):
@@ -689,7 +706,7 @@ class _ClearingWorkbookSnapshot:
     def __getitem__(self, name):
         if name not in self._sheets:
             raise KeyError(name)
-        return _ClearingSheetSnapshot(self._sheets[name], self._widths[name])
+        return _ClearingSheetSnapshot(self._sheets[name], self._widths[name], name)
 
     def close(self):
         pass
@@ -1083,7 +1100,11 @@ def load_daily_clearing_inputs(date_text: str,
     """读取 D-2 日出清情况工作簿，生成日清分表各行的取值与现货偏差分析用数。"""
     if workbook_path is None:
         workbook_path = find_clearing_workbook(date_text)
-    workbook = load_workbook(workbook_path, data_only=True)
+    # 下面按标签/列号随机取值（_locate_row / _fire_row / _node_price_range）。
+    # read_only 句柄的 cell() 每取一格都要重扫工作表 XML，因此这里改用一次性
+    # 物化的值快照；同一次生成若已读过该工作簿，直接复用同一份快照。
+    with clearing_input_cache():
+        workbook = _open_clearing_workbook(workbook_path)
     try:
         brief = _pick_sheet(workbook, "快报", exclude=("日前",))
         qingyuan_row = _locate_row(brief, label="清远", sublabel="合计")

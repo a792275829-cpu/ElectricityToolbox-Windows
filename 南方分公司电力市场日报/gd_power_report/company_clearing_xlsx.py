@@ -313,11 +313,17 @@ def _realtime_day_ahead_workbook(
         if candidate in seen or candidate == current_source or not candidate.is_file():
             continue
         seen.add(candidate)
+        # 日期预筛只读即可：候选被逐个完整展开后才发现日期不符，等于为每个
+        # 落选文件都付一次整日明细的解析成本。
+        try:
+            light = load_workbook(candidate, data_only=True, read_only=True)
+        except Exception:
+            continue
+        if _workbook_energy_date(light, candidate) != realtime_date:
+            continue
         try:
             workbook = load_workbook(candidate, data_only=True, read_only=False)
         except Exception:
-            continue
-        if _workbook_energy_date(workbook, candidate) != realtime_date:
             continue
         # Missing price inputs must not discard independently valid market
         # data, such as this date's must-run capacity. Each metric validates
@@ -781,6 +787,8 @@ def validate_day_ahead_comparison_workbook(path: str | Path) -> Path:
     """
 
     source = _workbook_source(path, "D 日前对比表")
+    # 这个完整句柄会被流水线的 parse_day_ahead_comparison_workbook 直接复用；
+    # 改成只读校验会让流水线不得不重新完整加载，整体反而更慢。
     workbook = load_workbook(source, data_only=True, read_only=False)
     if "分公司" not in workbook.sheetnames:
         raise ValueError("D 日前对比表缺少“分公司”工作表。")
