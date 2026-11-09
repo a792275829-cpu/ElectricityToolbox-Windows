@@ -1,0 +1,131 @@
+"""Shared command construction for the Tk fallback and desktop service.
+
+No widgets or GUI imports belong in this module. Business scripts remain the
+authority for workbook mappings, dates and overwrite behavior.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from .runtime import python_executable
+
+
+def login(paths, tool_id):
+    from toolbox_login_tools import STATE_DIRS
+    if tool_id in {"summary-upload", "private-batch-upload"}:
+        from .runtime import node_executable
+        command = [node_executable(), str(paths.private_uploader), "--login", "--headed"]
+        # 批量上传使用独立登录态与浏览器目录，可与目录上传并行。
+        if tool_id == "private-batch-upload":
+            command.append("--batch")
+        return command
+    if tool_id not in STATE_DIRS:
+        raise ValueError("当前工具不使用清能网站登录。")
+    return [python_executable(), str(paths.workspace / "toolbox_login_tools.py"),
+            "--workspace", str(paths.workspace), "--tool", tool_id]
+
+
+def private_batch(paths, unit, files, *, summary_type="none", verify=True, power_source="不适用"):
+    from .runtime import node_executable
+    if not files:
+        raise ValueError("请至少选择一个上传文件。")
+    command = [node_executable(), str(paths.private_uploader), "--batch", "--unit", str(unit)]
+    # --files 可重复传入；逗号是 Windows 合法路径字符，不能用逗号拼接，否则路径会被截断。
+    for file in files:
+        command.extend(("--files", str(file)))
+    if summary_type in {"formal", "temporary"}:
+        command.extend(("--summary-type", summary_type))
+    if power_source and power_source != "不适用":
+        command.extend(("--power-source", str(power_source)))
+    if not verify:
+        command.append("--no-verify")
+    return command
+
+
+
+def dated_script(script: Path, run_date: str) -> list[str]:
+    return [python_executable(), str(script), run_date]
+
+
+def dated_range_script(script: Path, start_date: str, end_date: str) -> list[str]:
+    return [python_executable(), str(script),
+            "--start-date", start_date, "--end-date", end_date]
+
+
+def section_analysis(paths, files, output_root, topology_path, threshold):
+    return [python_executable(), str(paths.section_analysis_runner),
+            "--output-root", str(output_root), "--topology", str(topology_path),
+            "--threshold", str(threshold), *(str(p) for p in files)]
+
+
+def market_table(paths, run_date, workbook, *, overwrite=True, create_backup=False):
+    command = [python_executable(), str(paths.market_table_update), "--date",
+               run_date.isoformat(), "--workbook", str(workbook)]
+    if not overwrite:
+        command.append("--skip-existing")
+    if not create_backup:
+        command.append("--no-backup")
+    return command
+
+
+def transaction_info(paths, workbook, end_date, *, start_date, create_backup, overwrite=True):
+    command = [python_executable(), str(paths.transaction_info_update),
+               "--workbook", str(workbook), "--end-date", end_date.isoformat()]
+    if start_date is not None:
+        command.extend(("--start-date", start_date.isoformat()))
+    if not overwrite:
+        command.append("--skip-existing")
+    if not create_backup:
+        command.append("--no-backup")
+    return command
+
+
+def power_benefit(paths, workbooks, end_date, *, start_date, create_backup, overwrite=True):
+    command = [python_executable(), str(paths.power_benefit_update),
+               "--end-date", end_date.isoformat()]
+    for path in workbooks:
+        command.extend(("--workbook", str(path)))
+    if start_date is not None:
+        command.extend(("--start-date", start_date.isoformat()))
+    if not overwrite:
+        command.append("--skip-existing")
+    if not create_backup:
+        command.append("--no-backup")
+    return command
+
+
+def spot_price(paths, start_date, end_date, workbooks, *, overwrite, create_backup, selected):
+    if not selected:
+        raise ValueError("请至少选择一个更新场站。")
+    options = {"归湖": "--guihu-workbook", "鮀莲": "--tuolian-workbook", "海风": "--haifeng-workbook"}
+    command = [python_executable(), str(paths.spot_price_update), "--start-date",
+               start_date.isoformat(), "--end-date", end_date.isoformat()]
+    for label in selected:
+        command.extend((options[label], str(workbooks[label])))
+    command.extend(("--stations", *selected))
+    if not overwrite:
+        command.append("--skip-existing")
+    if not create_backup:
+        command.append("--no-backup")
+    return command
+
+
+def daily_pdf(paths, pdf_path, output_path, mode):
+    return [python_executable(), str(paths.daily_pdf_parser), str(pdf_path),
+            "--output", str(output_path), "--mode", mode]
+
+
+def word_report(paths, report_date, online, day_ahead, daily, template):
+    command = [python_executable(), str(paths.report_scripts_dir / "generate_red_marked_report.py"),
+               report_date, "--online-workbook", str(online), "--day-ahead-workbook", str(day_ahead),
+               "--daily-clearing-workbook", str(daily)]
+    if template is not None:
+        command.extend(("--template", str(template)))
+    return command
+
+
+def prediction(paths, input_path, output_dir, forecast_days, training_months, run_date):
+    if not 1 <= forecast_days <= 15:
+        raise ValueError("预测天数必须在 1 至 15 之间")
+    return [python_executable(), str(paths.guangdong_price_forecast), "--update-master", "--input", str(input_path),
+            "--output-dir", str(output_dir), "--as-of", run_date, "--forecast-days",
+            str(forecast_days), "--training-months", str(training_months)]

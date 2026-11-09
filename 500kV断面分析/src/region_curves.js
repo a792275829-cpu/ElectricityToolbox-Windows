@@ -1,0 +1,393 @@
+/* Embedded in the offline analysis HTML. No network or chart library required. */
+(() => {
+  'use strict';
+  const finite = value => typeof value === 'number' && Number.isFinite(value);
+  const searchKey = value => String(value).replace(/\s+/g,'').toLowerCase();
+  function aggregateSeries(nodes, selected, mode, count) {
+    const chosen = nodes.filter(n => selected.has(n.name));
+    const groups = new Map();
+    chosen.forEach(node => {
+      const key = mode === 'region' ? node.region : mode === 'city' ? node.city : node.name;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(node);
+    });
+    return [...groups].map(([name, members]) => {
+      const counts = [], prices = [];
+      for (let i = 0; i < count; i++) {
+        const values = members.map(n => n.prices[i]).filter(finite);
+        counts.push(values.length);
+        prices.push(values.length ? values.reduce((a, b) => a + b, 0) / values.length : null);
+      }
+      return {name, members:members.map(n => n.name), total:members.length, prices, counts};
+    });
+  }
+  function linePath(prices, x, y) {
+    let joined = false;
+    return prices.map((value, index) => {
+      if (!finite(value)) { joined = false; return ''; }
+      const command = joined ? 'L' : 'M';
+      joined = true;
+      return `${command}${x(index).toFixed(2)},${y(value).toFixed(2)}`;
+    }).filter(Boolean).join(' ');
+  }
+  function meanPrice(prices) {
+    const values=prices.filter(finite);
+    return values.length ? values.reduce((a,b) => a+b,0)/values.length : null;
+  }
+  function seriesPalette(count) {
+    const palette=['#1261d1','#d13b26','#008568','#9248ad','#b17700','#007d99','#bc307b','#536d25','#5551be','#a34d18','#287bba','#666666'];
+    // Extend without recycling colors when many nodes are selected.
+    for (let i=0;palette.length<count;i++) {
+      const hue=(i*137.508+23)%360,saturation=55+(i%3)*10,lightness=32+(i%4)*6;
+      const a=saturation/100*Math.min(lightness/100,1-lightness/100);
+      const channel=n => {
+        const k=(n+hue/30)%12;
+        return Math.round(255*(lightness/100-a*Math.max(-1,Math.min(k-3,9-k,1)))).toString(16).padStart(2,'0');
+      };
+      const candidate=`#${channel(0)}${channel(8)}${channel(4)}`;
+      if (!palette.includes(candidate)) palette.push(candidate);
+    }
+    return palette.slice(0,count);
+  }
+  function rankNodes(nodes, selected, descending=true, limit=10) {
+    return nodes.filter(n => selected.has(n.name)).map(n => ({name:n.name,mean:meanPrice(n.prices),
+      count:n.prices.filter(finite).length,total:n.prices.length})).filter(n => finite(n.mean))
+      .sort((a,b) => (descending ? b.mean-a.mean : a.mean-b.mean) || a.name.localeCompare(b.name,'zh-CN')).slice(0,limit);
+  }
+  function rankingScale(values) {
+    const valid=values.filter(finite),min=Math.min(0,...valid),max=Math.max(0,...valid);
+    const span=max-min || 1,zero=min<0 ? -min/span*100 : 0;
+    return {zero,mixed:min<0 && max>0,bar:value => {
+      const point=(value-min)/span*100;
+      return {left:Math.min(point,zero),width:Math.abs(point-zero)};
+    }};
+  }
+  globalThis.RegionPriceCurves = {aggregateSeries, linePath, meanPrice, seriesPalette, rankNodes, rankingScale};
+  if (typeof document === 'undefined') return;
+  const model = DATA.curve_data;
+  if (!model) return;
+  const $ = id => document.getElementById(id);
+  const panel = $('regionCurveView'), mapPanel = document.querySelector('.app');
+  const nodes = model.nodes, times = DATA.time_headers;
+  const byName = new Map(nodes.map(n => [n.name, n]));
+  const selected = new Set();
+  const hiddenSeries = new Set();
+  const controls = [];
+  let series = [], currentIndex = 0, guide = null, chartX = null, chartY = null, markerLayer = null;
+  let lastPointer = null, tooltipKey = null, rankAscending = false;
+  const customColors = new Map();
+  let automaticColors = new Map();
+  const styleNames = {
+    nodes:nodes.map(n => n.name), city:model.regions.flatMap(r => r.cities.map(c => c.name)),
+    region:model.regions.map(r => r.name)
+  };
+  const color = name => customColors.get(seriesKey(name)) || automaticColors.get(name);
+  const seriesKey = name => `nodes:${name}`;
+  const visibleSeries = () => series.filter(item => !hiddenSeries.has(seriesKey(item.name)));
+  const available = name => (byName.get(name)?.prices || []).some(finite);
+  const make = (tag, attributes={}, text='') => {
+    const element = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    Object.entries(attributes).forEach(([key,value]) => element.setAttribute(key,value));
+    element.textContent = text;
+    return element;
+  };
+  const uiMotionPreference = typeof matchMedia === 'function'
+    ? matchMedia('(prefers-reduced-motion: reduce)') : {matches:false};
+  const reduceUIMotion = () => uiMotionPreference.matches;
+  const uiAnimations = new WeakMap();
+  function animateUI(element, frames, duration) {
+    uiAnimations.get(element)?.cancel?.();
+    if (reduceUIMotion() || typeof element.animate !== 'function') return null;
+    const animation = element.animate(frames, {duration, easing:'cubic-bezier(.2,.7,.2,1)'});
+    uiAnimations.set(element, animation);
+    return animation;
+  }
+  function animateComparisonPaths(previous, svg) {
+    const current = [...svg.querySelectorAll('path[data-series]')];
+    const oldNames = new Set(previous.map(path => path.dataset.series));
+    const newNames = new Set(current.map(path => path.dataset.series));
+    current.filter(path => !oldNames.has(path.dataset.series))
+      .forEach(path => animateUI(path, [{opacity:0}, {opacity:1}], 140));
+    if (reduceUIMotion()) return;
+    previous.filter(path => !newNames.has(path.dataset.series)).forEach(path => {
+      path.removeAttribute('data-series'); path.setAttribute('data-exiting-series','true');
+      path.setAttribute('pointer-events','none'); path.setAttribute('aria-hidden','true');
+      svg.insertBefore(path, svg.firstChild);
+      const animation = animateUI(path, [{opacity:1}, {opacity:0}], 90);
+      if (animation) { animation.onfinish = () => path.remove(); animation.oncancel = () => path.remove(); }
+      else path.remove();
+    });
+  }
+  function restore() {
+    selected.clear();
+    const hash = location.hash.slice(1), params = new URLSearchParams(hash.split('?')[1] || '');
+    const names = params.has('nodes') ? params.get('nodes').split('|') :
+      (model.regions[0]?.cities[0]?.nodes || []).filter(available);
+    names.filter(name => byName.has(name)).forEach(name => selected.add(name));
+    rankAscending=params.get('rankAsc')==='1';
+    customColors.clear();
+    try {
+      const saved=JSON.parse(params.get('colors') || '{}');
+      Object.entries(saved).forEach(([key,value]) => {
+        if (/^#[0-9a-f]{6}$/i.test(value)) customColors.set(key,value);
+      });
+    } catch (_) { /* Ignore malformed saved colors. */ }
+    $('curvePopupEnabled').checked=params.get('popup')!=='0';
+    hiddenSeries.clear();
+    try {
+      const hidden=JSON.parse(params.get('hidden') || '[]');
+      if (Array.isArray(hidden)) hidden.forEach(key => {
+        if (typeof key!=='string') return;
+        const at=key.indexOf(':'),mode=key.slice(0,at),name=key.slice(at+1);
+        if (styleNames[mode]?.includes(name)) hiddenSeries.add(key);
+      });
+    } catch (_) { /* Ignore malformed saved visibility state. */ }
+    return hash.startsWith('curves');
+  }
+  function save() {
+    const params = new URLSearchParams({mode:'nodes',nodes:[...selected].join('|'),
+      rankAsc:rankAscending ? '1' : '0',colors:JSON.stringify(Object.fromEntries(customColors)),popup:$('curvePopupEnabled').checked ? '1' : '0',hidden:JSON.stringify([...hiddenSeries])});
+    try { history.replaceState(null,'',`#curves?${params}`); } catch (_) { /* File viewers may restrict history. */ }
+  }
+  function switchView(curves) {
+    hideTooltip();
+    document.querySelector('.analysis-switch').dataset.view=curves ? 'curves' : 'topology';
+    (curves ? document.querySelector('.curve-main') : document.querySelector('.map-shell')).prepend(document.querySelector('.analysis-views'));
+    panel.hidden = !curves; mapPanel.hidden = curves;
+    document.dispatchEvent(new CustomEvent('analysisviewchange'));
+    $('showRegionCurves').setAttribute('aria-pressed',String(curves));
+    $('showTopology').setAttribute('aria-pressed',String(!curves));
+    if (curves) { save(); draw(); } else {
+      try { history.replaceState(null,'',location.pathname + location.search + '#topology'); } catch (_) {}
+    }
+  }
+  function checkbox(names, label) {
+    const input = document.createElement('input'); input.type='checkbox'; input.setAttribute('aria-label',label);
+    controls.push({input,names});
+    input.addEventListener('click',event => event.stopPropagation());
+    input.addEventListener('change',() => {
+      names.forEach(name => input.checked ? selected.add(name) : selected.delete(name));
+      update();
+    });
+    return input;
+  }
+  function renderTree() {
+    const tree = $('curveTree'); tree.replaceChildren(); controls.length=0;
+    const term = searchKey($('curveSearch').value);
+    let matches = 0;
+    model.regions.forEach(region => {
+      const regionMatches = region.cities.map(city => ({...city, nodes:city.nodes.filter(name =>
+        !term || searchKey(`${region.name} ${city.name} ${name}`).includes(term))})).filter(c => c.nodes.length);
+      if (!regionMatches.length) return;
+      const group = document.createElement('details'); group.open=true;
+      const heading = document.createElement('summary');
+      const all = region.cities.flatMap(c => c.nodes);
+      heading.append(checkbox(all,`${region.name}全选`),document.createTextNode(`${region.name} · ${all.length}`));
+      group.append(heading);
+      regionMatches.forEach(city => {
+        const details=document.createElement('details'); details.className='curve-city';
+        details.open=Boolean(term) || city.nodes.some(n => selected.has(n));
+        const title=document.createElement('summary');
+        const wholeCity = region.cities.find(c => c.name===city.name).nodes;
+        title.append(checkbox(wholeCity,`${city.name}全选`),document.createTextNode(`${city.name} · ${wholeCity.length}`));
+        details.append(title);
+        city.nodes.forEach(name => {
+          matches++;
+          const label=document.createElement('label'); label.className=term ? 'curve-node curve-search-match' : 'curve-node';
+          label.append(checkbox([name],name),document.createTextNode(name));
+          if (!available(name)) {
+            const note=document.createElement('span'); note.className='curve-unavailable'; note.textContent='暂无电价'; label.append(note);
+          }
+          details.append(label);
+        });
+        group.append(details);
+      });
+      tree.append(group);
+    });
+    if (!matches) tree.textContent='没有匹配的节点';
+    syncChecks();
+  }
+  function syncChecks() {
+    controls.forEach(({input,names}) => {
+      const count=names.filter(n => selected.has(n)).length;
+      input.checked=names.length>0 && count===names.length;
+      input.indeterminate=count>0 && count<names.length;
+    });
+  }
+  function hideTooltip() { $('curveTooltip').hidden=true; lastPointer=null; tooltipKey=null; }
+  function showTooltip(clientX, clientY) {
+    if (!$('curvePopupEnabled').checked || panel.hidden || !visibleSeries().length) return;
+    const tooltip=$('curveTooltip');
+    const key=String(currentIndex);
+    if (tooltipKey!==key || tooltip.hidden) {
+      tooltip.replaceChildren();
+      const title=document.createElement('h3'); title.textContent=`${times[currentIndex] || '无时点'} · 电价（元/MWh）`; tooltip.append(title);
+      const items=visibleSeries().sort((a,b) => {
+        const left=a.prices[currentIndex],right=b.prices[currentIndex];
+        if (!finite(left)) return finite(right) ? 1 : 0;
+        if (!finite(right)) return -1;
+        return right-left;
+      });
+      const limit=Math.max(1,Math.min(12,Math.floor((innerHeight-100)/24)));
+      items.slice(0,limit).forEach(item => {
+        const row=document.createElement('div');row.className='curve-tooltip-row';
+        const label=document.createElement('span'),swatch=document.createElement('i');
+        swatch.className='curve-swatch';swatch.style.borderColor=color(item.name);
+        const name=item.name;
+        label.append(swatch,document.createTextNode(name));
+        const value=document.createElement('b'),price=item.prices[currentIndex];
+        value.textContent=finite(price) ? price.toFixed(4) : '暂无数据';row.append(label,value);tooltip.append(row);
+      });
+      tooltipKey=key;
+    }
+    tooltip.hidden=false;
+    const box=tooltip.getBoundingClientRect();
+    const left=clientX+16+box.width<innerWidth-12 ? clientX+16 : clientX-box.width-16;
+    tooltip.style.left=`${Math.max(12,Math.min(innerWidth-box.width-12,left))}px`;
+    tooltip.style.top=`${Math.max(12,Math.min(innerHeight-box.height-12,clientY+14))}px`;
+    lastPointer={x:clientX,y:clientY};
+  }
+  function renderLegend() {
+    const legend=$('curveLegend'),focus=document.activeElement?.dataset.series;
+    legend.replaceChildren();
+    series.forEach(item => {
+      const button=document.createElement('button');button.type='button';button.dataset.series=item.name;
+      const visible=!hiddenSeries.has(seriesKey(item.name));
+      button.setAttribute('aria-pressed',String(visible));button.setAttribute('aria-label',`${item.name}曲线`);
+      button.title=visible ? '点击隐藏曲线（保留节点选择）' : '点击显示曲线';
+      button.append(document.createTextNode(item.name));
+      const picker=document.createElement('input');picker.type='color';picker.value=color(item.name);
+      picker.setAttribute('aria-label',`${item.name}曲线颜色`);picker.title='修改曲线颜色';
+      picker.addEventListener('change',() => {
+        customColors.set(seriesKey(item.name),picker.value);save();draw();
+      });
+      const entry=document.createElement('span');entry.className='curve-legend-item';
+      entry.append(picker,button);
+      button.addEventListener('click',() => {
+        const key=seriesKey(item.name);hiddenSeries.has(key) ? hiddenSeries.delete(key) : hiddenSeries.add(key);
+        save();draw();
+      });
+      legend.append(entry);
+    });
+    if (focus) [...legend.querySelectorAll('button')].find(b => b.dataset.series===focus)?.focus({preventScroll:true});
+  }
+  function renderRankings() {
+    const items=rankNodes(nodes,selected,!rankAscending);
+    $('curveRankTitle').textContent=rankAscending ? '节点日均价倒数前10（元/MWh）' : '节点日均价前10（元/MWh）';
+    $('curveRankReverse').textContent=rankAscending ? '恢复正序' : '切换倒序';
+    $('curveRankReverse').setAttribute('aria-pressed',String(rankAscending));
+    const scale=rankingScale(items.map(n => n.mean));
+    const list=$('curveRankList');list.replaceChildren();
+    if (!items.length) {const empty=document.createElement('li');empty.className='curve-rank-empty';empty.textContent='所选节点暂无有效电价';list.append(empty);}
+    items.forEach((item,index) => {
+      const row=document.createElement('li');row.className='curve-rank-row';row.dataset.node=item.name;
+      const rank=document.createElement('span');rank.className='curve-rank-number';rank.textContent=String(index+1);
+      const name=document.createElement('span');name.className='curve-rank-name';name.textContent=item.name;name.title=item.name;
+      const value=document.createElement('b');value.textContent=item.mean.toFixed(4);
+      const track=document.createElement('div'),bar=document.createElement('span');
+      track.className='curve-rank-track';bar.className=`curve-rank-bar${item.mean<0 ? ' is-negative' : ''}`;
+      const geometry=scale.bar(item.mean);bar.style.width=`${geometry.width}%`;bar.style.left=`${geometry.left}%`;
+      track.style.setProperty('--rank-zero',`${scale.zero}%`);track.classList.toggle('has-zero',scale.mixed);
+      track.append(bar);row.append(rank,name,value,track);list.append(row);
+    });
+  }
+  function showTime(index) {
+    currentIndex=Math.max(0,Math.min(times.length-1,index));
+    if (guide && chartX) { guide.setAttribute('x1',chartX(currentIndex)); guide.setAttribute('x2',chartX(currentIndex)); }
+    if (markerLayer && chartY) {
+      markerLayer.replaceChildren();
+      visibleSeries().forEach(item => {
+        const value=item.prices[currentIndex];
+        if (finite(value)) markerLayer.append(make('circle',{cx:chartX(currentIndex),cy:chartY(value),r:4,
+          fill:'var(--panel)',stroke:color(item.name),'stroke-width':2}));
+      });
+    }
+    if (lastPointer) showTooltip(lastPointer.x,lastPointer.y);
+  }
+  function draw() {
+    if (panel.hidden) return;
+    hideTooltip();
+    const svg=$('regionPriceChart');
+    const previousPaths=[...svg.querySelectorAll('path[data-series]')].map(path => path.cloneNode(true));
+    svg.replaceChildren(); guide=null;markerLayer=null;
+    series=aggregateSeries(nodes,selected,'nodes',times.length);
+    const palette=seriesPalette(series.length);
+    automaticColors=new Map(series.map((item,index) => [item.name,palette[index]]));
+    renderLegend();renderRankings();
+    const visible=visibleSeries();
+    const all=visible.flatMap(s => s.prices.filter(finite));
+    $('curveEmpty').hidden=all.length>0;
+    $('curveEmpty').textContent=!selected.size ? '请从左侧勾选大区、市或节点。' : !visible.length ?
+      '所有曲线已隐藏，可点击图例或“显示全部曲线”恢复。' : '所选节点在这份数据中暂无有效电价，请更换节点或数据文件。';
+    svg.hidden=!all.length; $('curveExport').disabled=!all.length;
+    if (!all.length) { showTime(currentIndex); return; }
+    const width=Math.max(280,Math.round(svg.clientWidth)), height=Math.max(260,Math.min(520,Math.round(window.innerHeight*.43)));
+    svg.setAttribute('viewBox',`0 0 ${width} ${height}`);
+    const margin={left:62,right:18,top:26,bottom:38};
+    const lo=Math.min(...all),hi=Math.max(...all),pad=Math.max((hi-lo)*.08,1);
+    const min=lo-pad,max=hi+pad;
+    const x=i => margin.left + i/Math.max(times.length-1,1)*(width-margin.left-margin.right);
+    const y=v => margin.top+(max-v)/(max-min)*(height-margin.top-margin.bottom);
+    chartX=x;chartY=y;
+    for (let step=0;step<=4;step++) {
+      const v=max-step/4*(max-min),py=y(v);
+      svg.append(make('line',{x1:margin.left,y1:py,x2:width-margin.right,y2:py,stroke:'var(--line)'}));
+      svg.append(make('text',{x:margin.left-9,y:py+4,'text-anchor':'end','font-size':12,fill:'var(--muted)'},v.toFixed(1)));
+    }
+    svg.append(make('text',{x:margin.left,y:15,'font-size':12,fill:'var(--muted)'},'元/MWh'));
+    [...new Set([0,Math.round((times.length-1)/4),Math.round((times.length-1)/2),Math.round((times.length-1)*3/4),times.length-1])].forEach(i => {
+      svg.append(make('text',{x:x(i),y:height-10,'text-anchor':'middle','font-size':12,fill:'var(--muted)'},times[i] || ''));
+    });
+    visible.forEach(item => {
+      const path=make('path',{d:linePath(item.prices,x,y),fill:'none',stroke:color(item.name),'stroke-width':2,
+        'data-series':item.name});
+      path.append(make('title',{},item.name)); svg.append(path);
+      item.prices.forEach((v,j) => {
+        if (finite(v) && !finite(item.prices[j-1]) && !finite(item.prices[j+1]))
+          svg.append(make('circle',{cx:x(j),cy:y(v),r:3,fill:color(item.name)}));
+      });
+    });
+    animateComparisonPaths(previousPaths,svg);
+    guide=make('line',{y1:margin.top,y2:height-margin.bottom,stroke:'var(--muted)','pointer-events':'none'});
+    svg.append(guide);
+    markerLayer=make('g',{'pointer-events':'none'});svg.append(markerLayer);
+    const hit=make('rect',{x:margin.left,y:margin.top,width:width-margin.left-margin.right,height:height-margin.top-margin.bottom,fill:'transparent'});
+    function point(event) {
+      const b=svg.getBoundingClientRect(),local=(event.clientX-b.left)/b.width*width;
+      const index=Math.max(0,Math.min(times.length-1,Math.round((local-margin.left)/(width-margin.left-margin.right)*Math.max(times.length-1,1))));
+      if (index!==currentIndex) {lastPointer=null;showTime(index);}
+      showTooltip(event.clientX,event.clientY);
+    }
+    hit.addEventListener('pointermove',point);hit.addEventListener('pointerdown',point);hit.addEventListener('pointerleave',hideTooltip);svg.append(hit);
+    showTime(currentIndex);
+  }
+  function update() { syncChecks(); save(); draw(); }
+  $('curveSearch').addEventListener('input',() => { if (!$('curveSearch').value.trim()) renderTree(); });
+  $('curveSearch').addEventListener('blur',renderTree);
+  $('curveSearch').addEventListener('keydown',event => {
+    if (event.key==='Enter' && !event.isComposing) {event.preventDefault();renderTree();}
+  });
+  $('curveRankReverse').addEventListener('click',() => {rankAscending=!rankAscending;save();renderRankings();});
+  $('curvePopupEnabled').addEventListener('change',() => {hideTooltip();save();});
+  document.querySelector('.analysis-switch').addEventListener('keydown',event => {
+    if (!['ArrowLeft','ArrowRight'].includes(event.key)) return;
+    event.preventDefault();
+    const curves=event.key==='ArrowRight';switchView(curves);
+    $(curves ? 'showRegionCurves' : 'showTopology').focus();
+  });
+  $('showRegionCurves').addEventListener('click',() => switchView(true));
+  $('showTopology').addEventListener('click',() => switchView(false));
+  $('curveExport').addEventListener('click',() => {
+    const cell=value => `"${String(value??'').replaceAll('"','""')}"`;
+    const text=value => cell(/^[=+@-]/.test(value) ? "'"+value : value);
+    const exported=visibleSeries();
+    const rows=[['时刻',...exported.flatMap(s => [`${s.name}（元/MWh）`,`${s.name}有效节点数`,`${s.name}已选节点数`])].map(text).join(',')];
+    times.forEach((time,i) => rows.push([cell(time),...exported.flatMap(s => [cell(s.prices[i]),cell(s.counts[i]),cell(s.total)])].join(',')));
+    const url=URL.createObjectURL(new Blob(['\uFEFF'+rows.join('\r\n')],{type:'text/csv;charset=utf-8'}));
+    const a=document.createElement('a');a.href=url;a.download='区域电价曲线.csv';a.click();setTimeout(() => URL.revokeObjectURL(url),1000);
+  });
+  let resizeTimer;
+  window.addEventListener('resize',() => {clearTimeout(resizeTimer);resizeTimer=setTimeout(draw,100);});
+  window.addEventListener('hashchange',() => {const curves=restore();renderTree();switchView(curves);});
+  const initialCurves=restore();renderTree();switchView(initialCurves);
+})();

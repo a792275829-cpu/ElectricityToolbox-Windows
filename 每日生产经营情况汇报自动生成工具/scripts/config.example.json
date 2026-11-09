@@ -1,0 +1,6 @@
+{
+  "username": "your-username",
+  "password": "your-password",
+  "headless": true,
+  "requestDelaySeconds": 1
+}

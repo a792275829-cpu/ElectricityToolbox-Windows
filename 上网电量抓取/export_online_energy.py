@@ -1,0 +1,878 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import re
+import sys
+import time
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import openpyxl
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+WORKSPACE = SCRIPT_DIR.parent
+if str(WORKSPACE) not in sys.path:
+    sys.path.insert(0, str(WORKSPACE))
+from toolbox_credentials import mark_browser_session, prepare_browser_session, read_login_config
+from toolbox_auth_loader import wait_for_login
+from toolbox_dates import normalize_date_input
+import toolbox_qingneng_login as qingneng_login
+
+# Report-local wrappers load this file through importlib and can be evicted from
+# sys.modules afterwards, so keep a stable self reference for the login policy.
+_SELF_MODULE = sys.modules[__name__]
+
+APP_ROOT = SCRIPT_DIR.parent if SCRIPT_DIR.name in {"scripts", "\u811a\u672c"} else SCRIPT_DIR
+BASE_URL = "https://xhxt.chng.com.cn"
+FIRE_APP_URL = f"{BASE_URL}/gdfire/PrivateDataManage/PowerSituationReport"
+ENERGY_APP_URL = f"{BASE_URL}/gdfire/PrivateDataManageCE/PowerSituationReport"
+LOGIN_URL = f"{BASE_URL}/usercenter/#/login"
+from toolbox_storage import data_path, online_energy_output_dir
+
+PROFILE_DIR = data_path(SCRIPT_DIR / ".browser-profile")
+AUTH_STATE_PATH = data_path(SCRIPT_DIR / "auth_state.json")
+AUTH_LOCK_PATH = Path(str(AUTH_STATE_PATH) + ".lock")
+CONFIG_PATH = data_path(SCRIPT_DIR / "config.json")
+OUTPUT_DIR = online_energy_output_dir()
+
+FALLBACK_COMPANIES = [
+    {"tenantId": "e4e6eb5c80731ac70180fab1ba2f0559", "name": "汕头电厂"},
+    {"tenantId": "e4e6eb5c80731ac70180fab3532d0592", "name": "海门电厂"},
+    {"tenantId": "e4e6eb5c80731ac70180faa7f96904eb", "name": "谢岗电厂"},
+    {"tenantId": "e4c88ecc8ec18540018eeb6d767241fe", "name": "华能广东汕头海上风电有限责任公司"},
+    {"tenantId": "e4c9c04d959356250196b2b15da14f65", "name": "华能（汕头金平）新能源有限责任公司"},
+    {"tenantId": "e4c17edf9942cca6019974cabef4188d", "name": "华能（潮州潮安）新能源有限责任公司"},
+]
+
+COMPANY_DISPLAY_NAME = {
+    "汕头电厂": "汕头",
+    "海门电厂": "海门",
+    "谢岗电厂": "东莞",
+    "华能广东汕头海上风电有限责任公司": "海风",
+    "华能（汕头金平）新能源有限责任公司": "金平",
+    "华能（潮州潮安）新能源有限责任公司": "潮安",
+    "清远电厂": "清远",
+}
+
+# Append new companies so existing workbook rows/WPS region mappings stay stable.
+COMPANY_DISPLAY_ORDER = ["汕头", "海门", "东莞", "海风", "金平", "潮安", "清远"]
+
+
+@dataclass
+class Config:
+    username: str = ""
+    password: str = ""
+    headless: bool = True
+    request_delay_seconds: float = 1.0
+    output_dir: Path = OUTPUT_DIR
+
+
+def log(message: str) -> None:
+    print(message, flush=True)
+
+
+def process_is_alive(pid: int) -> bool:
+    if os.name == "nt":
+        from toolbox_platform import process_is_alive as query_process
+        return query_process(pid)
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def parse_lock_timestamp(value: Any) -> float | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+class AuthStateLock:
+    def __init__(self, timeout_seconds: int = 15 * 60) -> None:
+        self.timeout_seconds = timeout_seconds
+        self.path = AUTH_LOCK_PATH
+        self.acquired = False
+
+    def __enter__(self) -> "AuthStateLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        started = time.time()
+        notified = False
+        while True:
+            try:
+                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                owner: dict[str, Any] = {}
+                try:
+                    owner = json.loads(self.path.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+                created_at = parse_lock_timestamp(owner.get("startedAt"))
+                lock_age = time.time() - created_at if created_at else 0
+                owner_pid = int(owner.get("pid") or 0)
+                if lock_age > 6 * 60 * 60 or (owner_pid and not process_is_alive(owner_pid)):
+                    try:
+                        self.path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    continue
+                if time.time() - started > self.timeout_seconds:
+                    raise RuntimeError(f"等待登录态锁超时，请确认没有其他上传/抓取脚本仍在运行：{self.path}")
+                if not notified:
+                    log(f"检测到其他脚本正在使用同一登录态，等待其完成：{self.path}")
+                    notified = True
+                time.sleep(2)
+                continue
+
+            with os.fdopen(fd, "w", encoding="utf-8") as lock_file:
+                json.dump(
+                    {
+                        "pid": os.getpid(),
+                        "startedAt": datetime.now().isoformat(),
+                        "script": "export_online_energy",
+                    },
+                    lock_file,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            self.acquired = True
+            log(f"已获得登录态锁：{self.path}")
+            return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if not self.acquired:
+            return
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+        except PermissionError as cleanup_error:
+            if exc_type is None:
+                raise
+            log(f"清理登录态锁失败，将保留原始错误：{cleanup_error}")
+        self.acquired = False
+
+
+def load_config() -> Config:
+    raw = read_login_config(CONFIG_PATH)
+    return Config(
+        username=str(raw.get("username", "") or ""),
+        password=str(raw.get("password", "") or ""),
+        headless=bool(raw.get("headless", True)),
+        request_delay_seconds=float(raw.get("requestDelaySeconds", 1.0)),
+        output_dir=data_path(Path(raw.get("outputDir") or OUTPUT_DIR).expanduser()),
+    )
+
+
+def validate_date(value: str) -> str:
+    return normalize_date_input(value)
+
+
+def ask_date() -> str:
+    while True:
+        try:
+            return validate_date(input("请输入运行日 YYYY-MM-DD: "))
+        except ValueError as exc:
+            print(f"日期不合法：{exc}")
+
+
+def parse_json_response(response, label: str) -> dict[str, Any]:
+    text = response.text()
+    if response.status >= 400:
+        raise RuntimeError(f"{label} HTTP {response.status}: {text[:300]}")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{label} 返回的不是 JSON，可能登录已失效。片段：{text[:200]}") from exc
+    if data.get("retCode") and data.get("retCode") != "T200":
+        raise RuntimeError(f"{label} 失败：{data.get('retMsg') or data}")
+    return data
+
+
+def request_json_with_retry(
+    context,
+    method: str,
+    url: str,
+    label: str,
+    *,
+    attempts: int = 3,
+    retry_delay_seconds: float = 2.0,
+    timeout: float = 60000,
+    **request_kwargs: Any,
+) -> dict[str, Any]:
+    """Run a JSON API request without leaking transient failures to sibling tools."""
+    if attempts < 1:
+        raise ValueError("attempts 必须大于等于 1")
+
+    last_error: PlaywrightError | None = None
+    request_method = getattr(context.request, method.lower())
+    for attempt in range(1, attempts + 1):
+        try:
+            response = request_method(url, timeout=timeout, **request_kwargs)
+            return parse_json_response(response, label)
+        except (PlaywrightTimeoutError, PlaywrightError) as exc:
+            last_error = exc
+            if attempt < attempts:
+                log(f"{label}网络超时/连接失败，准备重试（{attempt}/{attempts}）")
+                if retry_delay_seconds > 0:
+                    time.sleep(retry_delay_seconds)
+
+    raise RuntimeError(f"{label}网络请求失败，已重试 {attempts} 次，请稍后再试") from last_error
+
+
+def json_or_text(response) -> Any:
+    text = response.text()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
+def load_saved_auth_state(context) -> None:
+    if not AUTH_STATE_PATH.exists():
+        return
+    try:
+        state = json.loads(AUTH_STATE_PATH.read_text(encoding="utf-8"))
+        cookies = state.get("cookies") or []
+        if cookies:
+            context.add_cookies(cookies)
+    except Exception as exc:
+        log(f"读取 auth_state.json 失败，将忽略：{exc}")
+
+
+def save_auth_state(context) -> None:
+    AUTH_STATE_PATH.write_text(json.dumps(context.storage_state(), ensure_ascii=False, indent=2), encoding="utf-8")
+    mark_browser_session(context, AUTH_STATE_PATH)
+
+
+def playwright_proxy() -> dict[str, str] | None:
+    for name in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"):
+        value = os.environ.get(name)
+        if value:
+            return {"server": value}
+    return None
+
+
+def launch_context(playwright, *, headless: bool):
+    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    launch_options = {
+        "headless": headless,
+        "accept_downloads": True,
+    }
+    proxy = playwright_proxy()
+    if proxy is not None:
+        launch_options["proxy"] = proxy
+    try:
+        context = playwright.chromium.launch_persistent_context(
+            str(PROFILE_DIR),
+            channel=None if os.environ.get("TOOLBOX_PORTABLE") == "1" else "chrome",
+            **launch_options,
+        )
+    except PlaywrightError:
+        context = playwright.chromium.launch_persistent_context(
+            str(PROFILE_DIR),
+            **launch_options,
+        )
+    context._qingneng_headless = headless
+    if not prepare_browser_session(context, AUTH_STATE_PATH):
+        load_saved_auth_state(context)
+    from toolbox_auth_requests import AuthenticatedContext
+    return AuthenticatedContext(context, _SELF_MODULE)
+
+
+def is_logged_in(context) -> bool:
+    return qingneng_login.check_session(context.request, base_url=BASE_URL)
+
+
+def base64_decode(value: str) -> bytes:
+    import base64
+
+    return base64.b64decode(value)
+
+
+def base64_encode(value: bytes) -> str:
+    import base64
+
+    return base64.b64encode(value).decode("ascii")
+
+
+def rsa_encrypt_password(public_key_b64: str, password: str) -> str:
+    return qingneng_login.rsa_encrypt_password(public_key_b64, password)
+
+
+def try_api_login(context, username: str, password: str) -> bool:
+    return qingneng_login.api_login(_SELF_MODULE, context, username, password, app_url=FIRE_APP_URL)
+
+
+def try_ui_login(context, username: str, password: str) -> bool:
+    return qingneng_login.ui_login(_SELF_MODULE, context, username, password)
+
+
+def try_auto_login(context, username: str, password: str) -> bool:
+    return qingneng_login.auto_login(_SELF_MODULE, context, username, password)
+
+
+def interactive_login(context, config: Config) -> None:
+    if getattr(context, "_qingneng_account_changed", False) is not True and is_logged_in(context):
+        save_auth_state(context)
+        log("登录态有效，已复用。")
+        return
+    if config.username and config.password and try_auto_login(context, config.username, config.password):
+        save_auth_state(context)
+        log("自动登录成功，登录态已保存。")
+        return
+
+    page = context.new_page()
+    page.goto(FIRE_APP_URL, wait_until="domcontentloaded")
+    log("请在打开的浏览器里完成登录；工具会自动检测并保存登录态（最长等待5分钟）。")
+    try:
+        wait_for_login(lambda: is_logged_in(context))
+        save_auth_state(context)
+    finally:
+        page.close()
+    log("登录态已保存。")
+
+
+def ensure_login(context, config: Config) -> None:
+    context._qingneng_credentials = (config.username, config.password)
+    if getattr(context, "_qingneng_account_changed", False) is not True and is_logged_in(context):
+        return
+    if not config.username or not config.password:
+        raise RuntimeError("未检测到有效登录态，请在任务中心下方填写清能网站账号密码。")
+    log("正在使用已配置的清能网站账号密码自动登录...")
+    if not try_auto_login(context, config.username, config.password):
+        raise RuntimeError("自动登录失败，请在清能网站账号区检查账号密码后重新运行任务。")
+    log("自动登录成功。")
+
+
+def get_companies(context) -> list[dict[str, str]]:
+    response = context.request.get(f"{BASE_URL}/gdfire/api/pf/tenant/user/tenant/grantApplication", timeout=20000)
+    data = parse_json_response(response, "读取公司列表")
+    items = data.get("data") or []
+    companies = [{"tenantId": item["tenantId"], "name": item["name"]} for item in items if item.get("tenantId") and item.get("name")]
+    if not companies:
+        companies = FALLBACK_COMPANIES
+
+    order_lookup = {name: index for index, name in enumerate(COMPANY_DISPLAY_ORDER)}
+    return sorted(
+        companies,
+        key=lambda item: (
+            order_lookup.get(COMPANY_DISPLAY_NAME.get(item["name"], item["name"]), 999),
+            item["name"],
+        ),
+    )
+
+
+def switch_company(context, tenant_id: str) -> None:
+    response = context.request.get(
+        f"{BASE_URL}/usercenter/web/switchTenant",
+        params={"tenantId": tenant_id},
+        timeout=20000,
+    )
+    if response.status >= 400:
+        raise RuntimeError(f"切换公司失败 HTTP {response.status}")
+
+
+def get_units(context) -> list[dict[str, Any]]:
+    response = context.request.get(f"{BASE_URL}/gdfire/api/unit/list", timeout=20000)
+    data = parse_json_response(response, "读取机组/场站列表")
+    return data.get("data") or []
+
+
+def unit_display_name(unit: dict[str, Any]) -> str:
+    return str(unit.get("unitName") or unit.get("unitShortName") or unit.get("unitAlias") or unit.get("id") or "").strip()
+
+
+def natural_key(value: str) -> list[Any]:
+    return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", value)]
+
+
+def is_renewable_unit(unit: dict[str, Any]) -> bool:
+    text = " ".join(
+        str(unit.get(key) or "")
+        for key in ("groupBusinessType", "groupSubType", "businessType", "subType", "unitName", "unitShortName")
+    ).upper()
+    return any(marker in text for marker in ("PHOTOVOLTAIC", "WIND", "新能源", "光伏", "风电"))
+
+
+def is_renewable_company(units: list[dict[str, Any]]) -> bool:
+    return bool(units) and any(is_renewable_unit(unit) for unit in units)
+
+
+def number_or_zero(value: Any) -> float:
+    if value in ("", None, "-"):
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def online_energy_hours(values, *, label: str, allow_empty: bool = False) -> tuple[float | None, ...]:
+    """Parse the 24 hourly values; unreported hours stay blank instead of zero.
+
+    网站对当日尚未填报的场站返回 ``[]``（而不是 24 个 null），这类场站按
+    “24 个时段都未填报”处理，导出为空白单元格并提示，不能让整日导出失败。
+    """
+    if isinstance(values, list) and not values and allow_empty:
+        return (None,) * 24
+    if not isinstance(values, list) or len(values) != 24:
+        raise ValueError(f"{label} 应有完整24个小时电量，实际为 {len(values) if isinstance(values, list) else 0} 个，停止导出。")
+    result = []
+    for hour, raw in enumerate(values):
+        if raw is None and allow_empty:
+            result.append(None)
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f"{label} {hour:02d}:00 电量缺失或无效，停止导出。") from None
+        if isinstance(raw, bool) or not math.isfinite(value):
+            raise ValueError(f"{label} {hour:02d}:00 电量缺失或无效，停止导出。")
+        result.append(value)
+    return tuple(result)
+
+
+def fetch_fire_rows(context, run_date: str, tenant_id: str) -> list[dict[str, Any]]:
+    response = context.request.get(
+        f"{BASE_URL}/gdfire/api/data/unit/power/fire",
+        params={"runDate": run_date, "orgIds": tenant_id, "endDate": run_date},
+        timeout=30000,
+    )
+    data = parse_json_response(response, "读取火电上网电量")
+    rows = data.get("data") or []
+    if not isinstance(rows, list):
+        raise RuntimeError("火电上网电量返回格式不正确")
+    return rows
+
+
+def fetch_qingyuan_rows(context, run_date: str, tenant_id: str, *, metric: str = "onlineEle") -> list[dict[str, Any]]:
+    """Read Qingyuan's dedicated report; ``planValue`` gives the D+2 plan."""
+    if metric not in {"onlineEle", "planValue"}:
+        raise ValueError(f"不支持的清远电量字段：{metric}")
+    response = context.request.get(
+        f"{BASE_URL}/gdfire/api/data/unit/power/qing-yuan/data",
+        params={"runDate": run_date, "endDate": run_date, "orgId": tenant_id},
+        timeout=30000,
+    )
+    data = parse_json_response(response, "读取清远上网电量").get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("columnList"), list) or not isinstance(data.get("rowList"), list):
+        raise ValueError("清远上网电量返回格式不正确，停止导出。")
+    columns = {}
+    for column in data["columnList"]:
+        if column.get("metricType") != metric:
+            continue
+        unit_id, field = column.get("unitId"), column.get("fieldKey")
+        if not unit_id or not field or unit_id in columns or field in columns.values():
+            raise ValueError("清远上网电量列缺失或重复，停止导出。")
+        columns[unit_id] = field
+    if not columns:
+        raise ValueError(f"清远缺少{metric}电量列，停止导出。")
+    hours = {}
+    for row in data["rowList"]:
+        hour = row.get("time")
+        if hour not in [f"{i:02d}:00" for i in range(24)] or hour in hours or not isinstance(row.get("valueMap"), dict):
+            raise ValueError("清远上网电量时刻无效或重复，停止导出。")
+        hours[hour] = row["valueMap"]
+    if len(hours) != 24:
+        raise ValueError("清远上网电量不足24个小时，停止导出。")
+    if any(field not in values for values in hours.values() for field in columns.values()):
+        raise ValueError("清远上网电量数据字段缺失，停止导出。")
+    return [{"unitId": unit_id, "runDate": run_date,
+             "onlineEle": [hours[f"{i:02d}:00"].get(field) for i in range(24)]}
+            for unit_id, field in columns.items()]
+
+
+def fetch_energy_rows(context, run_date: str, tenant_id: str, units: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for unit in units:
+        unit_id = str(unit.get("id") or "")
+        if not unit_id:
+            continue
+        response = context.request.get(
+            f"{BASE_URL}/gdfire/api/data/unit/power/energy",
+            params={"runDate": run_date, "orgIds": tenant_id, "unitIds": unit_id},
+            timeout=30000,
+        )
+        data = parse_json_response(response, f"读取新能源上网电量 {unit_display_name(unit) or unit_id}")
+        items = data.get("data") or []
+        if not isinstance(items, list):
+            raise RuntimeError("新能源上网电量返回格式不正确")
+        rows.extend(items)
+    return rows
+
+
+def unit_created_date(unit: dict[str, Any]) -> str:
+    """Return the site-side creation date of a unit (YYYY-MM-DD), empty when unknown."""
+    match = re.match(r"(\d{4}-\d{2}-\d{2})", str(unit.get("createTime") or ""))
+    return match.group(1) if match else ""
+
+
+def drop_units_created_later(units: list[dict[str, Any]], run_date: str,
+                             company_name: str) -> list[dict[str, Any]]:
+    """A unit created after ``run_date`` cannot have data for it, so leave it out of the sheet."""
+    kept = []
+    for unit in units:
+        created = unit_created_date(unit)
+        if created and created > run_date:
+            log(f"  跳过：{company_name} / {unit_display_name(unit)} 于 {created} 建档，晚于导出日期 {run_date}，本次不输出该机组。")
+            continue
+        kept.append(unit)
+    return kept
+
+
+def collect_date_rows(run_date: str, context, companies: list[dict[str, str]],
+                      config: Config) -> list[dict[str, Any]]:
+    detail_rows: list[dict[str, Any]] = []
+
+    for index, company in enumerate(companies, start=1):
+        tenant_id = company["tenantId"]
+        company_name = company["name"]
+        log(f"[{index}/{len(companies)}] 切换公司：{company_name}")
+        switch_company(context, tenant_id)
+        time.sleep(0.3)
+
+        units = sorted(get_units(context), key=lambda item: natural_key(unit_display_name(item)))
+        units = drop_units_created_later(units, run_date, company_name)
+        unit_names = {str(item.get("id")): unit_display_name(item) for item in units if item.get("id")}
+
+        plans: dict[str, tuple[float | None, ...]] = {}
+        plan_date = ""
+        if company_name == "清远电厂":
+            raw_rows = fetch_qingyuan_rows(context, run_date, tenant_id)
+            plan_date = (datetime.strptime(run_date, "%Y-%m-%d") + timedelta(days=2)).date().isoformat()
+            plan_rows = fetch_qingyuan_rows(context, plan_date, tenant_id, metric="planValue")
+            if {str(row["unitId"]) for row in plan_rows} != set(unit_names):
+                raise ValueError(f"清远 {plan_date} 计划电量机组与机组列表不符，停止导出。")
+            plans = {
+                str(row["unitId"]): online_energy_hours(
+                    row["onlineEle"],
+                    label=f"{plan_date} 清远 / {unit_names[str(row['unitId'])]} 计划值",
+                    allow_empty=True,
+                )
+                for row in plan_rows
+            }
+            for unit_id, plan_values in plans.items():
+                missing_hours = sum(value is None for value in plan_values)
+                if missing_hours:
+                    log(f"  提示：{plan_date} 清远 / {unit_names[unit_id]} 有 {missing_hours} 个时段计划值未填报，导出为空白。")
+        elif is_renewable_company(units):
+            raw_rows = fetch_energy_rows(context, run_date, tenant_id, units)
+        else:
+            raw_rows = fetch_fire_rows(context, run_date, tenant_id)
+
+        power_items = [item for item in raw_rows if str(item.get("unitId") or "") != "-"]
+        if not unit_names or len(unit_names) != len(units):
+            raise ValueError(f"{company_name} 机组列表为空、缺少ID或ID重复，停止导出。")
+        by_unit: dict[str, dict[str, Any]] = {}
+        for item in power_items:
+            unit_id = str(item.get("unitId") or "")
+            if unit_id not in unit_names or unit_id in by_unit:
+                raise ValueError(f"{company_name} 返回未知或重复机组 {unit_id}，停止导出。")
+            if str(item.get("runDate") or "")[:10] != run_date:
+                raise ValueError(f"{company_name} / {unit_id} 返回日期与 {run_date} 不符，停止导出。")
+            by_unit[unit_id] = item
+        if not by_unit:
+            raise ValueError(f"{company_name} 未返回任何机组上网电量，停止导出。")
+
+        for unit in units:
+            unit_id = str(unit.get("id") or "")
+            unit_name = unit_names.get(unit_id, unit_id or "未知机组")
+            item = by_unit.get(unit_id)
+            if item is None:
+                # 机组已建档但当日未纳入日报（新增机组、未开机的备用机组等），按整列空白导出。
+                log(f"  提示：{company_name} / {unit_name} 当日无数据：网站未返回该机组的上网电量记录，整列导出为空白（补录后可重新导出）。")
+                values: tuple[float | None, ...] = (None,) * 24
+            else:
+                values = online_energy_hours(item.get("onlineEle"),
+                    label=f"{run_date} {company_name} / {unit_name}",
+                    allow_empty=True)
+                missing_hours = sum(value is None for value in values)
+                if missing_hours == len(values):
+                    log(f"  提示：{company_name} / {unit_name} 当日无数据：网站未填报任何时段上网电量，整列导出为空白（补录后可重新导出）。")
+                elif missing_hours:
+                    log(f"  提示：{company_name} / {unit_name} 数据缺失：{missing_hours} 个时段未填报，已导出为空白。")
+            for hour, value in enumerate(values):
+                detail_rows.append(
+                    {
+                        "company": company_name,
+                        "unit": unit_name,
+                        "time": f"{hour:02d}:00",
+                        "onlineEle": value,
+                        **({"planEle": plans[unit_id][hour], "planDate": plan_date}
+                           if plans else {}),
+                    }
+                )
+
+        log(f"  完成：{company_name}，记录 {len(units)} 条。")
+        time.sleep(config.request_delay_seconds)
+
+    return detail_rows
+
+
+def iter_detail_rows(dates: list[str], config: Config):
+    """Yield ``(日期, 明细行)`` per date while reusing one login session."""
+    with sync_playwright() as playwright:
+        context = launch_context(playwright, headless=config.headless)
+        try:
+            ensure_login(context, config)
+            companies = get_companies(context)
+            if not companies:
+                raise ValueError("未返回可采集公司，停止导出。")
+            for index, run_date in enumerate(dates, start=1):
+                log(f"[{index}/{len(dates)}] 抓取 {run_date} 上网电量，共 {len(companies)} 家公司。")
+                yield run_date, collect_date_rows(run_date, context, companies, config)
+        finally:
+            context.close()
+
+
+def collect_detail_rows(run_date: str, config: Config) -> list[dict[str, Any]]:
+    """Collect one date; the report pipeline aggregates a single day at a time."""
+    rows = iter_detail_rows([run_date], config)
+    try:
+        return next(rows)[1]
+    finally:
+        rows.close()
+
+
+def display_unit_header(value: str) -> str:
+    numbers = re.findall(r"#(\d+)", value)
+    if len(numbers) > 1:
+        return "、".join(numbers) + "号机"
+    match = re.search(r"#(\d+)", value)
+    if match:
+        return f"{match.group(1)}号机"
+    return value
+
+
+def display_company_name(value: str) -> str:
+    return COMPANY_DISPLAY_NAME.get(value, value)
+
+
+def build_company_blocks(detail_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in detail_rows:
+        company = row["company"]
+        target = grouped.setdefault(company, {"units": [], "rows": {}, "plans": {}, "plan_date": None})
+        if row["unit"] not in target["units"]:
+            target["units"].append(row["unit"])
+        target["rows"][(row["time"], row["unit"])] = row["onlineEle"]
+        if "planEle" in row:
+            if target["plan_date"] not in (None, row["planDate"]):
+                raise ValueError("清远计划电量日期不一致，停止导出。")
+            target["plan_date"] = row["planDate"]
+            target["plans"][(row["time"], row["unit"])] = row["planEle"]
+
+    blocks: list[dict[str, Any]] = []
+    ordered_times = [f"{hour:02d}:00" for hour in range(24)]
+    for company_name in COMPANY_DISPLAY_ORDER:
+        raw_name = next((key for key in grouped if display_company_name(key) == company_name), None)
+        if raw_name is None:
+            continue
+        payload = grouped[raw_name]
+        rows = []
+        for time_key in ordered_times:
+            rows.append([payload["rows"].get((time_key, unit), 0.0) for unit in payload["units"]])
+            if payload["plan_date"]:
+                rows[-1].extend(payload["plans"].get((time_key, unit)) for unit in payload["units"])
+        blocks.append(
+            {
+                "company": company_name,
+                "units": [display_unit_header(unit) for unit in payload["units"]] * (2 if payload["plan_date"] else 1),
+                "actual_count": len(payload["units"]),
+                "plan_date": payload["plan_date"],
+                "rows": rows,
+            }
+        )
+    return blocks
+
+
+def write_summary_sheet(ws, detail_rows: list[dict[str, Any]]) -> None:
+    title_fill = PatternFill("solid", fgColor="EDEDED")
+    header_fill = PatternFill("solid", fgColor="F6F6F6")
+    thin = Side(style="thin", color="000000")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    blocks = build_company_blocks(detail_rows)
+    current_row = 1
+    max_columns = max((len(block["units"]) for block in blocks), default=1)
+
+    for block in blocks:
+        unit_count = max(len(block["units"]), 1)
+        actual_count = block["actual_count"]
+        ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=actual_count)
+        title_cell = ws.cell(current_row, 1, f"{block['company']} 实际上网电量（万千瓦时）")
+        title_cell.font = Font(bold=True)
+        title_cell.alignment = Alignment(horizontal="center", vertical="center")
+        title_cell.fill = title_fill
+        if block["plan_date"]:
+            ws.merge_cells(start_row=current_row, start_column=actual_count + 1, end_row=current_row, end_column=unit_count)
+            plan_title = ws.cell(current_row, actual_count + 1,
+                                 f"清远 {block['plan_date']} 计划电量（万千瓦时）")
+            plan_title.font = Font(bold=True)
+            plan_title.alignment = Alignment(horizontal="center", vertical="center", shrinkToFit=True)
+            plan_title.fill = title_fill
+        for col in range(1, unit_count + 1):
+            ws.cell(current_row, col).border = border
+
+        current_row += 1
+        for col, unit in enumerate(block["units"], start=1):
+            cell = ws.cell(current_row, col, unit)
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.fill = header_fill
+            cell.border = border
+
+        current_row += 1
+        for values in block["rows"]:
+            for col, value in enumerate(values, start=1):
+                cell = ws.cell(current_row, col, value)
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border = border
+            current_row += 1
+
+        current_row += 1
+
+    for col in range(1, max_columns + 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 12
+
+
+def save_excel(run_date: str, detail_rows: list[dict[str, Any]], output_dir: Path) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"上网电量汇总_{run_date}.xlsx"
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "汇总"
+    write_summary_sheet(ws, detail_rows)
+
+    try:
+        wb.save(path)
+        return path
+    except PermissionError:
+        fallback = output_dir / f"上网电量汇总_{run_date}_{datetime.now().strftime('%H%M%S')}.xlsx"
+        wb.save(fallback)
+        return fallback
+
+
+def blank_unit_labels(detail_rows: list[dict[str, Any]]) -> list[str]:
+    """Return ``公司 / 机组`` for units whose 24 hourly cells are all blank."""
+    totals: dict[tuple[str, str], list[int]] = {}
+    for row in detail_rows:
+        counts = totals.setdefault((row["company"], row["unit"]), [0, 0])
+        counts[1] += 1
+        if row["onlineEle"] is None:
+            counts[0] += 1
+    return [f"{display_company_name(company)} / {unit}"
+            for (company, unit), (blank, total) in totals.items()
+            if total and blank == total]
+
+
+def log_blank_summary(run_date: str, detail_rows: list[dict[str, Any]]) -> None:
+    """Workbook is written anyway; the summary is what the UI flags as 完成（有提示）。"""
+    labels = blank_unit_labels(detail_rows)
+    if labels:
+        log(f"提示：{run_date} 有 {len(labels)} 个机组当日无数据：{'、'.join(labels)}（已导出为空白，网站补录后可重新导出）。")
+
+
+def export_online_energy(run_date: str, config: Config) -> Path:
+    detail_rows = collect_detail_rows(run_date, config)
+    path = save_excel(run_date, detail_rows, config.output_dir)
+    log_blank_summary(run_date, detail_rows)
+    return path
+
+
+def range_dates(start_date: str, end_date: str) -> list[str]:
+    start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    if end < start:
+        raise ValueError("结束日期不能早于开始日期，停止导出。")
+    return [(start + timedelta(days=offset)).isoformat() for offset in range((end - start).days + 1)]
+
+
+def export_online_energy_range(start_date: str, end_date: str, config: Config) -> list[Path]:
+    """导出日期范围内每一天，逐日写一个汇总工作簿，已完成日期不受后续失败影响。"""
+    dates = range_dates(start_date, end_date)
+    paths: list[Path] = []
+    rows = iter_detail_rows(dates, config)
+    try:
+        for run_date, detail_rows in rows:
+            path = save_excel(run_date, detail_rows, config.output_dir)
+            paths.append(path)
+            log(f"已保存：{path}")
+            log_blank_summary(run_date, detail_rows)
+    finally:
+        rows.close()
+    return paths
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="导出指定日期各公司各机组上网电量")
+    parser.add_argument("date", nargs="?", help="运行日，格式 YYYY-MM-DD")
+    parser.add_argument("--start-date", help="开始日期，格式 YYYY-MM-DD")
+    parser.add_argument("--end-date", help="结束日期，格式 YYYY-MM-DD")
+    parser.add_argument("--login", action="store_true", help="登录并保存会话")
+    args = parser.parse_args()
+
+    if (args.start_date or args.end_date) and args.date:
+        parser.error("请只用 --start-date/--end-date 表达日期范围，或只给一个位置参数日期")
+    if bool(args.start_date) != bool(args.end_date):
+        parser.error("--start-date 与 --end-date 需要同时提供")
+
+    config = load_config()
+    try:
+        if args.login:
+            with AuthStateLock():
+                with sync_playwright() as playwright:
+                    context = launch_context(playwright, headless=False)
+                    try:
+                        interactive_login(context, config)
+                    finally:
+                        context.close()
+            return 0
+
+        if args.start_date:
+            start_date = validate_date(args.start_date)
+            end_date = validate_date(args.end_date)
+            with AuthStateLock():
+                paths = export_online_energy_range(start_date, end_date, config)
+            log(f"\n完成：共 {len(paths)} 个文件")
+            for path in paths:
+                log(f"  {path}")
+            return 0
+
+        run_date = validate_date(args.date) if args.date else ask_date()
+        with AuthStateLock():
+            path = export_online_energy(run_date, config)
+        log(f"\n完成：{path}")
+        return 0
+    except KeyboardInterrupt:
+        print("\n已取消。")
+        return 130
+    except Exception as exc:
+        from toolbox_cli_login import emit_login_error
+        emit_login_error(exc)
+        print(f"\n失败：{exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
