@@ -7,7 +7,8 @@ from tkinter import ttk
 class FileSelectButton(ttk.Button):
     def __init__(self, parent, *, text="选择文件", command=None):
         # Retain the descriptive text for keyboard/accessibility clients and
-        # the tooltip; only a clear plus sign is drawn on the button.
+        # tests; only a clear plus sign is drawn on the button. No hover/focus
+        # tooltip: it popped up under the button right after picking a file.
         style = ttk.Style(parent)
         style.configure("FileSelect.TButton", padding=5, width=0, anchor="center")
         if style.theme_use() == "aqua":
@@ -24,30 +25,3 @@ class FileSelectButton(ttk.Button):
             self._icons.append(icon)
         super().__init__(parent, text=text, command=command, style="FileSelect.TButton",
                          image=(self._icons[0], "disabled", self._icons[1]), compound="image")
-        self._tip = None
-        self._tip_timer = None
-        self.bind("<Enter>", self._schedule_tip)
-        self.bind("<FocusIn>", self._schedule_tip)
-        for event in ("<Leave>", "<FocusOut>", "<ButtonPress>", "<Destroy>"):
-            self.bind(event, self._hide_tip)
-
-    def _schedule_tip(self, _event=None):
-        self._hide_tip()
-        self._tip_timer = self.after(450, self._show_tip)
-
-    def _show_tip(self):
-        self._tip_timer = None
-        if self.instate(("disabled",)) or not self.winfo_ismapped():
-            return
-        self._tip = tk.Toplevel(self)
-        self._tip.overrideredirect(True)
-        self._tip.geometry(f"+{self.winfo_rootx()}+{self.winfo_rooty() + self.winfo_height() + 4}")
-        ttk.Label(self._tip, text=self.cget("text"), padding=(7, 4)).pack()
-
-    def _hide_tip(self, _event=None):
-        if self._tip_timer is not None:
-            self.after_cancel(self._tip_timer)
-            self._tip_timer = None
-        if self._tip is not None:
-            self._tip.destroy()
-            self._tip = None
