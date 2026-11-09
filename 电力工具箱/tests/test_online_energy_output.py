@@ -353,11 +353,32 @@ class OnlineEnergyOutputTests(unittest.TestCase):
                 {"unitId": "u", "runDate": "2026-10-27", "onlineEle": [1.0] * 24}],
                 units=[{"id": "u", "unitName": "#1"}])
 
-    def test_collect_date_rows_rejects_missing_unit_data(self):
+    def test_collect_date_rows_keeps_unit_without_rows_blank(self):
         units = [{"id": "u1", "unitName": "#1"}, {"id": "u2", "unitName": "#2"}]
-        with self.assertRaisesRegex(ValueError, "缺少机组数据：#2"):
-            self.date_rows("2026-10-28", lambda *a: [
-                {"unitId": "u1", "runDate": "2026-10-28", "onlineEle": [1.0] * 24}], units=units)
+        rows = self.date_rows("2026-10-28", lambda *a: [
+            {"unitId": "u1", "runDate": "2026-10-28", "onlineEle": [1.0] * 24}], units=units)
+        self.assertEqual(len(rows), 48)
+        self.assertEqual([row["unit"] for row in rows[:24]], ["#1"] * 24)
+        self.assertEqual([row["unit"] for row in rows[24:]], ["#2"] * 24)
+        self.assertEqual([row["onlineEle"] for row in rows[:24]], [1.0] * 24)
+        self.assertTrue(all(row["onlineEle"] is None for row in rows[24:]))
+
+    def test_collect_date_rows_rejects_company_without_any_rows(self):
+        units = [{"id": "u1", "unitName": "#1"}, {"id": "u2", "unitName": "#2"}]
+        with self.assertRaisesRegex(ValueError, "未返回任何机组上网电量"):
+            self.date_rows("2026-10-28", lambda *a: [], units=units)
+
+    def test_collect_date_rows_skips_unit_created_after_run_date(self):
+        units = [{"id": "u1", "unitName": "海门#5机组", "createTime": "2026-11-09 09:25:35"},
+                 {"id": "u2", "unitName": "海门#1机组", "createTime": "2022-05-25 23:04:41"}]
+        rows = self.date_rows("2026-11-08", lambda *a: [
+            {"unitId": "u2", "runDate": "2026-11-08", "onlineEle": [2.0] * 24}], units=units)
+        self.assertEqual({row["unit"] for row in rows}, {"海门#1机组"})
+        self.assertEqual(len(rows), 24)
+        # 同一天新建的机组保留，以便当期数据补报后仍然输出。
+        rows = self.date_rows("2026-11-09", lambda *a: [
+            {"unitId": "u2", "runDate": "2026-11-09", "onlineEle": [2.0] * 24}], units=units)
+        self.assertEqual(len(rows), 48)
 
     def test_iter_detail_rows_rejects_empty_company_list(self):
         context = SimpleNamespace(close=Mock())

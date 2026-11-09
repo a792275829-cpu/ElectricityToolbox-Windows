@@ -520,6 +520,25 @@ def fetch_energy_rows(context, run_date: str, tenant_id: str, units: list[dict[s
     return rows
 
 
+def unit_created_date(unit: dict[str, Any]) -> str:
+    """Return the site-side creation date of a unit (YYYY-MM-DD), empty when unknown."""
+    match = re.match(r"(\d{4}-\d{2}-\d{2})", str(unit.get("createTime") or ""))
+    return match.group(1) if match else ""
+
+
+def drop_units_created_later(units: list[dict[str, Any]], run_date: str,
+                             company_name: str) -> list[dict[str, Any]]:
+    """A unit created after ``run_date`` cannot have data for it, so leave it out of the sheet."""
+    kept = []
+    for unit in units:
+        created = unit_created_date(unit)
+        if created and created > run_date:
+            log(f"  跳过：{company_name} / {unit_display_name(unit)} 于 {created} 建档，晚于导出日期 {run_date}，本次不输出该机组。")
+            continue
+        kept.append(unit)
+    return kept
+
+
 def collect_date_rows(run_date: str, context, companies: list[dict[str, str]],
                       config: Config) -> list[dict[str, Any]]:
     detail_rows: list[dict[str, Any]] = []
@@ -532,8 +551,8 @@ def collect_date_rows(run_date: str, context, companies: list[dict[str, str]],
         time.sleep(0.3)
 
         units = sorted(get_units(context), key=lambda item: natural_key(unit_display_name(item)))
+        units = drop_units_created_later(units, run_date, company_name)
         unit_names = {str(item.get("id")): unit_display_name(item) for item in units if item.get("id")}
-        unit_order = {str(item.get("id")): pos for pos, item in enumerate(units) if item.get("id")}
 
         plans: dict[str, tuple[float | None, ...]] = {}
         plan_date = ""
@@ -563,35 +582,34 @@ def collect_date_rows(run_date: str, context, companies: list[dict[str, str]],
         power_items = [item for item in raw_rows if str(item.get("unitId") or "") != "-"]
         if not unit_names or len(unit_names) != len(units):
             raise ValueError(f"{company_name} 机组列表为空、缺少ID或ID重复，停止导出。")
-        seen = set()
+        by_unit: dict[str, dict[str, Any]] = {}
         for item in power_items:
             unit_id = str(item.get("unitId") or "")
-            if unit_id not in unit_names or unit_id in seen:
+            if unit_id not in unit_names or unit_id in by_unit:
                 raise ValueError(f"{company_name} 返回未知或重复机组 {unit_id}，停止导出。")
             if str(item.get("runDate") or "")[:10] != run_date:
                 raise ValueError(f"{company_name} / {unit_id} 返回日期与 {run_date} 不符，停止导出。")
-            seen.add(unit_id)
-        missing = set(unit_names) - seen
-        if missing:
-            raise ValueError(f"{company_name} 缺少机组数据：{'、'.join(unit_names[key] for key in sorted(missing))}，停止导出。")
-        power_items.sort(
-            key=lambda item: (
-                unit_order.get(str(item.get("unitId") or ""), 999),
-                natural_key(unit_names.get(str(item.get("unitId") or ""), str(item.get("unitId") or ""))),
-            )
-        )
+            by_unit[unit_id] = item
+        if not by_unit:
+            raise ValueError(f"{company_name} 未返回任何机组上网电量，停止导出。")
 
-        for item in power_items:
-            unit_id = str(item.get("unitId") or "")
+        for unit in units:
+            unit_id = str(unit.get("id") or "")
             unit_name = unit_names.get(unit_id, unit_id or "未知机组")
-            values = online_energy_hours(item.get("onlineEle"),
-                label=f"{run_date} {company_name} / {unit_name}",
-                allow_empty=True)
-            missing_hours = sum(value is None for value in values)
-            if missing_hours == len(values):
-                log(f"  提示：{company_name} / {unit_name} 当日网站尚未填报任何时段上网电量，整列导出为空白（稍后可在网站补录后重新导出）。")
-            elif missing_hours:
-                log(f"  提示：{company_name} / {unit_name} 有 {missing_hours} 个时段实际上网电量未填报，导出为空白。")
+            item = by_unit.get(unit_id)
+            if item is None:
+                # 机组已建档但当日未纳入日报（新增机组、未开机的备用机组等），按整列空白导出。
+                log(f"  提示：{company_name} / {unit_name} 网站当日未返回该机组上网电量，整列导出为空白（可在网站补报后重新导出）。")
+                values: tuple[float | None, ...] = (None,) * 24
+            else:
+                values = online_energy_hours(item.get("onlineEle"),
+                    label=f"{run_date} {company_name} / {unit_name}",
+                    allow_empty=True)
+                missing_hours = sum(value is None for value in values)
+                if missing_hours == len(values):
+                    log(f"  提示：{company_name} / {unit_name} 当日网站尚未填报任何时段上网电量，整列导出为空白（稍后可在网站补录后重新导出）。")
+                elif missing_hours:
+                    log(f"  提示：{company_name} / {unit_name} 有 {missing_hours} 个时段实际上网电量未填报，导出为空白。")
             for hour, value in enumerate(values):
                 detail_rows.append(
                     {
@@ -604,7 +622,7 @@ def collect_date_rows(run_date: str, context, companies: list[dict[str, str]],
                     }
                 )
 
-        log(f"  完成：{company_name}，记录 {len(power_items)} 条。")
+        log(f"  完成：{company_name}，记录 {len(units)} 条。")
         time.sleep(config.request_delay_seconds)
 
     return detail_rows
