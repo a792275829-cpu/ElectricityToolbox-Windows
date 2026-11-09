@@ -197,11 +197,11 @@ class UpdateUiTests(unittest.TestCase):
     def test_retry_button_shows_progress_while_rechecking(self):
         self.controller.checked(None, ValueError('offline'))
         self.assertEqual(self.app.update_retry_button.cget('text'), '检查更新')
-        with patch.object(self.controller, 'worker'):
+        with patch.object(self.controller, 'worker'), patch('update_ui.messagebox.showinfo'):
             self.app.update_retry_button.invoke()
-        self.assertEqual(self.app.update_retry_button.cget('text'), '检查中…')
-        self.assertIn('disabled', self.app.update_retry_button.state())
-        self.controller.checked(None, None)
+            self.assertEqual(self.app.update_retry_button.cget('text'), '检查中…')
+            self.assertIn('disabled', self.app.update_retry_button.state())
+            self.controller.checked(None, None)
         self.assertEqual(self.app.update_retry_button.winfo_manager(), '')
 
     def test_update_controls_stay_interactive_while_business_inputs_are_locked(self):
@@ -212,6 +212,55 @@ class UpdateUiTests(unittest.TestCase):
             window.perform()
         self.assertTrue(self.service.maintenance)
         self.assertFalse(any('ToolboxUpdateLock' in tag for tag in window.cancel_button.bindtags()))
+
+    def test_window_follows_dpi_scale_and_stays_inside_work_area(self):
+        self.controller.release = self.release
+        with patch('update_ui.window_scale', return_value=2.0), \
+                patch('update_ui.windows_work_area', return_value=(0, 0, 3840, 2160)), \
+                patch('update_ui.windows_frame_metrics', return_value=(16, 39)):
+            self.controller.show()
+            window = self.controller.window
+            self.app.update()
+        self.assertGreaterEqual(window.winfo_width(), int(window.WIDTH * 2) - 40)
+        self.assertLessEqual(window.winfo_height(), 2160 - 39)
+        self.assertGreaterEqual(window.winfo_x(), 0)
+        self.assertGreaterEqual(window.winfo_y(), 0)
+        self.assertLessEqual(window.winfo_x() + window.winfo_width(), 3840)
+        self.assertLessEqual(window.winfo_y() + window.winfo_height(), 2160)
+
+    def test_long_notes_open_taller_with_actions_visible(self):
+        notes = "\n".join(f"第{i}条：修复更新窗口过小导致无法完整查看更新说明。" for i in range(80))
+        self.controller.release = Release("v0.1.34", notes, "https://example.com", {"name": "setup.exe"})
+        self.controller.show()
+        window = self.controller.window
+        self.app.update()
+        self.assertGreater(window.winfo_height(), int(window.MIN_HEIGHT * window.winfo_fpixels('1i') / 96))
+        bottom = window.primary.winfo_rooty() + window.primary.winfo_height()
+        self.assertLessEqual(bottom, window.winfo_rooty() + window.winfo_height())
+
+    def test_short_notes_stay_at_minimum_height(self):
+        self.controller.release = Release("v0.1.34", "仅修复更新窗口尺寸", "https://example.com", {"name": "setup.exe"})
+        self.controller.show()
+        window = self.controller.window
+        self.app.update()
+        minimum = int(window.MIN_HEIGHT * window.winfo_fpixels('1i') / 96)
+        self.assertGreaterEqual(window.winfo_height(), minimum)
+        self.assertLessEqual(window.winfo_height(), minimum + 120)
+
+    def test_release_notes_markdown_renders_as_readable_text(self):
+        notes = ("## [0.1.34]\n\n"
+                 "- 修复 `update_ui` 的 **窗口尺寸**，详见 [发布页](https://example.com)\n\n"
+                 "### 细节\n\n> 引用说明\n")
+        self.controller.release = Release("v0.1.34", notes, "https://example.com", {"name": "setup.exe"})
+        self.controller.show()
+        window = self.controller.window
+        text = window.notes.get("1.0", "end-1c")
+        self.assertNotIn("##", text)
+        self.assertNotIn("**", text)
+        self.assertNotIn("`", text)
+        self.assertIn("修复 update_ui 的 窗口尺寸，详见 发布页", text)
+        self.assertIn("引用说明", text)
+        self.assertTrue(window.notes.tag_ranges("heading"))
 
 
 class UpdateScheduleTests(unittest.TestCase):

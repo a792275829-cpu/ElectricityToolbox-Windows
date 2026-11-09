@@ -3,13 +3,16 @@ from __future__ import annotations
 
 import os
 import queue
+import re
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 import webbrowser
 from tkinter import messagebox, ttk
 
 from github_update import Cancelled, GitHubUpdater
+from toolbox_platform import window_scale, windows_frame_metrics, windows_work_area
 
 
 class UpdateController:
@@ -134,22 +137,29 @@ class UpdateController:
 
 
 class UpdateWindow(tk.Toplevel):
+    # 96 DPI 下的设计尺寸。窗口按 DPI 缩放后还要受屏幕工作区限制，见 _fit_to_content()。
+    WIDTH = 760
+    MIN_WIDTH = 640
+    MIN_HEIGHT = 520
+    SCREEN_MARGIN = 64
+    BODY_PADDING = 24
+
     def __init__(self, controller, release):
         super().__init__(controller.app)
         self.controller, self.release = controller, release
         self.downloading = self.installing = False
         self.cancel_download = threading.Event()
         self.downloaded_path = None
+        self._wraplength = 0
         self.title("软件更新")
         self.transient(controller.app)
-        self.geometry("560x510")
-        self.minsize(480, 420)
         self.protocol("WM_DELETE_WINDOW", self.dismiss)
         self.bind("<Escape>", lambda _e: self.dismiss())
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
-        body = ttk.Frame(self, padding=24)
+        body = ttk.Frame(self, padding=self.BODY_PADDING)
         body.grid(sticky="nsew")
+        self.body = body
         body.columnconfigure(0, weight=1)
         body.rowconfigure(3, weight=1)
         ttk.Label(body, text=f"发现新版本 {release.version}", font=("Helvetica", 20, "bold")).grid(sticky="w")
@@ -159,6 +169,7 @@ class UpdateWindow(tk.Toplevel):
         ttk.Separator(body).grid(sticky="ew", pady=(0, 12))
         notes_frame = ttk.Frame(body)
         notes_frame.grid(sticky="nsew")
+        self.notes_frame = notes_frame
         notes_frame.columnconfigure(0, weight=1)
         notes_frame.rowconfigure(0, weight=1)
         notes = tk.Text(notes_frame, wrap="word", relief="flat", height=12, padx=8, pady=8)
@@ -166,13 +177,26 @@ class UpdateWindow(tk.Toplevel):
         scrollbar = ttk.Scrollbar(notes_frame, command=notes.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         notes.configure(yscrollcommand=scrollbar.set)
-        notes.insert("1.0", release.notes)
+        self.notes = notes
+        self._notes_rows = self._render_notes(release.notes)
+        self._notes_font = tkfont.Font(root=self, font=notes.cget("font") or "TkTextFont")
+        notes.tag_configure(
+            "heading",
+            font=(self._notes_font.cget("family"), max(9, abs(int(self._notes_font.cget("size"))) + 2), "bold"),
+            spacing1=10, spacing3=4,
+        )
+        for text, heading in self._notes_rows:
+            if heading:
+                notes.insert("end", text + "\n", "heading")
+            else:
+                notes.insert("end", text + "\n")
         notes.configure(state="disabled")
         self.progress = ttk.Progressbar(body, maximum=100)
         self.progress.grid(sticky="ew", pady=(12, 8))
         self.status = tk.StringVar(self, "开始更新后将自动下载、校验、退出并安装，再重新启动工具箱；配置和数据保留。" +
                                   ('Windows 优先下载小补丁；补丁不适用时使用完整安装包，安装失败自动恢复旧程序。' if self.is_windows else '日常优先使用增量补丁。'))
-        ttk.Label(body, textvariable=self.status, wraplength=490).grid(sticky="w", pady=(0, 16))
+        self.status_label = ttk.Label(body, textvariable=self.status, wraplength=490)
+        self.status_label.grid(sticky="w", pady=(0, 16))
         actions = ttk.Frame(body)
         actions.grid(sticky="ew")
         actions.columnconfigure(1, weight=1)
@@ -184,6 +208,117 @@ class UpdateWindow(tk.Toplevel):
         if not release.asset:
             self.primary.state(["disabled"])
             self.status.set("此版本尚未提供 Apple 芯片安装包，请查看发布页面。")
+        self._fit_to_content()
+        self.bind("<Configure>", self._on_resize, add="+")
+
+    def _fit_to_content(self):
+        """Size the window from the release notes, then clamp it to the display.
+
+        原来固定 560x510：更新说明每版约 90 行，正文只能显示十几行；而 Tk 的
+        geometry 在 Windows 高 DPI 下是物理像素，150% 屏幕上这个尺寸的观感只有
+        约 373x340，整个窗口看起来很小。这里按 DPI 放大，并按屏幕工作区、说明
+        文本的实际换行行数取高度。
+        """
+        self.update_idletasks()
+        scale = window_scale(self)
+        work_area = windows_work_area()
+        if work_area is not None:
+            left, top, area_width, area_height = work_area
+        else:
+            left = top = 0
+            area_width, area_height = self.winfo_screenwidth(), self.winfo_screenheight()
+        frame_width, frame_height = windows_frame_metrics()
+        margin = int(self.SCREEN_MARGIN * scale)
+        available_width = max(int(self.MIN_WIDTH * scale), area_width - frame_width - margin)
+        available_height = max(int(self.MIN_HEIGHT * scale), area_height - frame_height - margin)
+        width = min(int(self.WIDTH * scale), available_width)
+        fixed_height = self.body.winfo_reqheight() - self.notes_frame.winfo_reqheight()
+        needed = fixed_height + self._notes_height(width, scale)
+        height = min(max(needed, int(self.MIN_HEIGHT * scale)), available_height)
+        x = left + max(0, (area_width - width - frame_width) // 2)
+        y = top + max(0, (area_height - height - frame_height) // 2)
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        self.minsize(min(int(self.MIN_WIDTH * scale), available_width),
+                     min(int(self.MIN_HEIGHT * scale), available_height))
+        self._sync_wraplength(width)
+
+    def _render_notes(self, notes):
+        """Turn the GitHub release body into readable plain text rows.
+
+        更新说明是 Release 的 Markdown 正文，直接塞进 Text 会显示成
+        「### 修复…」「`code`」「**粗体**」，一屏里近半字符是标记符号。
+        这里只做显示层清洗，不改动下载与校验使用的原始内容。
+        """
+        rows = []
+        for raw in (notes or "").splitlines():
+            line = raw.rstrip()
+            if not line.strip():
+                rows.append(("", False))
+                continue
+            stripped = line.strip()
+            if len(stripped) >= 3 and set(stripped) <= {"-", "*", "_"}:
+                rows.append(("", False))  # 分隔线
+                continue
+            heading = re.match(r"^#{1,6}\s+(.*)$", stripped)
+            if heading:
+                rows.append((self._strip_markdown(heading.group(1), True), True))
+                continue
+            rows.append((self._strip_markdown(stripped), False))
+        while rows and not rows[-1][0]:
+            rows.pop()
+        return rows or [("", False)]
+
+    @staticmethod
+    def _strip_markdown(text, heading=False):
+        text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
+        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+        text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+        text = re.sub(r"(?<![\w_])__(.+?)__(?![\w_])", r"\1", text)
+        if heading:
+            text = re.sub(r"[*_`]", "", text)
+        else:
+            text = re.sub(r"`([^`]*)`", r"\1", text)
+        text = re.sub(r"^>\s?", "", text)
+        return text.rstrip()
+
+    def _notes_height(self, width, scale):
+        """Estimate the pixel height the notes need at the final window width."""
+        padding = int(self.BODY_PADDING * scale)
+        usable = max(120, width - 2 * padding - 40)  # 滚动条 + 边框
+        font = self._notes_font
+        line_height = font.metrics("linespace")
+        measured = {}
+
+        def char_width(char):
+            if char not in measured:
+                measured[char] = font.measure(char)
+            return measured[char]
+
+        rows = 0
+        extra = 0
+        for text, heading in self._notes_rows:
+            row_width, line_rows = 0, 1
+            for char in text:
+                size = char_width(char)
+                if row_width + size > usable and row_width:
+                    line_rows += 1
+                    row_width = size
+                else:
+                    row_width += size
+            rows += line_rows
+            if heading:
+                extra += int(line_height * .35) + 14  # spacing1 + spacing3
+        return rows * line_height + extra + 2 * int(8 * scale) + 4
+
+    def _on_resize(self, event):
+        if event.widget is self:
+            self._sync_wraplength(event.width)
+
+    def _sync_wraplength(self, width):
+        target = max(240, width - 2 * self.BODY_PADDING - 24)
+        if abs(target - self._wraplength) > 8:
+            self._wraplength = target
+            self.status_label.configure(wraplength=target)
 
     def dismiss(self):
         if self.installing:
