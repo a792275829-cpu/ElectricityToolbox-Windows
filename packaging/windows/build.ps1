@@ -13,6 +13,9 @@ $arguments = @('packaging/windows/prepare_payload.py', '--python-root', $PythonR
 if ($ForecastWorkbook) { $arguments += @('--forecast-workbook', $ForecastWorkbook) }
 Run-Native "$root/.venv/Scripts/python.exe" @('-m', 'pip', 'install', 'uv')
 Run-Native "$root/.venv/Scripts/python.exe" $arguments
+# prepare_payload.py rebuilds the Rust helper into the payload. Refuse to package
+# a stale copy (for example a 0.1.34 helper inside a 0.1.35 installer).
+Run-Native "$root/.venv/Scripts/python.exe" @('packaging/windows/verify_payload.py')
 Run-Native 'npm.cmd' @('--prefix', 'desktop', 'ci')
 Push-Location -LiteralPath (Join-Path $root 'desktop')
 try { Run-Native 'npm.cmd' @('run', 'build', '--', '--bundles', 'nsis') }
