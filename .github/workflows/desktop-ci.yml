@@ -1,9 +1,9 @@
 name: Desktop checks
 on:
   pull_request:
-    branches: [development]
+    branches: [main]
   push:
-    branches: [development, "codex/**"]
+    branches: [main, "codex/**"]
   workflow_dispatch:
   workflow_call:
 env:
@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && 'development' || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.ref }}
       - run: python3 packaging/tauri/version.py check --require-notes
       - uses: actions/setup-node@v4
         with:

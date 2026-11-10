@@ -1,8 +1,8 @@
 # electricity-toolbox 工作约定
 
-## 默认执行方式
+平台范围：只保证 **Windows 10 / 11 x64** 可安装、可运行。macOS 相关代码、`*.command` 与 `packaging/tauri` 构建脚本原位保留，但不参与 Windows 构建、不再维护、不作为设计约束；新增功能不写双平台文案，也不新增 `sys.platform == "darwin"` 分支。
 
-- 按用户明确要求，本仓库只保证 **Windows x64** 可安装、可运行；macOS 不作为开发与验证约束。新增或修改功能时不再为 macOS 写分支、双平台文案或 `sys.platform == "darwin"` 回退；现存 macOS 代码与 `*.command` / `packaging/tauri` 构建脚本保留不删（它们不参与 Windows 构建），但不再随功能改动同步维护，也不作为设计约束。
+## 默认执行方式
 
 - 对修改、安装、配置、修复类请求，默认直接实施，不先输出长篇方案。
 - 只有业务口径、覆盖范围或破坏性操作存在实质歧义时才询问用户；其余小问题自行检查并处理。
@@ -12,21 +12,21 @@
 
 ## 仓库与改动边界
 
-- 本仓库包含 Rust/Tauri 宿主、Rust Excel 后端、多个 Python/Tk 工具及少量 Node 工具，不要把它当作单一 Python 包处理。
+- 本仓库是混合运行时项目：Rust/Tauri 宿主、Rust 任务服务与 Excel 后端、多个 Python/Tk 工具、少量 Node 工具，不要当作单一 Python 包处理。
+- **源码主线是 `main`**：本机工作副本、GitHub `origin/main` 与 CI 都以它为准，提交默认推送到 `origin/main`。`development` 仅保留历史提交，不再推送新改动。
+- 动手前先看 `docs/project-structure.md` 判断目录性质；不清楚某目录能不能改时先查该文档，不猜。
 - 修改前运行 `git status --short`，记录并保留用户已有改动；不得清理、覆盖或顺带格式化无关文件。
-- 只编辑完成当前任务所需的文件。生成物、登录态、浏览器 profile、真实配置和本地缓存不得加入版本控制。
-- 若根目录存在 `.codegraph/`，理解或定位代码时先使用 `codegraph explore "<问题或符号>"`；更新现有索引使用 `codegraph sync .`，不要重复执行初始化。
+- 只编辑完成当前任务所需的文件。真实配置、登录态、Cookie、`.browser-profile/`、业务数据、缓存与构建产物一律 Git 忽略，不入库、不写进日志和回复。
 - 修改现有功能时先查找其调用方、测试和 GUI 入口，避免只修脚本而遗漏工具箱页面或启动路径。
-- 每次完成源码更新及必要验证后，默认提交当前任务相关改动并同步到 GitHub 的 `origin/development`，回读远端提交确认一致；真实配置、登录态、业务数据、缓存与构建产物继续保持 Git 忽略。同步失败须明确说明原因和未同步内容。
-- 按用户选定的下载页方案，`main` 仅维护安装包下载说明及 GitHub Actions 入口，完整源码在 `development`。本机源码工作副本保持在 `development`，不要将完整源码合并回下载分支。保留 Git 提交历史和版本标签；发布新版本后同步更新 main 的安装包直链，保留 Actions 入口。混有配置、登录态、业务数据或样例的旧目录只清理程序源码，保留这些本地文件。
+- 验证通过后才提交：只暂存本任务相关文件，推送 `origin/main` 并回读远端提交确认一致；未通过验证的改动不提交，同步失败须说明原因和未同步内容。
 
 ## 启动与依赖
 
-- 项目 Python 环境以根目录 `.venv` 为准；不要把个人机器上的绝对解释器路径写入代码。
-- Windows 初始化入口是 `setup_windows.ps1`，源码启动入口是 `start_windows.ps1`（源码调试版 `start_source_test.ps1`）；安装包构建入口为 `packaging/windows/build.ps1`。使用原版 Tk 页面，不另写一套外观近似的 UI。
-- 构建只归档不删除：`prepare_payload.py` 与 `build.ps1` 通过改名把 `payload/app`、`payload/runtime/python`、`desktop/node_modules` 移入 `dist/build-archive/<时间戳>/` 后重建；回收统一走 `packaging/windows/prune_build_archive.py`。禁止对上述目录及 `dist/build-archive/` 使用 `rm -rf`、`shutil.rmtree` 或回收站删除——Agent 会话注入的批量删除守卫在非交互子进程中没有确认通道，会 fail-closed 中断构建。
-- 构建入口 `build.ps1` 先用 `build_env.ps1` 的 `Reset-BuildEnvironment` 移除会话注入的删除守卫（仅去掉指向 `vendor\shim` 的 `NODE_OPTIONS`／`PYTHONPATH`／`PATH` 条目与 `CODEBUDDY_SAFE_DELETE_BULK_GUARD`），使构建与人工终端一致；需保留守卫时用 `-KeepGuard`，但补丁验证阶段的临时目录删除可能被拦。构建前可用 `build.ps1 -DryRun` 自检。
-- 保持“复制整个文件夹到另一台 Windows 机器后可初始化并运行”的可移植目标；macOS 的 `setup_macos.command` / `电力工具箱.command` 仅作历史入口保留，不再验证。
+- Python 环境以根目录 `.venv` 为准，Windows 解释器是 `.venv\Scripts\python.exe`；不要把个人机器上的绝对解释器路径写入代码。
+- 入口：初始化 `setup_windows.ps1`，正式启动 `start_windows.ps1`，源码调试 `start_source_test.ps1`（`-Smoke` 自检输出 `TOOLBOX_SMOKE=OK`），安装包构建 `packaging/windows/build.ps1`。使用原版 Tk 页面，不另写一套外观近似的 UI。
+- 构建只归档不删除：`prepare_payload.py` 与 `build.ps1` 用改名把 `payload/app`、`payload/runtime/python`、`desktop/node_modules` 移入 `dist/build-archive/<时间戳>/` 后重建，回收统一走 `packaging/windows/prune_build_archive.py`。禁止对上述目录及 `dist/build-archive/` 使用 `rm -rf`、`shutil.rmtree` 或回收站删除——Agent 会话注入的批量删除守卫在非交互子进程中没有确认通道，会 fail-closed 中断构建。细节见 `packaging/windows/README.md`。
+- `build.ps1` 会先用 `build_env.ps1` 的 `Reset-BuildEnvironment` 还原被会话注入的环境（`-KeepGuard` 可保留守卫）；不确定参数时用 `-DryRun` 自检。
+- 保持“复制整个文件夹到另一台 Windows 机器后可初始化并运行”的可移植目标。
 - 路径处理使用 `pathlib.Path` 和脚本/仓库相对定位；打开目录及进程控制集中使用平台适配逻辑，避免把系统专用调用散布到业务页面。
 - Node/npm 依赖只应作用于实际需要它们的子工具，不得变成所有 Python 工具的强制前置条件。
 
@@ -50,14 +50,21 @@
 
 ## 验证策略
 
-- 采用“最小充分验证”，先运行与改动最相关的测试，再按风险扩大范围。
+- 采用“最小充分验证”，先跑与改动最相关的测试，再按风险扩大范围。
 - 文案或小范围 GUI 修改：至少完成模块导入或页面创建 smoke test。
 - 计算、解析、映射修改：运行针对性测试，并用小型或真实样本核对结果。
 - 登录、真实写入、安装、并发改动：运行端到端流程，并检查实际产物或持久化状态。
-- 工具箱测试在 `电力工具箱/` 目录逐模块运行（`unittest discover` 会卡在 GUI／网络用例）：
-  `PYTHONPATH=<仓库根>;<电力工具箱>;<电力工具箱>\tests PYTHONUTF8=1 ..\.venv\Scripts\python.exe -m unittest tests.<模块>`。
-  Git Bash 下需用 `cygpath -w` 转成 Windows 路径，否则 `PYTHONPATH` 失效。
-- 启动器 smoke test 使用：`powershell -ExecutionPolicy Bypass -File start_source_test.ps1 -Smoke`（输出 `TOOLBOX_SMOKE=OK`）。
+- 工具箱测试在 `电力工具箱/` 目录逐模块运行（`unittest discover` 会卡在 GUI／网络用例）。PowerShell：
+
+  ```powershell
+  $env:PYTHONPATH = "<仓库根>;<电力工具箱>;<电力工具箱>\tests"
+  $env:PYTHONUTF8 = "1"
+  ..\.venv\Scripts\python.exe -m unittest tests.<模块>
+  ```
+
+  Git Bash 下必须先用 `cygpath -w` 把三个目录转成 Windows 路径，否则 `PYTHONPATH` 失效。
+- 更新器、增量补丁与打包相关用例在仓库根目录运行，例如 `.venv\Scripts\python.exe -m unittest discover -s desktop/tests/python -p "test_*update*.py"`。
+- 启动器 smoke test：`powershell -ExecutionPolicy Bypass -File start_source_test.ps1 -Smoke`（输出 `TOOLBOX_SMOKE=OK`）。
 - 修改依赖或启动流程时，运行 `setup_windows.ps1` 或等价的 `.venv` 导入检查，并验证启动器实际可用。
 - 测试被环境、权限或外部服务阻塞时，明确报告未验证部分及具体原因，不要把部分成功表述成全部完成。
 
@@ -69,12 +76,13 @@
 
 ## 版本与更新日志
 
-- Windows 版本号跟随 macOS 版：对齐 mac 的 `x.y.z` 就直接发布同一个 `x.y.z`（如 Windows 0.1.32 ↔ macOS v0.1.32）。同一 mac 基线确需再次发布 Windows 专属修补时递增版本号，并在 `CHANGELOG.md` 标注对应关系。0.1.33~0.1.36 是历史内部迭代号，内容已并入 0.1.32，不再复用。
-- 自动维护根目录 `CHANGELOG.md`。每次更新版本时，同步记录该版本日期、用户可见的新增／修复／变更及实际验证结果，不得只改版本号或使用空泛占位内容。
-- 使用 `.venv/bin/python packaging/tauri/version.py set X.Y.Z --notes "具体变更"` 同步版本和日志；多项变更重复传入 `--notes`。日期默认采用 Asia/Shanghai，历史记录必须保留。
-- `CHANGELOG.md` 是逐版本更新内容的唯一来源；`packaging/tauri/release_notes.md` 只维护通用安装说明。发布时由版本脚本提取当前版本内容并拼接安装说明，用于 GitHub Release 与应用内更新说明。
-- 发布前执行 `version.py check --tag vX.Y.Z --require-notes`，确认版本一致且更新内容非空；缺少对应日志时禁止打包发布。已发布版本不得覆盖，下一次发布递增版本号。
-- 只发 Windows x64：构建 NSIS 安装包及 SHA-256。完成针对性测试、安装包与摘要校验后才可发布正式版；生成物和签名私钥不进入 Git。Windows 0.1.28 起优先使用独立的 Windows 文件增量补丁与 windows-update-manifest.json，缺少路径或验证失败回退完整 NSIS；0.1.27 及更早客户端需最后完整升级一次。
-- 以下两条为 macOS DMG 通道的历史记录，已停止执行，保留以免误删脚本与附件：Apple 芯片 DMG ＋ `.dmg.sha256`／`update-manifest.json`／`.patch.tar.xz` 增量补丁；为最近三个版本保留升级路径。macOS 相关脚本与历史发行附件保持原状，不再构建、不再验证。
-- 跨主／次版本或显式 `--full-only` 的重大更新使用完整包重设补丁基线。首次引入增量机制时，旧更新器仍需完整升级一次。发布补丁前必须用旧应用副本实际还原，核对全部文件／应用签名，并校验索引及 GitHub 附件摘要；禁止将测试补丁直接当发行包。
-- Windows 增量更新只在临时副本还原完整应用；校验后退出旧程序再运行安装程序，继续复用安装回滚逻辑，保留原配置、用户数据和样例。macOS 的 DMG 还原步骤（`~/Applications/电力工具箱.app`、打开镜像、镜像内安装命令）不再执行。
+- Windows 版本号跟随 macOS 基线：当前基线为 mac v0.1.32，Windows 已在其上递增到 0.1.36；对齐到新的 mac 版本时直接使用对方的 `x.y.z`。Windows 专属修补在同一基线上递增版本号，并在 `CHANGELOG.md` 标注对应的 mac 基线。已正式发布的版本号（0.1.33～0.1.36 等）不得复用。
+- 自动维护根目录 `CHANGELOG.md`：每次更新版本时同步记录该版本日期、用户可见的新增／修复／变更及实际验证结果，不得只改版本号或使用空泛占位内容。
+- 用 `.venv\Scripts\python.exe packaging\tauri\version.py set X.Y.Z --notes "具体变更"` 同步版本和日志；多项变更重复传入 `--notes`。日期默认采用 Asia/Shanghai，历史记录必须保留。
+- `CHANGELOG.md` 是逐版本更新内容的唯一来源；`packaging/tauri/release_notes.md` 只维护通用安装说明。发布时由 `version.py --release-notes` 提取当前版本内容并拼接安装说明。
+- 发布前执行 `version.py check --tag vX.Y.Z --require-notes`，确认版本一致且更新内容非空；缺少对应日志时禁止打包发布。已发布的版本不覆盖，下一次发布递增版本号。
+- 只发 Windows x64：构建 NSIS 安装包及 SHA-256，完成针对性测试与摘要校验后才发布正式版；生成物和签名私钥不进入 Git。0.1.28 起优先使用 Windows 文件增量补丁与 `windows-update-manifest.json`，缺少路径或验证失败回退完整 NSIS；0.1.27 及更早客户端需最后完整升级一次。跨主／次版本或 `build.ps1 -FullOnly` 的重大更新用完整包重设补丁基线。
+- 发布补丁前必须用旧应用副本实际还原，核对全部文件、应用签名，并校验索引及 GitHub 附件摘要；禁止把测试补丁直接当发行包。
+- 增量更新只在临时副本还原完整应用，校验后退出旧程序再运行安装程序，继续复用安装回滚逻辑，保留原配置、用户数据和样例。
+- `main` 上的 `maintain-*.yml` 只是转发壳，调用同仓库 reusable workflow，只跑检查和构建，不创建 Release；在本仓库打 tag 不触发发布，附件由手动上传。
+- macOS DMG 通道已停止：相关脚本与历史发行附件保持原状，不再构建、不再验证。

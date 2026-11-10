@@ -1,4 +1,4 @@
-name: Build Windows from development
+name: Build Windows from main
 on:
   workflow_dispatch:
     inputs:
@@ -10,6 +10,6 @@ permissions:
   contents: read
 jobs:
   windows:
-    uses: a792275829-cpu/ElectricityToolbox-Windows/.github/workflows/windows-desktop.yml@development
+    uses: a792275829-cpu/ElectricityToolbox-Windows/.github/workflows/windows-desktop.yml@main
     with:
       installer: ${{ inputs.installer }}

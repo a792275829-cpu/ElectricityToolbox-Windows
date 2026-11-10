@@ -7,12 +7,12 @@
 
 | 位置 | 内容 | 作用 |
 | --- | --- | --- |
-| `development`（本机工作副本） | 全部源码、文档、打包脚本 | 唯一的开发与构建来源 |
-| `main` | 仅 `README.md` 与三个 `maintain-*.yml` | 安装说明与 Actions 入口 |
-| `origin/development` | 与本地同步的源码 | 供他人查看源码、供 CI 运行 |
+| `main`（本机工作副本） | 全部源码、文档、打包脚本 | 唯一的开发与构建来源，CI 与 PR 目标 |
+| `origin/main` | 与本地同步的源码 | 供他人查看源码、供 CI 运行 |
+| `development` | 历史提交，不再推送 | 仅追溯旧提交 |
 | GitHub Release | NSIS 安装包、`.sha256`、增量索引 | 对外发布与在线更新来源 |
 
-`main` 上的 `maintain-macos.yml` / `maintain-windows.yml` 只是转发壳，调用 `development` 里的 reusable workflow，只跑检查和构建，**不会创建 Release**。
+`main` 上的 `maintain-macos.yml` / `maintain-windows.yml` 只是转发壳，调用同仓库 `main` 分支的 reusable workflow，只跑检查和构建，**不会创建 Release**。
 `desktop-release.yml` 的 `prepare` 作业限定 `repository == electricity-toolbox-scripts`，在本仓库打 tag 不会触发发布。发布是手动上传附件。
 
 ## 六环节流程
@@ -67,7 +67,7 @@ powershell -ExecutionPolicy Bypass -File packaging/windows/build.ps1 -PythonRoot
 
 ### ⑤ 更新到仓库
 
-1. 提交并推送源码：`git push origin development`，并回读远端确认提交一致。
+1. 提交并推送源码：`git push origin main`，并回读远端确认提交一致。
 2. 打标签：`git tag v<版本>` 与源码提交对应（版本号规则见下）。
 3. 在 GitHub 上创建 Release，**完整包、`.sha256`、`updates-<版本>/` 内全部附件一起上传**；只传安装包会导致客户端拿不到增量索引，退回每次下载完整包。
 4. 已发布版本不得覆盖；需要再改就递增版本号。
@@ -138,4 +138,4 @@ Start-Process -Wait -FilePath "dist\windows\ElectricityToolbox_<版本>_windows_
 - [ ] 安装包与增量索引均已生成，`.sha256` 已核对
 - [ ] Release 附件齐全（完整包 + 索引整套）
 - [ ] 静默安装后三处版本回读一致
-- [ ] 源码已推送到 `origin/development`，远端提交已回读确认
+- [ ] 源码已推送到 `origin/main`，远端提交已回读确认

@@ -1,4 +1,4 @@
-name: Publish macOS release from development
+name: Publish macOS release from main
 on:
   workflow_dispatch:
     inputs:
@@ -14,7 +14,7 @@ permissions:
   contents: write
 jobs:
   release:
-    uses: a792275829-cpu/ElectricityToolbox-Windows/.github/workflows/desktop-release.yml@development
+    uses: a792275829-cpu/ElectricityToolbox-Windows/.github/workflows/desktop-release.yml@main
     with:
       tag: ${{ inputs.tag }}
       full_only: ${{ inputs.full_only }}
