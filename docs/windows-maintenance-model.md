@@ -9,8 +9,9 @@
 | --- | --- | --- |
 | `main`（本机工作副本） | 全部源码、文档、打包脚本 | 唯一的开发与构建来源，CI 与 PR 目标 |
 | `origin/main` | 与本地同步的源码 | 供他人查看源码、供 CI 运行 |
-| `development` | 历史提交，不再推送 | 仅追溯旧提交 |
 | GitHub Release | NSIS 安装包、`.sha256`、增量索引 | 对外发布与在线更新来源 |
+
+原有的 `development` 分支已删除，原提交都在 `main` 的历史里（`git log` 可查）；不要再重建同名分支。
 
 `main` 上的 `maintain-macos.yml` / `maintain-windows.yml` 只是转发壳，调用同仓库 `main` 分支的 reusable workflow，只跑检查和构建，**不会创建 Release**。
 `desktop-release.yml` 的 `prepare` 作业限定 `repository == electricity-toolbox-scripts`，在本仓库打 tag 不会触发发布。发布是手动上传附件。

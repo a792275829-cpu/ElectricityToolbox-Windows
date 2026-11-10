@@ -13,7 +13,7 @@
 ## 仓库与改动边界
 
 - 本仓库是混合运行时项目：Rust/Tauri 宿主、Rust 任务服务与 Excel 后端、多个 Python/Tk 工具、少量 Node 工具，不要当作单一 Python 包处理。
-- **源码主线是 `main`**：本机工作副本、GitHub `origin/main` 与 CI 都以它为准，提交默认推送到 `origin/main`。`development` 仅保留历史提交，不再推送新改动。
+- **源码主线是 `main`**：本机工作副本、GitHub `origin/main` 与 CI 都以它为准，提交默认推送到 `origin/main`。`development` 分支已删除（原有用提交都在 `main` 历史里，追溯用 `git log`），不要重建同名分支再把提交分开。
 - 动手前先看 `docs/project-structure.md` 判断目录性质；不清楚某目录能不能改时先查该文档，不猜。
 - 一次性产物不要放 `docs/` 根目录：评审与上游比对快照进 `docs/reviews/`，逐版本验证记录进 `docs/releases/vX.Y.Z.md`；`docs/README.md` 只索引当前有效文档与归档入口。
 - 修改前运行 `git status --short`，记录并保留用户已有改动；不得清理、覆盖或顺带格式化无关文件。
