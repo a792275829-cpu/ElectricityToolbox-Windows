@@ -28,7 +28,7 @@
 - 入口：初始化 `setup_windows.ps1`，正式启动 `start_windows.ps1`，源码调试 `start_source_test.ps1`（`-Smoke` 自检输出 `TOOLBOX_SMOKE=OK`），安装包构建 `packaging/windows/build.ps1`。使用原版 Tk 页面，不另写一套外观近似的 UI。
 - 构建只归档不删除：`prepare_payload.py` 与 `build.ps1` 用改名把 `payload/app`、`payload/runtime/python`、`desktop/node_modules` 移入 `dist/build-archive/<时间戳>/` 后重建，回收统一走 `packaging/windows/prune_build_archive.py`。禁止对上述目录及 `dist/build-archive/` 使用 `rm -rf`、`shutil.rmtree` 或回收站删除——Agent 会话注入的批量删除守卫在非交互子进程中没有确认通道，会 fail-closed 中断构建。细节见 `packaging/windows/README.md`。
 - `build.ps1` 会先用 `build_env.ps1` 的 `Reset-BuildEnvironment` 还原被会话注入的环境（`-KeepGuard` 可保留守卫）；不确定参数时用 `-DryRun` 自检。
-- 保持“复制整个文件夹到另一台 Windows 机器后可初始化并运行”的可移植目标。
+- 保持“复制整个文件夹到另一台 Windows 机器后可初始化并运行”的可移植目标；本机工作副本目录名不要带版本号，版本只在 `.python-version` 与 `desktop/package.json` 里，避免每版改名后 `.venv` 的绝对路径失效。
 - 路径处理使用 `pathlib.Path` 和脚本/仓库相对定位；打开目录及进程控制集中使用平台适配逻辑，避免把系统专用调用散布到业务页面。
 - Node/npm 依赖只应作用于实际需要它们的子工具，不得变成所有 Python 工具的强制前置条件。
 
