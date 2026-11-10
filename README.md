@@ -82,7 +82,7 @@ macOS 版在独立仓库 [a792275829-cpu/electricity-toolbox-scripts](https://gi
 
 ```bash
 git clone --branch main https://github.com/a792275829-cpu/ElectricityToolbox-Windows.git
-cd electricity-toolbox-rust-windows
+cd ElectricityToolbox-Windows
 ```
 
 也可以在 GitHub 切换到 `main` 分支后下载源码 ZIP，解压后进入项目根目录。

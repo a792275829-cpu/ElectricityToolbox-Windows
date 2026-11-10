@@ -22,7 +22,7 @@ Excel 重活走 Rust 原生后端。仓库里同时存在「应用外壳」「Tk
 | `desktop/` | Tauri 外壳：`src-tauri/` Rust 宿主、`src/` 前端、`python/` 桥接与更新器、`tests/` | 不能。打包路径、CI、更新器都写死 |
 | `native/price-xlsx/` | Rust Excel 后端，编译成 `toolbox-price-xlsx.exe` 与 `toolbox-service.exe` | 不能 |
 | `电力工具箱/` | Tk 界面框架：`toolbox/` 页面、命令、服务、任务、UI 组件；`tests/` 回归 | 不能。所有页面的 import 根 |
-| `packaging/` | `windows/` Windows 打包；`tauri/` 版本号与通用构建脚本；`github-downloads/` 下载页素材 | 不能 |
+| `packaging/` | `windows/` Windows 打包；`tauri/` 版本号与通用构建脚本 | 不能 |
 | `00_启动/` | 双击入口。`.cmd` 只是转调根目录 `*.ps1`；`.command` 是 macOS 历史入口（保留不维护） | 可以增删，但要同步 README |
 | `docs/` | 文档，索引见 `docs/README.md` | 可以，注意 CHANGELOG 里的历史链接 |
 | `说明文档/` | 一页纯文本入口说明，与 README 重复度高 | 可以改内容，改入口时同步它 |
