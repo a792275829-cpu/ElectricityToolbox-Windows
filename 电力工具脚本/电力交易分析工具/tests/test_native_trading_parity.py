@@ -2,12 +2,15 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[3]
 BINARY = Path(os.environ.get('TOOLBOX_NATIVE_BINARY', ROOT / '500kV断面分析/bin/toolbox-price-xlsx.exe'))
 
 def native(action, **payload):
+    # Match the production adapter's Python-version-dependent summation contract.
+    payload.setdefault("_compensated_sum", sys.version_info >= (3, 12))
     response = subprocess.run([str(BINARY)], input=json.dumps(dict(protocol=1, operation='trading', path='', payload=dict(action=action, **payload)), ensure_ascii=False), capture_output=True, text=True, encoding='utf-8')
     if response.returncode:
         raise AssertionError('Trading Rust operation unavailable: ' + response.stderr)
@@ -25,7 +28,6 @@ class TradingNativeParityTests(unittest.TestCase):
 # Domain fixture: both rectangular exports and vertically repeated blocks, plus
 # shifted company summary labels and renewable values. No production data.
 import importlib.util
-import sys
 from tempfile import TemporaryDirectory
 from unittest import mock
 from openpyxl import Workbook, load_workbook

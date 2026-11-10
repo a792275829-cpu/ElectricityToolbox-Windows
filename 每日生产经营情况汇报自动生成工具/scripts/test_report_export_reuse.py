@@ -17,8 +17,12 @@ class ReportExportReuseTests(unittest.TestCase):
                 config = report_export.load_config()
         self.assertEqual(report_export.OUTPUT_DIR, config.output_dir)
         self.assertEqual(report_export.AUTH_LOCK_PATH, report_export.AuthStateLock().path)
-        self.assertEqual(report_export.AUTH_STATE_PATH.parent, report_export.SCRIPT_DIR)
-        self.assertEqual(report_export.PROFILE_DIR.parent, report_export.SCRIPT_DIR)
+        state_dir = report_export.data_path(report_export.SCRIPT_DIR)
+        self.assertEqual(report_export.AUTH_STATE_PATH.parent, state_dir)
+        self.assertEqual(report_export.PROFILE_DIR.parent, state_dir)
+        self.assertNotEqual(
+            state_dir, report_export.data_path(report_export.WORKSPACE / "上网电量抓取"),
+        )
 
     def test_summary_export_values_survive_reopen(self) -> None:
         rows = [

@@ -70,6 +70,9 @@ def check(tag=None):
 def set_version(version, notes=(), date=None):
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise ValueError("版本号须为 X.Y.Z")
+    current = json.loads((ROOT / "desktop/package.json").read_text())["version"]
+    if tuple(map(int, version.split('.'))) <= tuple(map(int, current.split('.'))):
+        raise ValueError(f"新版本必须大于当前版本 {current}，不得复用或倒退")
     changelog_path, changelog_content = update_changelog(version, notes, date)
     for name in (
         "desktop/package.json",

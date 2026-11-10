@@ -1,4 +1,4 @@
-"""Source export and runtime download helpers for the macOS desktop build."""
+"""Source export and runtime download helpers shared by desktop packaging."""
 from __future__ import annotations
 
 import hashlib
@@ -53,8 +53,10 @@ def exportable(relative: Path) -> bool:
             and not relative.name.startswith("~$"))
 
 
-def export_source(destination: Path, *, predicate=exportable, collected=None) -> int:
-    raw = subprocess.check_output(["git", "ls-files", "-co", "--exclude-standard", "-z"], cwd=ROOT)
+def export_source(destination: Path, *, predicate=exportable, collected=None,
+                  tracked_only=False) -> int:
+    flags = ["-c"] if tracked_only else ["-co", "--exclude-standard"]
+    raw = subprocess.check_output(["git", "ls-files", *flags, "-z"], cwd=ROOT)
     count = 0
     for name in sorted(set(raw.decode("utf-8").split("\0"))):
         if not name:

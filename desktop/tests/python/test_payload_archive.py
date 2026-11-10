@@ -5,6 +5,9 @@ import importlib.util
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
+
+TOOLBOX_TEST_TAGS = ()
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -81,6 +84,10 @@ class PruneArchiveTests(unittest.TestCase):
 
         self.temp = tempfile.TemporaryDirectory(prefix="prune-archive-")
         self.root = Path(self.temp.name)
+        self.override = patch.object(prune, 'ROOT', self.root)
+        self.override.start()
+        self.addCleanup(self.override.stop)
+        self.root = self.root / 'dist/build-archive'
         for stamp in ("20260101-000000", "20260102-000000", "20260103-000000"):
             (self.root / stamp / "app").mkdir(parents=True)
             (self.root / stamp / "app" / "file.txt").write_text("x", encoding="utf-8")
@@ -109,6 +116,40 @@ class PruneArchiveTests(unittest.TestCase):
         prune.purge(self.root / "20260104-000000")
 
         self.assertFalse((self.root / "20260104-000000").exists())
+
+    def test_default_preview_keeps_files_and_apply_removes_only_old_snapshots(self):
+        prune.main(['--root', str(self.root)])
+        self.assertEqual(len(list(self.root.iterdir())), 3)
+        prune.main(['--root', str(self.root), '--apply'])
+        self.assertEqual([path.name for path in self.root.iterdir()], ['20260103-000000'])
+
+    def test_outside_root_and_non_snapshot_are_rejected_without_deletion(self):
+        outside = Path(self.temp.name) / '20260101-000000'
+        outside.mkdir()
+        with self.assertRaises(ValueError):
+            prune.purge(outside)
+        self.assertTrue(outside.exists())
+        other = self.root / 'user-data'
+        other.mkdir()
+        with self.assertRaises(ValueError):
+            prune.purge(other)
+        self.assertTrue(other.exists())
+
+    def test_reparse_point_is_rejected(self):
+        with patch.object(prune.Path, 'lstat') as info:
+            info.return_value.st_mode = 0o40755
+            info.return_value.st_file_attributes = 0x400
+            with self.assertRaises(ValueError):
+                prune.validate_root(self.root)
+
+    def test_failed_deletion_is_reported(self):
+        with patch.object(prune.shutil, 'rmtree', side_effect=PermissionError('blocked')):
+            with self.assertRaises(PermissionError):
+                prune.purge(self.root / '20260101-000000')
+
+    def test_negative_keep_rejected(self):
+        with self.assertRaises(ValueError):
+            prune.select_removals(self.root, -1, False)
 
 
 if __name__ == "__main__":

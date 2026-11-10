@@ -1,6 +1,6 @@
 # electricity-toolbox 工作约定
 
-平台范围：只保证 **Windows 10 / 11 x64** 可安装、可运行。macOS 相关代码、`*.command` 与 `packaging/tauri` 构建脚本原位保留，但不参与 Windows 构建、不再维护、不作为设计约束；新增功能不写双平台文案，也不新增 `sys.platform == "darwin"` 分支。
+平台范围：只保证 **Windows 10 / 11 x64** 可安装、可运行。macOS 专用代码与 `*.command` 原位保留，不构建、不维护、不作为设计约束；`packaging/tauri` 中的共享版本、源码导出及迁移逻辑仍供 Windows 复用。新增功能不写双平台文案，也不新增 `sys.platform == "darwin"` 分支。
 
 ## 默认执行方式
 
@@ -13,22 +13,25 @@
 ## 仓库与改动边界
 
 - 本仓库是混合运行时项目：Rust/Tauri 宿主、Rust 任务服务与 Excel 后端、多个 Python/Tk 工具、少量 Node 工具，不要当作单一 Python 包处理。
-- **源码主线是 `main`**：本机工作副本、GitHub `origin/main` 与 CI 都以它为准，提交默认推送到 `origin/main`。`development` 分支已删除（原有用提交都在 `main` 历史里，追溯用 `git log`），不要重建同名分支再把提交分开。
+- **源码主线是 `main`**：它是集成、CI 和发行基线；允许短期 `codex/*` 工作分支，验证后合入 main。不重建长期 `development` 分支。
 - 动手前先看 `docs/project-structure.md` 判断目录性质；不清楚某目录能不能改时先查该文档，不猜。
 - 一次性产物不要放 `docs/` 根目录：评审与上游比对快照进 `docs/reviews/`，逐版本验证记录进 `docs/releases/vX.Y.Z.md`；`docs/README.md` 只索引当前有效文档与归档入口。
 - 修改前运行 `git status --short`，记录并保留用户已有改动；不得清理、覆盖或顺带格式化无关文件。
 - 只编辑完成当前任务所需的文件。真实配置、登录态、Cookie、`.browser-profile/`、业务数据、缓存与构建产物一律 Git 忽略，不入库、不写进日志和回复。
 - 修改现有功能时先查找其调用方、测试和 GUI 入口，避免只修脚本而遗漏工具箱页面或启动路径。
-- 验证通过后才提交：只暂存本任务相关文件，推送 `origin/main` 并回读远端提交确认一致；未通过验证的改动不提交，同步失败须说明原因和未同步内容。
+- 修改、提交同步、正式发行是三个独立阶段。普通修复默认完成修改与验证；只有用户要求提交／同步时才提交推送，要求发行时才打标签、发布。只暂存本任务文件；已有混合改动无法可靠拆分时不替用户提交。推送后回读对应远端提交；验证受阻须明确说明，不冒充通过。
+- 本文件只定义长期规则；操作步骤以 `docs/windows-maintenance-model.md` 为准，目录事实以 `docs/project-structure.md` 为准。不在多份文档复制版本值、测试清单或发行检查表。
 
 ## 启动与依赖
 
-- Python 版本只有一处事实源：根目录 `.python-version`（当前 `3.11.15`）。本地 `.venv`、内置运行时和 CI 都按它安装，`build.ps1` 与 `verify_payload.py` 会校验，不一致直接报错；改动版本必须同时重建 payload。Windows 解释器是 `.venv\Scripts\python.exe`，不要把个人机器上的绝对解释器路径写入代码。
+- Python 版本只有一处事实源：根目录 `.python-version`。本地 `.venv`、内置运行时和 CI 都按它安装，`build.ps1` 与 `verify_payload.py` 会校验，不一致直接报错；改动版本必须同时重建 payload。Windows 解释器是 `.venv\Scripts\python.exe`，不要把个人机器上的绝对解释器路径写入代码。
 - 依赖版本只在 `packaging/windows/requirements.txt` 维护（内置运行时用的同一套 pin）；根 `requirements.txt` 只转引它，不要另写版本号。macOS 侧仍用 `packaging/tauri/requirements-macos.lock`。
 - 入口：初始化 `setup_windows.ps1`，正式启动 `start_windows.ps1`，源码调试 `start_source_test.ps1`（`-Smoke` 自检输出 `TOOLBOX_SMOKE=OK`），安装包构建 `packaging/windows/build.ps1`。使用原版 Tk 页面，不另写一套外观近似的 UI。
-- 构建只归档不删除：`prepare_payload.py` 与 `build.ps1` 用改名把 `payload/app`、`payload/runtime/python`、`desktop/node_modules` 移入 `dist/build-archive/<时间戳>/` 后重建，回收统一走 `packaging/windows/prune_build_archive.py`。禁止对上述目录及 `dist/build-archive/` 使用 `rm -rf`、`shutil.rmtree` 或回收站删除——Agent 会话注入的批量删除守卫在非交互子进程中没有确认通道，会 fail-closed 中断构建。细节见 `packaging/windows/README.md`。
-- `build.ps1` 会先用 `build_env.ps1` 的 `Reset-BuildEnvironment` 还原被会话注入的环境（`-KeepGuard` 可保留守卫）；不确定参数时用 `-DryRun` 自检。
-- 保持“复制整个文件夹到另一台 Windows 机器后可初始化并运行”的可移植目标；本机工作副本目录名不要带版本号，版本只在 `.python-version` 与 `desktop/package.json` 里，避免每版改名后 `.venv` 的绝对路径失效。
+- 生成目录采用归档后重建；回收统一走 `packaging/windows/prune_build_archive.py`，默认预览、显式 `--apply` 执行，只允许仓库 `dist/build-archive/` 内的快照，拒绝链接／重解析点。成功构建可用 `-PruneArchive` 保留最近一份；失败现场保留至诊断结束。清理失败必须报告，不绕过会话守卫。不得删除源码、运行中目录、用户数据或虚拟环境的基础解释器。
+- 构建保留调用环境及安全守卫，不自动移除会话注入；`-KeepGuard` 仅作旧参数兼容。环境阻塞时保留第一条异常，修复环境后重试；不确定归档目标时用 `-DryRun` 自检。
+- 可移植承诺是：源码复制后可重新初始化，发行安装包独立运行。`.venv` 不承诺可搬移；复制／移动源码后重建它，不手改 `pyvenv.cfg` 修补路径。应用版本以 `desktop/package.json` 为准，Python 版本以 `.python-version` 为准，其他元数据由工具同步；目录名不承担版本管理。
+- 正式构建只使用干净 Git 检出的已跟踪文件，记录来源提交；开发构建显式传 `-DevelopmentBuild`，产物进入独立目录，禁止发布。`.gitignore` 不是载荷清单；新增模块必须核对载荷收录与安装版导入。
+- 目录和共享模块允许有目的地重构；同步调用方、注册项、载荷规则与兼容迁移，并验证源码及安装版。保持原版 Tk 页面，不把当前物理目录布局当作永久接口。
 - 路径处理使用 `pathlib.Path` 和脚本/仓库相对定位；打开目录及进程控制集中使用平台适配逻辑，避免把系统专用调用散布到业务页面。
 - Node/npm 依赖只应作用于实际需要它们的子工具，不得变成所有 Python 工具的强制前置条件。
 
@@ -61,14 +64,15 @@
   .venv\Scripts\python.exe tools\run_tests.py --module test_date_inputs   # 指定的模块，可重复
   ```
 
-  入口会按模块起子进程并带超时，某个模块挂住只影响它自己，最后给出通过数与失败模块；需要 Rust 后端的模块照常用 `TOOLBOX_XLSX_BACKEND=rust` 之类的环境变量，入口会原样传给子进程。改动测试分组或新增目录时同步更新 `tools/run_tests.py` 与 `.github/workflows/`，不要在 CI 里另抄一份模块清单。
-- 文案或小范围 GUI 修改：至少跑对应模块或完成页面创建 smoke test。
+  入口按模块隔离并带超时，保留后端环境变量。测试目录／分组只在 `tools/run_tests.py` 注册；只有环境或调用方式变化时才改 CI，不复制模块清单。测试可用模块顶层 `TOOLBOX_TEST_TAGS = ()` 或 `("gui", "network")` 显式声明需求，优先于旧启发式分类；新增测试必须声明，旧测试按实际需求逐步迁移。
+- 纯文档修改检查链接、命令和规则一致性，无需运行 GUI；界面文案／布局修改运行对应模块或页面创建 smoke test。
 - 计算、解析、映射修改：运行针对性模块，并用小型或真实样本核对结果。
 - 登录、真实写入、安装、并发改动：运行端到端流程，并检查实际产物或持久化状态。
 - 更新器、增量补丁与打包相关用例同样用该入口的 `--group desktop`。
 - 启动器 smoke test：`start_source_test.ps1 -Smoke`（输出 `TOOLBOX_SMOKE=OK`）。
 - 修改依赖或启动流程时，运行 `setup_windows.ps1` 或等价的 `.venv` 导入检查，并验证启动器实际可用。
 - 测试被环境、权限或外部服务阻塞时，明确报告未验证部分及具体原因，不要把部分成功表述成全部完成。
+- 发行前统一入口使用 `full --strict`，缺少整个测试模块依赖不得静默通过；模块内跳过项还须结合日志确认是否属于 Windows 必需能力。GUI／联网测试只使用隔离数据与测试账号，不因要求端到端而自动上传生产数据。
 
 ## 输出与交付
 
@@ -78,11 +82,13 @@
 
 ## 版本与更新日志
 
-- Windows 版本号跟随 macOS 基线：当前基线为 mac v0.1.32，Windows 已在其上递增到 0.1.36；对齐到新的 mac 版本时直接使用对方的 `x.y.z`。Windows 专属修补在同一基线上递增版本号，并在 `CHANGELOG.md` 标注对应的 mac 基线。已正式发布的版本号（0.1.33～0.1.36 等）不得复用。
-- 自动维护根目录 `CHANGELOG.md`：每个版本写 3～6 条用户能感知的新增／修复／变更，每条一两行；它同时是应用内更新说明和 Release 正文，不要塞实现细节、单测条数或耗时数字，细节写进 `docs/releases/vX.Y.Z.md`。版本日期、用户可见变更与实际验证结果必须齐全，不得只改版本号或使用空泛占位内容。
+- Windows 版本独立单调递增，已发布版本不得复用或倒退。mac 功能来源在 `docs/reviews/upstream-review-<日期>.md` 记录版本与提交，与 Windows 发行号解耦；上游版本变化不要求本地同步发版。
+- 用户可见变化先记入根目录 `CHANGELOG.md` 的 `[Unreleased]`，发行时整理为日期明确的版本条目；条数按实际变化，不凑数。纯测试、文档和内部整理无需硬写用户功能。已发布条目仅允许有明确说明的事实勘误，历史验证不改写；本轮验证写进 review，正式验收写进 `docs/releases/vX.Y.Z.md`。
 - 用 `.venv\Scripts\python.exe packaging\tauri\version.py set X.Y.Z --notes "具体变更"` 同步版本和日志；多项变更重复传入 `--notes`。日期默认采用 Asia/Shanghai，历史记录必须保留。
+- `set` 时将已完成的 Unreleased 条目作为 `--notes` 输入并移除对应草稿，未完成条目保留；同一变化不在草稿与发行条目重复维护。日常开发不必提前升级应用版本。
 - `CHANGELOG.md` 是逐版本更新内容的唯一来源；`packaging/tauri/release_notes.md` 只维护通用安装说明。发布时由 `version.py --release-notes` 提取当前版本内容并拼接安装说明。
 - 发布前执行 `version.py check --tag vX.Y.Z --require-notes`，确认版本一致且更新内容非空；缺少对应日志时禁止打包发布。已发布的版本不覆盖，下一次发布递增版本号。
+- 正式公开前完成隔离目录的全新安装、覆盖升级及补丁实际还原验收，回读版本、关键文件和数据保留情况；发布后核对远端附件摘要与真实下载链路。人工发布前的准备与校验尽量脚本化，不把首次安装验收留到公开之后。
 - 只发 Windows x64：构建 NSIS 安装包及 SHA-256，完成针对性测试与摘要校验后才发布正式版；生成物和签名私钥不进入 Git。0.1.28 起优先使用 Windows 文件增量补丁与 `windows-update-manifest.json`，缺少路径或验证失败回退完整 NSIS；0.1.27 及更早客户端需最后完整升级一次。跨主／次版本或 `build.ps1 -FullOnly` 的重大更新用完整包重设补丁基线。
 - 发布补丁前必须用旧应用副本实际还原，核对全部文件、应用签名，并校验索引及 GitHub 附件摘要；禁止把测试补丁直接当发行包。
 - 增量更新只在临时副本还原完整应用，校验后退出旧程序再运行安装程序，继续复用安装回滚逻辑，保留原配置、用户数据和样例。

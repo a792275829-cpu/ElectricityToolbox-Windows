@@ -62,8 +62,8 @@
 
 ## 更新命令
 
-```bash
-.venv/bin/python "广东电价预测/update_gdfire_data.py" --date 2026-07-11
+```powershell
+.venv/Scripts/python.exe "广东电价预测/update_gdfire_data.py" --date 2026-07-11
 ```
 
 账号优先使用工具箱保存的统一账号，也兼容本模块或上网电量模块的本地账号配置。业务路径只读取本模块 `config.json`。它会检查截至运行日 D 缺少 96 个时点的日期，只维护一份 `输出/广东电价数据总表.xlsx`，不会再要求手动选择和合并增量表。该总表也是预测脚本的默认输入。
@@ -71,8 +71,8 @@
 
 `masterWorkbook`（默认 `输出/广东电价数据总表.xlsx`）、`predictionOutputDir`（默认 `输出/D+1预测`）和 `initialWorkbook`（默认 `输入/广东数据初始总表.xlsx`）均以本模块目录解析相对路径，支持 `~`。预测命令默认与更新任务使用同一总表：
 
-```bash
-.venv/bin/python "广东电价预测/train_d1_forecast.py"
+```powershell
+.venv/Scripts/python.exe "广东电价预测/train_d1_forecast.py"
 ```
 
 预测固定导出 D+1 的 96 点电价及 `MAE.json`。`--input`、`--output-dir` 可显式覆盖预测路径；更新命令的 `--master-workbook` 可覆盖总表路径。旧增量、清洗表、检修表导出旁路已移除。
@@ -96,9 +96,10 @@ CLI支持`--historical-only`只使用历史信息，`--training-months 0`自动�
 
 执行节假日阶段、供需衍生、3/6/12月窗口、近期权重、集成权重和分位数区间对照：
 
-```bash
-OMP_NUM_THREADS=4 .venv/bin/python "广东电价预测/train_d1_forecast.py" \
-  --compare-algorithms --fetch-future-inputs --as-of 2026-10-11 \
+```powershell
+$env:OMP_NUM_THREADS = "4"
+.venv/Scripts/python.exe "广东电价预测/train_d1_forecast.py" `
+  --compare-algorithms --fetch-future-inputs --as-of 2026-10-11 `
   --output-dir "广东电价预测/输出/算法实验/20261011"
 ```
 

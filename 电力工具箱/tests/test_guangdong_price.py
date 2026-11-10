@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -273,15 +274,20 @@ class GuangdongForecastTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             config = Path(folder) / "config.json"
             config.write_text('{"masterWorkbook":"自选/总表.xlsx","predictionOutputDir":"自选/预测"}')
-            master = PROJECT / "自选/总表.xlsx"
-            with mock.patch.object(sys, "argv", ["train_d1_forecast.py", "--config", str(config)]), mock.patch.object(
-                self.forecast, "ensure_master_workbook", return_value=master
-            ) as ensure, mock.patch.object(
-                self.forecast, "run_pipeline", return_value={"mae": 0.0}
-            ) as pipeline, mock.patch("builtins.print"):
-                self.forecast.main()
-            self.assertEqual(master, ensure.call_args.args[0]["masterWorkbook"])
-            self.assertEqual((master, PROJECT / "自选/预测"), pipeline.call_args.args)
+            data = (Path(folder) / "data").resolve()
+            for data_root, base in (("", PROJECT), (str(data), data / "广东电价预测")):
+                master = base / "自选/总表.xlsx"
+                with (
+                    self.subTest(data_root=data_root),
+                    mock.patch.dict(os.environ, TOOLBOX_CODE_ROOT=str(ROOT), TOOLBOX_DATA_ROOT=data_root),
+                    mock.patch.object(sys, "argv", ["train_d1_forecast.py", "--config", str(config)]),
+                    mock.patch.object(self.forecast, "ensure_master_workbook", return_value=master) as ensure,
+                    mock.patch.object(self.forecast, "run_pipeline", return_value={"mae": 0.0}) as pipeline,
+                    mock.patch("builtins.print"),
+                ):
+                    self.forecast.main()
+                self.assertEqual(master, ensure.call_args.args[0]["masterWorkbook"])
+                self.assertEqual((master, base / "自选/预测"), pipeline.call_args.args)
 
     def test_pipeline_exports_actual_workbook_and_rejects_unsupported_days(self) -> None:
         times = pd.date_range("2026-05-01", periods=50 * 96, freq="15min")

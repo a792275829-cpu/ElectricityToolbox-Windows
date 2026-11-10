@@ -4,7 +4,7 @@
 
 ## 源码运行
 
-安装带 Tcl/Tk 的 Python 3.11+、Rust 和对应的 C/C++ 构建工具。双击 `00_启动/Windows初始化.cmd` 创建仓库内 `.venv`，安装依赖与浏览器并编译原生 Excel 后端。只调试 Python 兼容路径时可用 `setup_windows.ps1 -SkipNative`，没有 Rust 后端会自动使用 Python 实现。出清结果汇总上传另外需要 Node.js。
+安装带 Tcl/Tk 的 根目录 `.python-version` 指定的精确 Python x64 版本、Rust 和对应的 C/C++ 构建工具。双击 `00_启动/Windows初始化.cmd` 创建仓库内 `.venv`，安装依赖与浏览器并编译原生 Excel 后端。只调试 Python 兼容路径时可用 `setup_windows.ps1 -SkipNative`，没有 Rust 后端会自动使用 Python 实现。出清结果汇总上传另外需要 Node.js。
 
 完成初始化后双击 `00_启动/Windows启动.cmd`。也可在 PowerShell 中运行：
 
@@ -15,7 +15,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\start_windows.ps1 -Source
 
 ## 构建与安装
 
-安装 Node.js 22、Rust Windows 工具链、对应的 C/C++ 链接工具和独立可移植的 CPython 3.12（包括 Tcl/Tk）。运行初始化建立 `.venv` 后：
+安装 Node.js 22、Rust Windows 工具链、对应的 C/C++ 链接工具和与 `.python-version` 一致的独立可移植 CPython x64（包括 Tcl/Tk）。运行初始化建立 `.venv` 后：
 
 ```powershell
 .\packaging\windows\build.ps1 -PythonRoot C:\path\to\standalone-python
@@ -49,7 +49,7 @@ GitHub Actions 的 Windows desktop 工作流对 Windows 核心执行回归，手
 
 ## 使用边界
 
-从 0.1.22 开始，安装版启动时自动检查本仓库的 Windows 正式版；也可从托盘选择“检查更新”。发现新版后点击“开始更新”，自动下载完整 x64 安装包、校验大小与 SHA-256、退出旧程序、安装并重新打开；配置和数据保留。正在运行任务时不能更新，下载可取消，安装失败会恢复旧程序并在重新打开时提示原因。客户端不会下载 macOS 的 DMG 或增量补丁。安装包暂未配置代码签名。
+从 0.1.22 开始，安装版启动时自动检查本仓库的 Windows 正式版；也可从托盘选择“检查更新”。发现新版后点击“开始更新”，优先下载可用的文件增量补丁，不适用时下载完整 x64 安装包、校验大小与 SHA-256、退出旧程序、安装并重新打开；配置和数据保留。正在运行任务时不能更新，下载可取消，安装失败会恢复旧程序并在重新打开时提示原因。客户端不会下载 macOS 的 DMG 或增量补丁。安装包暂未配置代码签名。
 
 0.1.21 及更早 Windows 版尚无更新器，需要先从 [发布页](https://github.com/a792275829-cpu/ElectricityToolbox-Windows/releases/latest) 手动安装新版。迁移到新 GitHub 仓库前的版本（包括 0.1.22～0.1.24）也需要手动安装一次 0.1.25 或更新版本，之后即可从新仓库在应用内更新。自动安装仅适用于完整桌面安装版。
 

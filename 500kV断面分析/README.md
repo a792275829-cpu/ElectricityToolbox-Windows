@@ -44,24 +44,24 @@
 
 ## 工具箱运行
 
-从仓库根目录双击 `电力工具箱.command`，选择侧栏的“500kV断面分析”：
+双击 `00_启动/Windows启动.cmd`，选择侧栏的“500kV断面分析”：
 
 1. 添加一份或多份节点电价 `.xlsx`。
 2. 确认内置拓扑和输出目录。
 3. 设置价差阈值，点击“开始分析”。
 4. 完成后可直接打开结果目录或最近生成的网页。
 
-也可以双击本目录的 `500kV 断面分析.command` 打开兼容的独立窗口。
+独立窗口使用 `.venv/Scripts/python.exe "500kV断面分析/src/run_500kv_blockage_gui.py"` 启动。
 
 ## 命令行运行
 
 在仓库根目录执行：
 
-```bash
-.venv/bin/python "500kV断面分析/run_500kv_analysis.py" \
-  --output-root ~/Downloads \
-  --threshold 80 \
-  /path/to/日前节点电价查询.xlsx
+```powershell
+.venv/Scripts/python.exe "500kV断面分析/run_500kv_analysis.py" `
+  --output-root "$env:USERPROFILE/Downloads" `
+  --threshold 80 `
+  D:/样本/日前节点电价查询.xlsx
 ```
 
 可以一次传入多个Excel；每份输入最终只保留一个分析网页。
@@ -76,7 +76,7 @@
 
 ## 节点位置校准
 
-双击 `校准500kV节点位置.command` 可打开本地校准页面。页面读取：
+执行 `.venv/Scripts/python.exe "500kV断面分析/tools/run_500kv_anchor_calibrator.py"` 启动本地校准服务，按输出地址打开页面。页面读取：
 
 - `接线图.png`
 - `data/500kv_node_position_candidates.json`
@@ -88,8 +88,8 @@
 
 按用户指定的“珠三角地区（9市）／粤东地区（4市）／粤西地区（3市）／粤北地区（5市）”生成大区、市、拓扑节点三级分类，供后续电价曲线勾选使用：
 
-```bash
-.venv/bin/python "500kV断面分析/src/classify_500kv_nodes.py" /path/to/广东500kV节点按市分类.xlsx
+```powershell
+.venv/Scripts/python.exe "500kV断面分析/src/classify_500kv_nodes.py" D:/样本/广东500kV节点按市分类.xlsx
 ```
 
 读取来源表的“各市节点名单”和“补充节点待核验”，按标签查找表头；复用已有拓扑解析与电价节点清理逻辑，保留拓扑原名、A/B/C机组标识和省份后缀。仅使用主表或已核对主表的补充别名归类；多个地市冲突、来源待核验或无法匹配时单列，不从拓扑的接线片区标题或邻接关系推断行政归属。
@@ -102,8 +102,8 @@
 
 源码环境可选构建（需要 Rust/Cargo，仅构建时需要）：
 
-```bash
-.venv/bin/python native/price-xlsx/build.py
+```powershell
+.venv/Scripts/python.exe native/price-xlsx/build.py
 ```
 
 编译后的程序位于 `500kV断面分析/bin/`，不加入 Git。桌面资源打包时从本次源码重新构建，并纳入文件摘要和升级清单；运行电脑无需安装 Rust。
@@ -114,15 +114,14 @@
 
 可复现性能比较（所有结果写入临时目录，核对工作簿值／类型／格式、计数及最终 HTML）：
 
-```bash
-.venv/bin/python native/price-xlsx/benchmark.py /path/to/节点电价.xlsx --repeats 3
+```powershell
+.venv/Scripts/python.exe native/price-xlsx/benchmark.py D:/样本/节点电价.xlsx --repeats 3
 ```
 
 ## 测试
 
-```bash
-cd "500kV断面分析"
-../.venv/bin/python -m unittest discover -s tests -v
+```powershell
+.venv/Scripts/python.exe tools/run_tests.py --group section
 ```
 
 工具箱集成测试位于 `电力工具箱/tests/test_section_analysis.py`。

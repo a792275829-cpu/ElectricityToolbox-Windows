@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -39,6 +40,9 @@ class TopologyPackagingTests(unittest.TestCase):
             )
             self.assertEqual((installed / TOPOLOGY).read_bytes(), (ROOT / TOPOLOGY).read_bytes())
             # Resolve the same default path as the GUI, using only installed code.
+            # This fixture exports source/assets, not a compiled native runtime.
+            environment = {**os.environ, "TOOLBOX_DOMAIN_BACKEND": "auto", "TOOLBOX_XLSX_BACKEND": "auto"}
+            environment.pop("TOOLBOX_NATIVE_BINARY", None)
             result = subprocess.run([
                 sys.executable, "-B", "-c",
                 "import sys; from pathlib import Path; "
@@ -48,7 +52,8 @@ class TopologyPackagingTests(unittest.TestCase):
                 "path = ToolPaths(Path.cwd()).section_analysis_topology; "
                 "edges, duplicates = parse_topology_edges(path); "
                 "assert edges; print(f'{len(edges)} edges, {len(duplicates)} duplicates')",
-            ], cwd=installed, capture_output=True, text=True, check=True)
+            ], cwd=installed, env=environment, capture_output=True, text=True, encoding="utf-8")
+            self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("edges", result.stdout)
 
     def test_missing_or_empty_topology_blocks_payload(self):

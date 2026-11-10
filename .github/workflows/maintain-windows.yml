@@ -10,6 +10,6 @@ permissions:
   contents: read
 jobs:
   windows:
-    uses: a792275829-cpu/ElectricityToolbox-Windows/.github/workflows/windows-desktop.yml@main
+    uses: ./.github/workflows/windows-desktop.yml
     with:
       installer: ${{ inputs.installer }}

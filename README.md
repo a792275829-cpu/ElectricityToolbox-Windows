@@ -32,7 +32,7 @@ Windows
 - [Windows 使用说明](desktop/WINDOWS.md)
 - [Windows 打包与增量更新](packaging/windows/README.md)
 
-功能与配置（安装示例为 macOS 写法，业务说明两平台通用）
+功能与配置
 
 - [环境要求](#环境要求)
 - [首次安装](#首次安装)
@@ -41,7 +41,7 @@ Windows
 - [功能使用说明](#功能使用说明)
 - [后台任务与取消](#后台任务与取消)
 - [输出位置](#输出位置)
-- [迁移到另一台 Mac](#迁移到另一台-mac)
+- [迁移到另一台 Windows 电脑](#迁移到另一台-windows-电脑)
 - [代理和网络](#代理和网络)
 - [常见问题](#常见问题)
 - [测试和自检](#测试和自检)
@@ -54,109 +54,39 @@ Windows
 
 源码运行窗口右下角有「重启」按钮（版本号左侧，版本号仍保持最右）：用当前解释器和环境变量重新拉起同一个源码副本并关闭旧窗口，改完代码直接点它即可加载新代码；有任务运行或账号未保存时先确认，新进程启动失败则保留当前窗口。桌面安装包版由宿主管理 Python 进程，不显示该按钮。
 
-Windows 0.1.22 起支持应用内检查、下载校验、退出安装与自动重启；使用本仓库的 Windows 完整安装包更新，保留配置和数据。0.1.21 及更早版本需先手动安装一次新版。详见 [Windows 自动更新](desktop/WINDOWS.md#使用边界)。
-
-## 上游 macOS 版
-
-macOS 版在独立仓库 [a792275829-cpu/electricity-toolbox-scripts](https://github.com/a792275829-cpu/electricity-toolbox-scripts)，使用 DMG 与独立的增量通道，构建与更新实现不在本仓库。本仓库按功能逐项对齐它，但不合并它的打包流程。
-
-下面「环境要求」「首次安装」「迁移到另一台 Mac」等章节描述的是上游 macOS 源码运行方式，仅在维护 macOS 上游或核对对齐口径时参考；Windows 下按上面「源码运行」一节操作。
+Windows 0.1.22 起支持应用内检查、下载校验、退出安装与自动重启；0.1.28 起优先使用 Windows 文件增量补丁，不适用时回退完整安装包，保留配置和数据。0.1.21 及更早版本需先手动安装一次新版。详见 [Windows 自动更新](desktop/WINDOWS.md#使用边界)。
 
 ## 环境要求
 
-以下是 macOS 上游源码运行的要求；Windows 见上文「源码运行」。
-
-- macOS 12 或更新版本
-- Python 3.11 或更新版本
-- Google Chrome，用于网页登录、上传和 WPS/KDocs 流程
-- Node.js 18 或更新版本，仅“出清结果汇总上传”的上传功能需要
-- 能访问相关业务系统的网络环境；如公司网络要求代理或 VPN，请先连接
-
-项目使用根目录下的 `.venv` 作为 Python 环境。不要把系统 Python 或个人电脑上的绝对解释器路径写入项目配置。
+只维护 Windows 10 / 11 x64。安装包内置运行环境，接收电脑不需要安装 Python、Node 或 Rust。
+源码开发使用根目录 `.python-version` 指定的精确 Python x64 版本（包含 Tcl/Tk），以及 Rust stable MSVC 和 Visual Studio C++ Build Tools。
+Node 仅供上传子工具及桌面前端构建使用；Python 依赖版本统一维护在 `packaging/windows/requirements.txt`。
 
 ## 首次安装
 
-### 1. 获取项目
+安装版从本仓库 Release 下载 NSIS 安装程序并运行。源码版在仓库根目录执行：
 
-使用 Git 克隆：
-
-```bash
-git clone --branch main https://github.com/a792275829-cpu/ElectricityToolbox-Windows.git
-cd ElectricityToolbox-Windows
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup_windows.ps1
 ```
 
-也可以在 GitHub 切换到 `main` 分支后下载源码 ZIP，解压后进入项目根目录。
-
-### 2. 解除 macOS 下载限制
-
-从网页下载的项目可能带有隔离属性。首次使用时在项目根目录执行：
-
-```bash
-xattr -dr com.apple.quarantine .
-chmod +x setup_macos.command "00_启动/电力工具箱.command" \
-  "wps自动/启动WPS专用Chrome.command"
-```
-
-### 3. 自动安装依赖
-
-在项目根目录运行：
-
-```bash
-./setup_macos.command
-```
-
-安装脚本会完成以下工作：
-
-1. 创建项目专用 Python 环境 `.venv`。
-2. 安装 `requirements.txt` 中的 Python 依赖。
-3. 安装 Playwright Chromium。
-4. 检测 Node.js/npm；如果存在，则安装私有数据上传工具的 Node 依赖。
-5. 修复工具箱和 WPS 专用 Chrome 的 `.command` 启动权限。
-
-如果暂时没有 Node.js，其他 Python 工具仍可使用，只有“出清结果汇总上传”的上传功能不可用，汇总仍可使用。安装 Node.js 后执行：
-
-```bash
-cd "电力工具脚本/private-data-uploader-tool"
-npm install
-```
-
-### 4. 手动安装命令
-
-只有自动安装失败时才需要使用以下等价命令：
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements.txt
-python -m playwright install chromium
-
-cd "电力工具脚本/private-data-uploader-tool"
-npm install
-```
+初始化会检查精确 Python 版本、建立 `.venv`、安装依赖与 Chromium、编译 Rust 后端，并尝试准备上传工具的便携 Node。
+已有 `.venv` 版本不符时停止并提示，不自动覆盖。只调试 Python 兼容路径可加 `-SkipNative`。
 
 ## 启动工具箱
 
-在 Finder 中双击：
+双击 `00_启动/Windows启动.cmd`，或执行 `start_windows.ps1`。源码调试使用：
 
-```text
-00_启动/电力工具箱.command
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start_source_test.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start_source_test.ps1 -Smoke
 ```
 
-也可以在项目根目录从终端启动：
+源码调试数据独立保存在 `.toolbox/source-test/data`，日志在 `logs/source-test`。
+正式源码入口和源码调试入口分别说明见 [Windows 使用说明](desktop/WINDOWS.md)。
 
-```bash
-./00_启动/电力工具箱.command
-```
-
-启动器使用 `.venv/bin/python`。如果 `.venv` 或关键依赖缺失，会自动调用 `setup_macos.command`。
-
-启动后默认显示“今日概览”：
-
-- 左侧按“数据采集”“分析与报告”“上传与写入”分组。
-- 工具页面首次打开时加载，切换页面不会清空当前状态。
-- 右侧任务中心显示后台任务、运行状态和日志，并提供可用的取消操作。
-- 右侧“运行诊断”常驻检查 Python、14 个工具模块、工作目录写入权限和可选的 Node.js 依赖。
-- 诊断面板支持“重新检查”“检查文件”和“复制报告”；出现异常时先选中项目查看处理建议。
+上游仓库为 [electricity-toolbox-scripts](https://github.com/a792275829-cpu/electricity-toolbox-scripts)，仅按功能逐项对齐。
+历史 `.command` 和 macOS 打包脚本保留原位；本仓库不运行 macOS 构建或自动发布。
 
 ## 首次登录和本地配置
 
@@ -230,10 +160,10 @@ cp "电力工具脚本/private-data-uploader-tool/upload.config.example.json" \
    "电力工具脚本/private-data-uploader-tool/upload.config.json"
 ```
 
-根据示例填写上传地址、匹配规则和浏览器配置。macOS 上如需显式指定 Chrome：
+根据示例填写上传地址、匹配规则和浏览器配置。Windows 上如需显式指定 Chrome，可使用实际安装路径，例如：
 
 ```text
-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+C:\Program Files\Google\Chrome\Application\chrome.exe
 ```
 
 私有数据上传只复用账号密码配置，不再复用其他工具的浏览器登录态。它会在子工具目录维护独立文件：
@@ -260,11 +190,7 @@ wps自动/logs/
 
 默认配置保留目标表格链接、来源及目标工作表、单元格范围和字段顺序；本地来源文件留空，请在新电脑选择相应表格文件，再登录 WPS 后写入。后续只要 profile 有效，通常无需重复登录。配置仍可在工具界面中导入或导出。调整随包业务配置时维护 `.defaults.json`，日常界面修改继续保存在本机配置中。
 
-macOS 默认使用“Dedicated WPS Chrome (recommended)”模式，通过本机 `127.0.0.1:9222` 与独立 Chrome 会话连接。可在 WPS 工具页点击“Start/open dedicated Chrome”和“Check status”，也可以在 Finder 双击：
-
-```text
-wps自动/启动WPS专用Chrome.command
-```
+WPS 使用独立专用浏览器，通过本机 `127.0.0.1:9222` 连接。请在 WPS 页面点击打开专用浏览器及状态检查按钮。
 
 专用 Chrome 与日常 Chrome 使用不同 profile。首次启动后在这个窗口登录 WPS/KDocs；保持该窗口运行，再回到工具箱预览或写入。
 
@@ -397,7 +323,7 @@ wps自动/启动WPS专用Chrome.command
 
 网页颜色由累计触发时点和最大价差共同决定，颜色越深表示持续时间越长且价差越大。每份输入会生成独立子目录和 `<原文件名>_500kV分析.html`；中间清洗 Excel 和断面明细仅在临时目录使用，完成后自动删除。
 
-也可双击 `500kV断面分析/500kV 断面分析.command` 使用独立窗口。节点位置维护人员可运行 `500kV断面分析/校准500kV节点位置.command`，日常分析无需执行校准。
+独立运行及节点位置校准命令见 [500kV 说明](500kV断面分析/README.md)，日常分析无需执行校准。
 
 ### 6. 广东运行日报解析上传
 
@@ -417,7 +343,7 @@ wps自动/启动WPS专用Chrome.command
 
 选择 `d 日收益表`、上一日对比表和 `d-2 收益表`，日期分别对应报告日、报告日前一日和前两日。可填写东莞运行方式修正和实时检修容量。点击“生成日报”后，工具读取清能系统市场数据，并只保存精简加大长页手机预览版 PDF 与打印版 PDF。网站登录复用工具箱“上网电量抓取”的登录实现及配置；首次运行会复制已有登录态，之后日报使用独立的浏览器 profile、登录态和锁文件。
 
-如果网站账号密码尚未配置，请先按“导出上网电量”的登录说明完成配置。日报依赖 `Jinja2` 和 `pypdf`，运行 `./setup_macos.command` 会安装。
+如果网站账号密码尚未配置，请先按“导出上网电量”的登录说明完成配置。日报依赖 `Jinja2` 和 `pypdf`，运行 `setup_windows.ps1` 会安装。
 
 ### 7. 出清结果汇总上传
 
@@ -529,34 +455,20 @@ wps自动/启动WPS专用Chrome.command
 
 输出、日志、缓存、浏览器 profile 和真实配置不会提交到 Git。
 
-## 迁移到另一台 Mac
+## 迁移到另一台 Windows 电脑
 
-推荐使用 Git 克隆最新版本。如果需要离线迁移，也可以复制整个项目文件夹，但不要依赖旧电脑的 `.venv`：
-
-在当前 Mac 上生成不含登录态、缓存和真实配置的迁移压缩包：
-
-```bash
-./package_macos.command
-```
-
-压缩包会生成到 `dist/`，并包含当前工作区里尚未提交的源码修改和新文件。
-
-1. 把项目复制到新 Mac。
-2. 可以删除复制来的 `.venv`，由新电脑重新创建。
-3. 在项目根目录执行隔离属性和执行权限命令。
-4. 运行 `./setup_macos.command`。
-5. 按“首次登录和本地配置”重新准备配置与登录态。
-6. 运行启动 smoke test，再启动图形界面。
-
-本地账号配置可以通过安全方式单独迁移，但浏览器 profile 和登录态可能与旧电脑环境绑定；遇到失效时应在新电脑重新登录。
+推荐在新电脑克隆仓库，或复制整个源码文件夹。工作副本使用稳定目录名；版本由应用元数据管理。
+复制来的 `.venv` 可能仍引用旧解释器，先将它改名保留，再安装 `.python-version` 指定的 Python x64 并运行 `setup_windows.ps1` 重新初始化。
+不要清理 `.toolbox/standalone-python` 或 `runtime/node`，它们可能仍是当前环境的运行依赖。
+本地配置通过安全方式单独迁移；各工具在新电脑重新登录。最后运行源码 smoke test 并启动界面。
 
 ## 代理和网络
 
 脚本会读取常见代理环境变量。例如本机代理端口为 `7897` 时：
 
-```bash
-export HTTPS_PROXY=http://127.0.0.1:7897
-export HTTP_PROXY=http://127.0.0.1:7897
+```powershell
+$env:HTTPS_PROXY = "http://127.0.0.1:7897"
+$env:HTTP_PROXY = "http://127.0.0.1:7897"
 ```
 
 如果代理端口不同，请按实际设置修改。遇到登录页面打不开、Playwright 超时或上传请求失败时：
@@ -568,33 +480,15 @@ export HTTP_PROXY=http://127.0.0.1:7897
 
 ## 常见问题
 
-### 双击 `.command` 没有反应
+### 启动没有反应或提示缺少 Python 模块
 
-在项目根目录执行：
-
-```bash
-xattr -dr com.apple.quarantine .
-chmod +x setup_macos.command "00_启动/电力工具箱.command" \
-  "wps自动/启动WPS专用Chrome.command"
-./00_启动/电力工具箱.command
-```
-
-终端会保留具体错误信息，便于定位安装或路径问题。
-
-### 提示缺少 Python 模块
-
-重新安装根目录依赖：
-
-```bash
-./setup_macos.command
-```
-
-确认测试或脚本使用 `.venv/bin/python`，不要混用另一个 Python 环境。
+在 PowerShell 执行 `start_source_test.ps1 -Console` 查看第一条异常。首次使用先运行 `setup_windows.ps1`，并使用仓库 `.venv/Scripts/python.exe`。
+版本不符时按 `.python-version` 安装解释器，不要混用其他 Python 环境。
 
 ### Playwright 找不到浏览器
 
-```bash
-.venv/bin/python -m playwright install chromium
+```powershell
+.venv\Scripts\python.exe -m playwright install chromium
 ```
 
 ### 登录状态失效或页面跳回登录页
@@ -616,64 +510,27 @@ npm install
 
 ### WPS 提示无法连接 Chrome 或调试端口
 
-先关闭使用 `wps-browser-profile` 的旧专用 Chrome 窗口，再双击：
+从 WPS 工具页重新打开专用浏览器并检查状态；确认浏览器已登录目标文档，其他程序未占用端口。
 
-```text
-wps自动/启动WPS专用Chrome.command
-```
+### 测试提示找不到模块
 
-回到 WPS 工具页点击“Check status”。专用 Chrome 需要保持运行，并使用独立 profile；不要让另一个 Chrome 进程占用 `127.0.0.1:9222`。
-
-### 测试提示 `No module named 'toolbox'`
-
-测试需要从 `电力工具箱` 目录运行：
-
-```bash
-cd "电力工具箱"
-PYTHONPATH=.. ../.venv/bin/python -m unittest discover -s tests
-```
+从统一入口运行测试，入口会设置模块路径、工作目录和超时，不需手工设置 PYTHONPATH。
 
 ## 测试和自检
 
-启动器定位和依赖 smoke test：
+在仓库根目录执行：
 
-```bash
-TOOLBOX_SMOKE=1 ./00_启动/电力工具箱.command
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start_source_test.ps1 -Smoke
+.venv\Scripts\python.exe tools\run_tests.py
+.venv\Scripts\python.exe tools\run_tests.py full
+.venv\Scripts\python.exe tools\run_tests.py --group desktop
+.venv\Scripts\python.exe tools\run_tests.py --group section
+.venv\Scripts\python.exe tools\run_tests.py --group node
+.venv\Scripts\python.exe tools\run_tests.py --module test_date_inputs
 ```
 
-完整初始化检查：
-
-```bash
-./setup_macos.command
-```
-
-运行工具箱测试：
-
-```bash
-cd "电力工具箱"
-PYTHONPATH=.. ../.venv/bin/python -m unittest discover -s tests
-```
-
-运行 500kV 断面分析测试：
-
-```bash
-cd "500kV断面分析"
-../.venv/bin/python -m unittest discover -s tests -v
-```
-
-启动性能对比：
-
-```bash
-cd "电力工具箱"
-python scripts/benchmark_toolbox_startup.py
-python scripts/benchmark_toolbox_startup.py --eager
-```
-
-提交前检查本地配置和登录态未进入 Git：
-
-```bash
-git status --short --ignored
-git diff --cached --check
-```
-
-`.gitignore` 已覆盖常见真实配置、登录态、浏览器 profile、输出文件、缓存、日志、虚拟环境和 CodeGraph 索引。
+fast 自动排除业务模块中含 GUI／联网提示的测试；full 覆盖所有已注册目录。
+显式 `--group` 执行该组全部模块；Node 是可选分组，未安装时 full 明确报告跳过，显式选择则报错。
+同名模块可用 `组名:模块名` 精确选择，`--keep-temp` 保留每个模块的诊断产物。
+生产登录、真实上传、安装包及增量还原需在对应环境单独验收。

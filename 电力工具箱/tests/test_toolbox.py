@@ -144,8 +144,10 @@ class RuntimeTests(unittest.TestCase):
 
     def test_login_state_paths_are_separate_for_parallel_tools(self) -> None:
         from toolbox.runtime import ToolPaths, load_module
+        from toolbox_storage import data_path
 
         paths = ToolPaths(Path(__file__).resolve().parents[2])
+        state_paths = ToolPaths(data_path(paths.workspace))
         online = load_module("online_energy_state_paths_test", paths.online_energy)
         market = load_module("market_table_state_paths_test", paths.market_table_update)
         group = load_module("group_upload_state_paths_test", paths.group_upload)
@@ -161,9 +163,9 @@ class RuntimeTests(unittest.TestCase):
             "wind": wind.load_auth_module(),
         }
         for name, directory in (
-            ("spot", paths.spot_price_update_dir),
-            ("transaction", paths.transaction_info_update_dir),
-            ("wind", paths.wind_forecast_dir),
+            ("spot", state_paths.spot_price_update_dir),
+            ("transaction", state_paths.transaction_info_update_dir),
+            ("wind", state_paths.wind_forecast_dir),
         ):
             auth = loaded_auth[name]
             self.assertEqual(directory / "auth_state.json", auth.AUTH_STATE_PATH)
@@ -171,21 +173,21 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(directory / ".browser-profile", auth.PROFILE_DIR)
             self.assertEqual(directory / "config.json", auth.CONFIG_PATH)
 
-        self.assertEqual(online.AUTH_STATE_PATH, paths.online_energy_dir / "auth_state.json")
-        self.assertEqual(online.PROFILE_DIR, paths.online_energy_dir / ".browser-profile")
-        self.assertEqual(market.online_export_module.AUTH_STATE_PATH, paths.market_table_update_dir / "auth_state.json")
-        self.assertEqual(market.online_export_module.PROFILE_DIR, paths.market_table_update_dir / ".browser-profile")
-        self.assertEqual(group.AUTH_STATE_PATH, paths.group_upload_dir / "auth_state.json")
-        self.assertEqual(group.PROFILE_DIR, paths.group_upload_dir / ".browser-profile")
-        self.assertEqual(spot.AUTH_STATE_PATH, paths.spot_price_update_dir / "auth_state.json")
-        self.assertEqual(spot.PROFILE_DIR, paths.spot_price_update_dir / ".browser-profile")
+        self.assertEqual(online.AUTH_STATE_PATH, state_paths.online_energy_dir / "auth_state.json")
+        self.assertEqual(online.PROFILE_DIR, state_paths.online_energy_dir / ".browser-profile")
+        self.assertEqual(market.online_export_module.AUTH_STATE_PATH, state_paths.market_table_update_dir / "auth_state.json")
+        self.assertEqual(market.online_export_module.PROFILE_DIR, state_paths.market_table_update_dir / ".browser-profile")
+        self.assertEqual(group.AUTH_STATE_PATH, state_paths.group_upload_dir / "auth_state.json")
+        self.assertEqual(group.PROFILE_DIR, state_paths.group_upload_dir / ".browser-profile")
+        self.assertEqual(spot.AUTH_STATE_PATH, state_paths.spot_price_update_dir / "auth_state.json")
+        self.assertEqual(spot.PROFILE_DIR, state_paths.spot_price_update_dir / ".browser-profile")
         self.assertEqual(
             transaction.AUTH_STATE_PATH,
-            paths.transaction_info_update_dir / "auth_state.json",
+            state_paths.transaction_info_update_dir / "auth_state.json",
         )
         self.assertEqual(
             transaction.PROFILE_DIR,
-            paths.transaction_info_update_dir / ".browser-profile",
+            state_paths.transaction_info_update_dir / ".browser-profile",
         )
 
         auth_paths = {

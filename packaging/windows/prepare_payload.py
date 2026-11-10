@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'packaging/tauri'))
 import prepare_payload as common
 import build_support
+sys.path.insert(0, str(ROOT / 'tools'))
+from release_source import inspect_source
 
 def run(args, **kwargs):
     subprocess.run([str(arg) for arg in args], check=True,
@@ -63,7 +65,8 @@ def stash(path: Path, name: str, archive_root: Path, stamp: str):
 
 
 def prepare(python_root: Path, forecast_workbook: Path | None = None,
-            archive_root: Path | None = None, dry_run: bool = False):
+            archive_root: Path | None = None, dry_run: bool = False,
+            development_build: bool = False):
     archive_root = (archive_root or ROOT / 'dist/build-archive').resolve()
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
     if dry_run:
@@ -72,6 +75,9 @@ def prepare(python_root: Path, forecast_workbook: Path | None = None,
         print('[dry-run] 随后重导 app、重装内置依赖并重写清单；未改动任何文件')
         return
 
+    provenance = inspect_source(ROOT, development=development_build)
+    if forecast_workbook is not None and not development_build:
+        raise ValueError('正式包不得携带本地业务工作簿；--forecast-workbook 仅用于开发验证。')
     if sys.platform != 'win32':
         raise RuntimeError('Windows payload must be built and tested on Windows x64.')
     version_info = subprocess.check_output(['rustc', '-vV'], text=True)
@@ -91,7 +97,8 @@ def prepare(python_root: Path, forecast_workbook: Path | None = None,
     # build never deletes a large tree in place.
     stash(source, 'app', archive_root, stamp)
     source.mkdir(parents=True, exist_ok=True)
-    build_support.export_source(source, predicate=common.runtime_source)
+    build_support.export_source(source, predicate=common.runtime_source,
+                                tracked_only=not development_build)
     binary = source / '500kV断面分析/bin/toolbox-price-xlsx.exe'
     run([sys.executable, ROOT / 'native/price-xlsx/build.py', '--output', binary,
          '--service-output', source / '电力工具箱/bin/toolbox-service.exe'])
@@ -148,7 +155,7 @@ def prepare(python_root: Path, forecast_workbook: Path | None = None,
     hashes = {path.relative_to(defaults).as_posix(): build_support.sha256(path)
               for path in sorted(defaults.rglob('*')) if path.is_file()}
     version = json.loads((ROOT / 'desktop/package.json').read_text())['version']
-    manifest = dict(layout=2, version=version, target=target, files=files,
+    manifest = dict(layout=2, version=version, target=target, files=files, source=provenance,
                     defaults=list(hashes), default_hashes=hashes,
                     build=hashlib.sha256(json.dumps(dict(files=files, default_hashes=hashes), sort_keys=True).encode()).hexdigest())
     (payload / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -165,7 +172,10 @@ if __name__ == '__main__':
                         help='替换前的生成目录归档到此处，默认 dist/build-archive')
     parser.add_argument('--dry-run', action='store_true',
                         help='只打印将归档的目标，不改动任何文件')
+    parser.add_argument('--development-build', action='store_true',
+                        help='允许本地改动和未跟踪文件，产物不可发布')
     args = parser.parse_args()
     if not args.dry_run and args.python_root is None:
         parser.error('--python-root is required unless --dry-run is used')
-    prepare(args.python_root, args.forecast_workbook, args.archive_root, args.dry_run)
+    prepare(args.python_root, args.forecast_workbook, args.archive_root, args.dry_run,
+            args.development_build)

@@ -16,13 +16,13 @@
 
 ## 独立运行
 
-```bash
-../.venv/bin/python run_daily_pdf_parser.py "/path/to/运行日报.pdf"
+```powershell
+../.venv/Scripts/python.exe run_daily_pdf_parser.py "D:/样本/运行日报.pdf"
 ```
 
 默认执行“解析并上传”：回读 Excel 后，将源 PDF 上传到“现货交易日报”，将 Excel 上传到“报价容量数据”。每个页签均将数据日期设为报告当天，选择该日期行的文件，再执行“全部上传”。完成后核对网站日期、上传状态和完成时间，PDF 同时核对网站文件名。报价容量导入服务保存解析后的数据，状态接口不保留 Excel 文件名，因此 Excel 名称在提交前由网页确认，并结合导入接口结果核验。
 
-可通过 `-o` 指定输出 Excel；仅在 PDF 无法自动识别申报容量时才需要 `--baseline`。支持 `--mode parse` 仅解析，或 `--mode upload -o "/path/to/已有解析.xlsx"` 上传源 PDF 和已有 Excel。上传失败会保留本地文件，并报告已成功的步骤；可用“仅上传”重试。网站已有同日记录时，重新上传会更新该日期的数据。
+可通过 `-o` 指定输出 Excel；仅在 PDF 无法自动识别申报容量时才需要 `--baseline`。支持 `--mode parse` 仅解析，或 `--mode upload -o "D:/样本/已有解析.xlsx"` 上传源 PDF 和已有 Excel。上传失败会保留本地文件，并报告已成功的步骤；可用“仅上传”重试。网站已有同日记录时，重新上传会更新该日期的数据。
 
 账号复用工具箱任务中心的清能网站账号配置，模块独立使用本目录内的 `auth_state.json`、`auth_state.json.lock` 和 `.browser-profile/`，均由 Git 忽略。自动切换到有数据中心权限的广东分公司；日期不明、文件日期冲突、Excel 校验失败或日期行不能唯一匹配时停止上传。
 

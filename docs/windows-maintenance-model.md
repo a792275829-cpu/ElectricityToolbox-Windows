@@ -1,144 +1,87 @@
-# Windows 版常态维护模型
+# Windows 维护流程
 
-本仓库是 macOS 版 [`electricity-toolbox-scripts`](https://github.com/a792275829-cpu/electricity-toolbox-scripts) 的 Windows 移植与发行仓库。
-维护方式是长期在本地保留一份源码调试版，按 mac 版逐项对齐，对齐完成后打包并更新到本仓库。
+长期规则见根目录 [AGENTS.md](../AGENTS.md)，目录与调用关系见 [project-structure.md](project-structure.md)。
+本文件只维护操作流程。开发、提交同步、正式发行分别完成，不要求每次修复走完整发行链路。
 
-## 仓库分工
+## 1. 日常开发：修改与验证
 
-| 位置 | 内容 | 作用 |
-| --- | --- | --- |
-| `main`（本机工作副本） | 全部源码、文档、打包脚本 | 唯一的开发与构建来源，CI 与 PR 目标 |
-| `origin/main` | 与本地同步的源码 | 供他人查看源码、供 CI 运行 |
-| GitHub Release | NSIS 安装包、`.sha256`、增量索引 | 对外发布与在线更新来源 |
-
-原有的 `development` 分支已删除，原提交都在 `main` 的历史里（`git log` 可查）；不要再重建同名分支。
-
-`main` 上的 `maintain-macos.yml` / `maintain-windows.yml` 只是转发壳，调用同仓库 `main` 分支的 reusable workflow，只跑检查和构建，**不会创建 Release**。
-`desktop-release.yml` 的 `prepare` 作业限定 `repository == electricity-toolbox-scripts`，在本仓库打 tag 不会触发发布。发布是手动上传附件。
-
-## 六环节流程
-
-### ① 盯上游
-
-- 上游仓库：`a792275829-cpu/electricity-toolbox-scripts`（macOS 主仓库）。
-- 比对方式：按功能／修复逐项判断，**不整体合并**，不引入 macOS 专用实现（Swift、Vision、`fcntl` 等）。
-- 基线记录：每轮把当前上游 HEAD 与版本写进 `docs/upstream-review-<日期>.md`，作为下次比对起点。
-
-### ② 本地源码调试版
+1. 运行 `git status --short`，保留已有修改；按结构地图查调用方、GUI、测试及载荷规则。
+2. 只修改当前任务所需内容；允许短期 `codex/*` 分支，main 是唯一长期集成主线。
+3. 按风险验证：文档检查链接与命令；界面做页面 smoke；计算／解析／映射跑针对性模块和样本；启动、登录、写入、并发做隔离端到端验证。
+4. 用户可见变化记入 `CHANGELOG.md` 的 `[Unreleased]`；内部整理无需编造更新条目。需要保留的诊断与验证写入 `docs/reviews/`，不修改已发布版本的验证记录。
+5. 汇报改动、验证与未验证部分。普通修复到此完成，不自动打版本、打包、提交推送或发布。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File setup_windows.ps1      # 首次初始化 .venv
-powershell -ExecutionPolicy Bypass -File start_source_test.ps1  # 源码调试启动
-powershell -ExecutionPolicy Bypass -File start_source_test.ps1 -Smoke  # 自检，期望 TOOLBOX_SMOKE=OK
+.venv/Scripts/python.exe tools/run_tests.py
+.venv/Scripts/python.exe tools/run_tests.py --module test_date_inputs
+powershell -ExecutionPolicy Bypass -File start_source_test.ps1 -Smoke
 ```
 
-调试版的数据与真实使用隔离：
+测试目录与分组只在统一入口注册；CI 调用入口。新测试用模块顶层 `TOOLBOX_TEST_TAGS = ()`、
+`("gui",)`、`("network",)` 或 `("gui", "network")` 声明真实需求；Mock 网络不算联网。
+旧测试的启发式分类作为迁移兼容保留，不把 fast 通过当作全量证明。full 的模块内 skip 仍须审阅。
 
-- 数据目录 `.toolbox/source-test/data`（经 `TOOLBOX_DATA_ROOT` 注入），日志 `logs/source-test`。
-- 不读写用户真实配置、登录态与业务工作簿；登录态、`.browser-profile`、`auth_state.json` 仍由各工具独立持有并被 Git 忽略。
-- 正式运行用 `start_windows.ps1`；带 `-Source` 强制走源码而非已构建的 native 产物。
+源码调试数据位于 `.toolbox/source-test/data`，日志位于 `logs/source-test`；正式使用运行
+`start_windows.ps1`。隔离数据目录不意味着可以自动进行生产上传；真实账号、工作簿和上传按用户授权范围执行。
+各工具的登录态、锁与 profile 始终独立。
 
-### ③ 逐项对齐
+## 2. 提交与同步：用户要求时执行
 
-1. 只改完成当前对齐所需的文件，先 `git status --short` 记录并保留已有改动。
-2. 复用本仓库已有的解析、计算、登录、写入与 GUI 适配逻辑，不建旁路实现。
-3. 中文字段名、日期口径（`D`/`D-1`/`D-2`）、工作表名、单元格范围、输出文件名视作精确契约。
-4. 每轮补 `CHANGELOG.md`：3～6 条用户能感知的变化、每条一两行，它同时是应用内更新说明与 Release 正文；实现细节、单测条数与耗时写进 `docs/releases/vX.Y.Z.md`。
+- 只暂存本任务相关文件或可可靠拆分的差异；混合改动不得整体代提交。
+- 记录验证结论，失败或环境阻塞明确说明；未验证改动不伪装为可发行。
+- 推送至相应工作分支或 main；同步完成后回读对应远端提交。main 不另设长期 development 分支。
+- 提交同步不等于发布；无需为了同步源码先提高应用版本。
 
-针对性验证统一走测试入口（在仓库任意目录执行，入口自己处理 PYTHONPATH、工作目录与超时）：
+## 3. 上游对齐：需要时执行
+
+上游 `a792275829-cpu/electricity-toolbox-scripts` 是功能参考，不是 Windows 版本号来源。
+逐项选择功能与修复，不整体合并 macOS 实现。每轮在 `docs/reviews/upstream-review-<日期>.md`
+记录上游版本、提交、已采用项与未采用项；上游发版不强制 Windows 跟随发版。
+
+## 4. 正式发行：完整检查表
+
+以下阶段只在用户要求发行时执行，所有验收通过后才公开 Release。
+
+- [ ] 整理 Unreleased 中已完成的变化，选择严格大于当前版本且未发布的 Windows `X.Y.Z`。上游基线另外记录。
+- [ ] 执行 `version.py set X.Y.Z --notes "具体变更"` 同步元数据；多条重复传 `--notes`。移除已转入版本条目的草稿，未完成草稿保留。条数按实际变化，不凑数。
+- [ ] 在 `docs/releases/vX.Y.Z.md` 记录验收范围、环境与结果；不把历史记录当作本次验证证据。
+- [ ] 执行版本／说明检查、`full --strict`、Rust 检查及源码 smoke。模块内 skip 审阅为 Windows 不适用才可接受，必需能力缺测即阻塞发行。
+- [ ] 将发行所需修改提交并同步 main，记录提交号；从该提交的干净检出构建。正式构建拒绝未提交／未跟踪改动，不把本地业务工作簿作为种子。
+- [ ] 构建 NSIS、摘要及增量索引；保存 `source-X.Y.Z.json`，核对载荷 `manifest.json` 的来源提交一致。正式与开发构建输出隔离。
+- [ ] 在隔离验收环境完成全新安装、旧版覆盖升级、旧版副本补丁实际还原；核对完整文件、签名、配置与业务数据保留。安装目录不得指向用户日常工作环境。
+- [ ] 回读载荷 `manifest.json`、工作区 `state/installed.json` 的版本；实际启动 Tk 窗口、Rust 服务与内置 Python。失败则修复后重新验收，不公开产物。
+- [ ] 验收通过后为构建提交建立 `vX.Y.Z` 标签，并回读远端对应关系；手工创建 Release，上传完整安装包、摘要、`updates-X.Y.Z/` 全部附件及来源记录。
+- [ ] 发布后核对 GitHub 附件集合、摘要与真实下载链路。已公开资产不覆盖；有问题暂停该版本分发，修复使用新版本。
 
 ```powershell
-.venv\Scripts\python.exe tools\run_tests.py                    # fast 档：工具箱非 GUI/非联网 + 桌面
-.venv\Scripts\python.exe tools\run_tests.py --module test_date_inputs   # 指定模块，可重复
-.venv\Scripts\python.exe tools\run_tests.py full               # 全量，发版前或大改动后
+.venv/Scripts/python.exe packaging/tauri/version.py check --tag vX.Y.Z --require-notes
+.venv/Scripts/python.exe tools/run_tests.py full --strict
+powershell -ExecutionPolicy Bypass -File start_source_test.ps1 -Smoke
+powershell -ExecutionPolicy Bypass -File packaging/windows/build.ps1 -PythonRoot <独立CPython目录>
+# 跨主／次版本或需要重设补丁基线时添加 -FullOnly。
 ```
 
-不要在 CI 或文档里另抄一份模块清单：新增测试目录、调整分组时只改 `tools/run_tests.py`，工作流调用它即可。
+PythonRoot 是 `.python-version` 指定的独立 Windows x64 CPython，不能是 `.venv`。
+正式产物位于 `dist/windows/`；开发验证显式添加 `-DevelopmentBuild`，允许工作区变化，产物进入
+`dist/windows-development/`，不生成正式补丁，禁止发布。`-ForecastWorkbook` 仅允许开发验证。
+生成目录仍由现有构建逻辑归档后重建；依赖与资源准备方式见 [Windows 打包说明](../packaging/windows/README.md)。
 
-### ④ 打包
+CI 的 `maintain-*.yml` 是兼容转发入口，不自动创建 Release。无标签的手动安装包构建只生成开发包；
+带标签构建固定到该标签提交。正式构建与公开发布是两回事，标签不自动触发发布。
+本地可先按提交构建和验收再打标签；CI 可先建标签构建，但仍须验收后才公开 Release。
+
+## 5. 环境、迁移与回收
+
+- 源码复制／移动后先保留旧 `.venv`，按 `.python-version` 重新初始化；不手改 `pyvenv.cfg`。
+- `.toolbox/standalone-python` 可能是虚拟环境的基础解释器，`runtime/node` 是上传子工具的便携运行时；清理前查实际引用。
+- 用户配置、登录态、真实工作簿只存 Git 忽略的本地路径，迁移时单独安全处理；新电脑重新登录。
+- 默认不同时运行共享同一数据目录的多个实例。调试版与正式版使用独立数据目录可以并行；锁冲突不得靠删除仍在使用的锁解决。
+- 构建保留会话安全守卫；环境阻塞保留第一条异常，不自动移除注入。`-KeepGuard` 作为旧参数兼容保留。
+- 构建成功可用 `-PruneArchive` 回收旧快照、保留最近一份；失败现场先保留。手工清理默认仅预览，加 `--apply` 执行，拒绝仓库归档目录以外路径及链接／重解析点。
+- 每轮大构建后检查空间；若需长期保留诊断，先归档到明确的诊断位置再清理。历史正式安装包至少保留当前增量基线所需版本；远端正式附件不随本地缓存清理。
+- 日志按实际排障需要限期保留，无需永久只移动不删除；真实数据与凭据不按缓存策略回收。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File packaging/windows/build.ps1 -PythonRoot <standalone CPython 目录>
-# 重大更新（跨主／次版本）重设补丁基线：
-powershell -ExecutionPolicy Bypass -File packaging/windows/build.ps1 -PythonRoot <同上> -FullOnly
+.venv/Scripts/python.exe packaging/windows/prune_build_archive.py --keep 1
+.venv/Scripts/python.exe packaging/windows/prune_build_archive.py --keep 1 --apply
 ```
-
-- `-PythonRoot` 必须指向**独立 CPython 发行版**（有 `python.exe`、无 `pyvenv.cfg`），不能是 `.venv`；版本必须等于根目录 `.python-version`，`build.ps1` 与 `verify_payload.py` 都会校验，不一致直接失败（避免同一版本号在本地与 CI 之间内置不同运行时）。
-- 产物落 `dist/windows/`：`ElectricityToolbox_<版本>_windows_x64_setup.exe`、同名 `.sha256`，以及 `updates-<版本>/windows-update-manifest.json` 与 `.sha256`。
-- 构建结束会校验增量索引确实生成，缺失即报错。历史发布列表优先走 `gh`，未安装时走 GitHub REST API，都不可用时用 `dist/windows/` 里的本地历史包。
-- 载荷准备会清空并重建 `desktop/src-tauri/payload/app`、`payload/python`，这些是纯生成目录。
-
-### ⑤ 更新到仓库
-
-1. 提交并推送源码：`git push origin main`，并回读远端确认提交一致。
-2. 打标签：`git tag v<版本>` 与源码提交对应（版本号规则见下）。
-3. 在 GitHub 上创建 Release，**完整包、`.sha256`、`updates-<版本>/` 内全部附件一起上传**；只传安装包会导致客户端拿不到增量索引，退回每次下载完整包。
-4. 已发布版本不得覆盖；需要再改就递增版本号。
-
-### ⑥ 安装并回读验证
-
-```powershell
-# 静默覆盖安装（完整包直接覆盖，不受在线更新版本比较限制）
-Start-Process -Wait -FilePath "dist\windows\ElectricityToolbox_<版本>_windows_x64_setup.exe" -ArgumentList "/S"
-```
-
-回读三处，缺一不可：
-
-- `%LOCALAPPDATA%\电力工具箱\payload\manifest.json` → `version`
-- 工作区 `state/installed.json` → 对应版本
-- 启动后窗口「电力工作工具箱」可见，`toolbox-service.exe` 与载荷内 Python 正常拉起
-
-## 版本号规则
-
-**Windows 版本号跟随 macOS 版本号**：Windows `0.1.32` 对应 macOS `v0.1.32`。
-
-- 正常一轮对齐：mac 发 `x.y.z` → Windows 发同一个 `x.y.z`。
-- 同一 mac 基线的 Windows 专属修补（只能在 Windows 复现的缺陷、打包或更新通道问题）需要再次发布时，版本号递增，并在 `CHANGELOG.md` 标注「对应 mac vX.Y.Z + Windows 修补」。
-- 跨主／次版本或结构性调整用 `-FullOnly` 重设补丁基线，并在发布说明中提示用户完整升级一次。
-- 版本号唯一来源是 `packaging/tauri/version.py`，不要手改散落的版本字段：
-
-```bash
-.venv/Scripts/python.exe packaging/tauri/version.py set 0.1.33 --notes "具体变更"
-.venv/Scripts/python.exe packaging/tauri/version.py check --tag v0.1.33 --require-notes
-```
-
-`set` 会同步 `desktop/package.json`、`desktop/src-tauri/tauri.conf.json`、`desktop/package-lock.json`、`Cargo.toml`、`Cargo.lock` 并写入 `CHANGELOG.md`；已存在的版本号会被拒绝，需要递增。
-
-## 环境维护
-
-### 保留什么
-
-| 类型 | 处理 |
-| --- | --- |
-| `.venv/`、`runtime/`、`dist/`、`desktop/src-tauri/target/`、`native/price-xlsx/target/` | 本机保留，Git 忽略 |
-| `.toolbox/`（源码调试数据、独立 Python 运行时） | 本机保留，Git 忽略 |
-| `.toolbox/standalone-python/` | `.venv` 的基础解释器（`.venv/pyvenv.cfg` 的 `home` 指向它），**删掉会让整个虚拟环境立即失效**，也用作打包 `-PythonRoot` |
-| `dist/windows/` 历史安装包 | 只保留最近几个版本作为补丁基准，其余可回收 |
-| 登录态、`.browser-profile`、`config.json`、真实工作簿 | 保留在 Git 忽略的本地路径，绝不入库、不写入日志 |
-
-### 定期清理（参考 mac 版 `tooling/clean_workspace.py` 的做法，先干跑再执行）
-
-1. 列出候选并核对体积，确认后才删。
-2. `dist/windows/` 按白名单处理：保留最近 N 个安装包及其 `.sha256`、`updates-*/` 索引；发布日志、一次性脚本、旧版本暂存目录可回收。
-3. `desktop/src-tauri/payload/` 只留可复用的 `runtime/`；`app`、`defaults`、`bootstrap`、清单文件每次构建都会重建。
-4. `logs/` 顶层按日期归档到 `logs/release-archive/`，只移动不删除。
-5. 退出工具后确认没有遗留 `wps-chrome.pid`、`auth_state.json.lock` 与浏览器 profile 残留进程。
-
-### 运行态卫生
-
-- 同一份源码不要同时开两个工具箱实例（一个 `.venv`、一个安装包 runtime 会互抢配置与锁）。
-- 清理前先确认 `.venv/pyvenv.cfg` 的 `home` 指向哪个目录：若指向某个待删目录，先把它迁到 `.toolbox/standalone-python` 再改 `pyvenv.cfg`，否则删完虚拟环境就废了。
-- 自动化浏览器用完即退，避免 headless Chrome 长期占用 `9222` 端口与 profile 目录。
-- 调试版与正式安装版的数据目录不同，排查问题时先确认当前实例用的是哪一个。
-
-## 每轮检查表
-
-- [ ] 上游基线已记录（`docs/upstream-review-<日期>.md`）
-- [ ] `CHANGELOG.md` 已写明版本、变更与验证结果
-- [ ] `version.py check --tag v<版本> --require-notes` 通过
-- [ ] 针对性测试 + `start_source_test.ps1 -Smoke` 通过
-- [ ] `git status --short` 只含本次改动，敏感文件未被跟踪
-- [ ] 安装包与增量索引均已生成，`.sha256` 已核对
-- [ ] Release 附件齐全（完整包 + 索引整套）
-- [ ] 静默安装后三处版本回读一致
-- [ ] 源码已推送到 `origin/main`，远端提交已回读确认

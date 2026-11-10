@@ -10,24 +10,24 @@
 
 模块使用独立的 `auth_state.json`、锁文件和 `.browser-profile/`。这些本地状态均已由仓库 `.gitignore` 排除。
 
-```bash
+```powershell
 # 登录/刷新独立登录态
-../.venv/bin/python update_spot_prices.py --login
+../.venv/Scripts/python.exe update_spot_prices.py --login
 
 # 更新单日，默认写入前生成时间戳备份
-../.venv/bin/python update_spot_prices.py --start-date 2026-08-30
+../.venv/Scripts/python.exe update_spot_prices.py --start-date 2026-08-30
 
 # 更新日期区间
-../.venv/bin/python update_spot_prices.py --start-date 2026-08-30 --end-date 2026-09-01
+../.venv/Scripts/python.exe update_spot_prices.py --start-date 2026-08-30 --end-date 2026-09-01
 
 # 只抓取并校验，不写工作簿
-../.venv/bin/python update_spot_prices.py --start-date 2026-08-30 --dry-run
+../.venv/Scripts/python.exe update_spot_prices.py --start-date 2026-08-30 --dry-run
 
 # 只更新海风，默认文件为 ~/Desktop/日常工作/2026年现货价格分析-海风.xlsx
-../.venv/bin/python update_spot_prices.py --start-date 2026-09-26 --stations 海风
+../.venv/Scripts/python.exe update_spot_prices.py --start-date 2026-09-26 --stations 海风
 
 # 只更新归湖和海风
-../.venv/bin/python update_spot_prices.py --start-date 2026-09-26 --stations 归湖 海风
+../.venv/Scripts/python.exe update_spot_prices.py --start-date 2026-09-26 --stations 归湖 海风
 ```
 
 未指定 `--stations` 时默认更新三个场站。默认工作簿位于桌面“日常工作”目录，归湖、鮀莲保留原文件名，海风为 `2026年现货价格分析-海风.xlsx`。可通过 `--guihu-workbook`、`--tuolian-workbook`、`--haifeng-workbook` 或工具箱页面更改。

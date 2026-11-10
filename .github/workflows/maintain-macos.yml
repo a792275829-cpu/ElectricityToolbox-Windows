@@ -1,8 +1,9 @@
-name: Check macOS from main
+# Legacy filename retained; macOS builds have stopped.
+name: Check Windows from main (legacy entry)
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  macos:
-    uses: a792275829-cpu/ElectricityToolbox-Windows/.github/workflows/desktop-ci.yml@main
+  windows:
+    uses: ./.github/workflows/desktop-ci.yml

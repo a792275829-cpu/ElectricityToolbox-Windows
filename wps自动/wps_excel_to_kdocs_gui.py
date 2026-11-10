@@ -35,7 +35,14 @@ if str(BASE_DIR.parent) not in sys.path:
 from toolbox_file_button import FileSelectButton
 from toolbox_background_read import BackgroundRead
 from toolbox_storage import data_path
-from toolbox_platform import process_is_alive, hidden_process_options, detached_browser_process_options, windows_browser_processes, find_windows_browser
+from toolbox_platform import (
+    detached_browser_process_options,
+    find_windows_browser,
+    hidden_process_options,
+    process_is_alive,
+    terminate_windows_process,
+    windows_browser_processes,
+)
 from toolbox_wps_config import (_document_config_from_dict, _region_config_from_dict, _string_list, build_config_export, load_config_export, normalize_browser_mode, normalize_document_titles, normalize_runtime_config, runtime_config_from_export_payload, save_config_export)
 from toolbox_log_console import LogConsole, explain_error, redact
 from toolbox_choices import SegmentedGroup
@@ -1277,12 +1284,7 @@ def close_managed_chrome_window(pid: int, timeout_seconds: float) -> bool:
     if managed_chrome_is_headless(pid):
         return False
     try:
-        subprocess.run(
-            ["taskkill.exe", "/PID", str(pid), "/T"],
-            capture_output=True,
-            timeout=min(timeout_seconds, 5),
-            **hidden_process_options(),
-        )
+        terminate_windows_process(pid, timeout=min(timeout_seconds, 5))
     except (subprocess.SubprocessError, OSError):
         return False
     deadline = time_module.monotonic() + min(timeout_seconds, 6)
@@ -1300,9 +1302,7 @@ def stop_managed_chrome(pid: int, log, reason: str, timeout_seconds: float = 8) 
             # A visible window may hold a login that has not been flushed yet.
             close_managed_chrome_window(pid, timeout_seconds)
         if process_is_alive(pid):
-            subprocess.run(["taskkill.exe", "/PID", str(pid), "/T", "/F"],
-                           capture_output=True, timeout=timeout_seconds,
-                           **hidden_process_options())
+            terminate_windows_process(pid, force=True, timeout=timeout_seconds)
             deadline = time_module.monotonic() + timeout_seconds
             while process_is_alive(pid) and time_module.monotonic() < deadline:
                 time_module.sleep(0.1)

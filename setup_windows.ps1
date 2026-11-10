@@ -8,15 +8,35 @@ function Run-Native([string]$Program, [string[]]$Arguments) {
     & $Program @Arguments
     if ($LASTEXITCODE -ne 0) { throw "Command failed ($LASTEXITCODE): $Program" }
 }
+$expectedPython = (Get-Content -LiteralPath (Join-Path $root '.python-version') -Raw).Trim()
+if ($expectedPython -notmatch '^3\.\d+\.\d+$') { throw 'Invalid .python-version; expected an exact Python version.' }
 $python = Join-Path $root '.venv/Scripts/python.exe'
-if (-not (Test-Path -LiteralPath $python)) {
-    if (Get-Command py -ErrorAction SilentlyContinue) {
-        Run-Native 'py' @('-3', '-m', 'venv', (Join-Path $root '.venv'))
-    } else {
-        Run-Native 'python' @('-m', 'venv', (Join-Path $root '.venv'))
+function Assert-PinnedPython([string]$Program) {
+    $actual = & $Program -c "import sys,struct,tkinter;print('.'.join(map(str,sys.version_info[:3])));sys.exit(0 if struct.calcsize('P')==8 else 1)"
+    if ($LASTEXITCODE -ne 0 -or "$actual".Trim() -ne $expectedPython) {
+        throw "Python $expectedPython x64 with Tk is required by .python-version. Install it or use the pinned standalone runtime; the existing .venv was not replaced."
     }
 }
-Run-Native $python @('-c', 'import sys,tkinter; assert sys.version_info >= (3,11), "Python 3.11+ required"')
+if (-not (Test-Path -LiteralPath $python)) {
+    $runtimeRoot = Join-Path $root '.toolbox/standalone-python'
+    $candidate = Join-Path $runtimeRoot 'python.exe'
+    if (-not (Test-Path -LiteralPath $candidate)) {
+        $candidate = Get-ChildItem -LiteralPath $runtimeRoot -Filter python.exe -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1 -ExpandProperty FullName
+    }
+    if (-not $candidate) {
+        if (Get-Command py -ErrorAction SilentlyContinue) {
+            $minor = ($expectedPython -split '\.')[0..1] -join '.'
+            $candidate = & py "-$minor" -c 'import sys;print(sys.executable)'
+            if ($LASTEXITCODE -ne 0) { throw "Install Python $expectedPython x64, then rerun setup_windows.ps1." }
+        } else {
+            $candidate = (Get-Command python -ErrorAction Stop).Source
+        }
+    }
+    Assert-PinnedPython $candidate
+    Run-Native $candidate @('-m', 'venv', (Join-Path $root '.venv'))
+}
+Assert-PinnedPython $python
 Run-Native $python @('-m', 'pip', 'install', '-r', (Join-Path $root 'packaging/windows/requirements.txt'))
 if (-not $SkipBrowser) { Run-Native $python @('-m', 'playwright', 'install', 'chromium') }
 $cargo = Get-Command cargo -ErrorAction SilentlyContinue
@@ -60,16 +80,20 @@ if (-not (Test-Path -LiteralPath $nodeExe)) {
         Write-Warning ("Portable Node.js setup skipped: " + $_.Exception.Message)
     }
 }
-$npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
-if ($npm) {
-    Run-Native $npm.Source @('--prefix', '电力工具脚本/private-data-uploader-tool', 'ci', '--ignore-scripts', '--no-audit', '--no-fund')
-} elseif (Test-Path -LiteralPath $nodeExe) {
-    Run-Native $nodeExe @(
-        (Join-Path $nodeDir 'node_modules/npm/bin/npm-cli.js'),
-        '--prefix', '电力工具脚本/private-data-uploader-tool',
-        'ci', '--ignore-scripts', '--no-audit', '--no-fund'
-    )
-} else {
-    Write-Warning 'Private-data uploads are unavailable: Node.js 22+ was not found and could not be downloaded.'
+try {
+    $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if ($npm) {
+        Run-Native $npm.Source @('--prefix', '电力工具脚本/private-data-uploader-tool', 'ci', '--ignore-scripts', '--no-audit', '--no-fund')
+    } elseif (Test-Path -LiteralPath $nodeExe) {
+        Run-Native $nodeExe @(
+            (Join-Path $nodeDir 'node_modules/npm/bin/npm-cli.js'),
+            '--prefix', '电力工具脚本/private-data-uploader-tool',
+            'ci', '--ignore-scripts', '--no-audit', '--no-fund'
+        )
+    } else {
+        Write-Warning 'Private-data uploads are unavailable: Node.js 22+ was not found and could not be downloaded.'
+    }
+} catch {
+    Write-Warning ("Private-data uploader initialization failed: " + $_.Exception.Message)
 }
-Write-Host 'Windows environment ready. Run start_windows.ps1.'
+Write-Host 'Windows Python environment ready. Run start_windows.ps1.'

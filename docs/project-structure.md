@@ -19,10 +19,10 @@ Excel 重活走 Rust 原生后端。仓库里同时存在「应用外壳」「Tk
 
 | 目录 | 作用 | 能否移动/改名 |
 | --- | --- | --- |
-| `desktop/` | Tauri 外壳：`src-tauri/` Rust 宿主、`src/` 前端、`python/` 桥接与更新器、`tests/` | 不能。打包路径、CI、更新器都写死 |
-| `native/price-xlsx/` | Rust Excel 后端，编译成 `toolbox-price-xlsx.exe` 与 `toolbox-service.exe` | 不能 |
-| `电力工具箱/` | Tk 界面框架：`toolbox/` 页面、命令、服务、任务、UI 组件；`tests/` 回归 | 不能。所有页面的 import 根 |
-| `packaging/` | `windows/` Windows 打包；`tauri/` 版本号与通用构建脚本 | 不能 |
+| `desktop/` | Tauri 外壳：`src-tauri/` Rust 宿主、`src/` 前端、`python/` 桥接与更新器、`tests/` | 调整须同步打包路径、CI 与更新器 |
+| `native/price-xlsx/` | Rust Excel 后端，编译成 `toolbox-price-xlsx.exe` 与 `toolbox-service.exe` | 调整须同步消费者与打包规则 |
+| `电力工具箱/` | Tk 界面框架：`toolbox/` 页面、命令、服务、任务、UI 组件；`tests/` 回归 | 调整须同步页面 import 根 |
+| `packaging/` | `windows/` Windows 打包；`tauri/` 版本号与通用构建脚本 | 调整须同步消费者与打包规则 |
 | `00_启动/` | 双击入口。`.cmd` 只是转调根目录 `*.ps1`；`.command` 是 macOS 历史入口（保留不维护） | 可以增删，但要同步 README |
 | `docs/` | 文档，索引见 `docs/README.md` | 可以，注意 CHANGELOG 里的历史链接 |
 | `说明文档/` | 一页纯文本入口说明，与 README 重复度高 | 可以改内容，改入口时同步它 |
@@ -37,7 +37,7 @@ Excel 重活走 Rust 原生后端。仓库里同时存在「应用外壳」「Tk
 | `AGENTS.md` | 维护约定：改动边界、验证策略、发布规则。**改代码前必读** |
 | `CHANGELOG.md` | 逐版本记录，版本说明的唯一来源；发布说明由它生成 |
 | `NOTICE.md` | 来源与声明 |
-| `docs/windows-maintenance-model.md` | 六环节维护链路（对齐 → 打包 → 发布 → 验证） |
+| `docs/windows-maintenance-model.md` | 分阶段维护流程（开发、同步、上游对齐、发行、回收） |
 | `docs/project-structure.md` | 本文件 |
 | `setup_windows.ps1` | 首次初始化：建 `.venv`、装依赖、准备便携 Node |
 | `start_windows.ps1` | 启动（优先用已构建的 native 产物，`-Source` 强制走源码） |
@@ -47,10 +47,10 @@ Excel 重活走 Rust 原生后端。仓库里同时存在「应用外壳」「Tk
 | `setup_macos.command`、`package_macos.command` | macOS 历史入口，保留不维护，不参与 Windows 构建 |
 | `requirements.txt` | 转引 `packaging/windows/requirements.txt`；依赖版本只在后者维护 |
 
-## 根目录 `toolbox_*.py`（33 个扁平模块）
+## 根目录 `toolbox_*.py`（37 个扁平模块）
 
 这些不是临时文件，是**打包时被平铺到载荷根目录的共享模块**：Windows 侧不用 `toolbox_shared/` 包结构，
-而是把公共模块直接放在仓库根。**不要移动、不要合并、不要重命名**，否则页面 import 与打包结果会同时断。
+而是把公共模块直接放在仓库根。调整时必须同步 import、调用路径和载荷规则，并验证源码与安装版；这些路径是当前实现，不是永久禁止重构的接口。
 
 收录规则在 `packaging/tauri/prepare_payload.py` 的 `runtime_source`，不是逐项清单，而是按命名约定自动判断：
 
@@ -58,8 +58,8 @@ Excel 重活走 Rust 原生后端。仓库里同时存在「应用外壳」「Tk
 - 业务目录文件：首层目录属于 `MODULE_DIRECTORIES`（15 个业务目录）→ 进载荷，
   但跳过路径中含 `tests`/`docs`/`scripts-dev` 的、`test_*` 文件与 `.command`。
 - 统一跳过 `.lock`/`.log`/`.pyc`/`.bak`/`.tmp`、`.DS_Store`、`Thumbs.db`、`~$*`。
-- 文件来源是 `git ls-files -co --exclude-standard`：已跟踪的与未跟踪但未被忽略的都会打包，
-  所以命名符合规则的本地产物会被一起带进安装包。
+- 正式 Windows 构建先拒绝脏工作区，再用 `git ls-files -c` 仅导出已跟踪文件，清单记录来源提交。
+- 显式开发构建使用 `git ls-files -co --exclude-standard`，包含符合规则的未跟踪文件；仅供验证，禁止发布。
 
 由此有两个只在安装版才暴露的坑：
 
@@ -69,12 +69,12 @@ Excel 重活走 Rust 原生后端。仓库里同时存在「应用外壳」「Tk
 按用途分四组：
 
 - **界面与基础设施**：`toolbox_platform`（平台适配）、`toolbox_storage`、`toolbox_version`、`toolbox_redaction`、
-  `toolbox_choices`、`toolbox_dates`、`toolbox_date_input`、`toolbox_log_console`、`toolbox_file_button`
-- **登录与凭据**：`toolbox_auth_loader`、`toolbox_credentials`、`toolbox_login_tools`、`toolbox_qingneng_login`、
+  `toolbox_background_read`、`toolbox_choices`、`toolbox_dates`、`toolbox_date_input`、`toolbox_log_console`、`toolbox_file_button`
+- **登录与凭据**：`toolbox_auth_loader`、`toolbox_auth_requests`、`toolbox_cli_login`、`toolbox_credentials`、`toolbox_login_tools`、`toolbox_qingneng_login`、
   `toolbox_wps_config`、`toolbox_wps_urls`
 - **Excel/工作簿与业务**：`toolbox_excel_read`、`toolbox_market_workbook`、`toolbox_workbook_commit`、
   `toolbox_workbook_inspection`、`toolbox_native_compute/domain/excel/workbook/write`（Rust 后端桥接）、
-  `toolbox_clearing_layout`（出清表布局）、`toolbox_trade_batch`（批量交易）
+  `toolbox_clearing_layout`（出清表布局）、`toolbox_trade_batch`（批量交易）、`toolbox_trade_report`（交易报告）
 - **500kV 断面分析**：`toolbox_section_annotation_geometry`、`toolbox_section_basemap`、`toolbox_section_prelabel`、
   `toolbox_section_schema`、`toolbox_section_topology`、`toolbox_section_vision_review`、`toolbox_topology_web`
 
@@ -114,15 +114,15 @@ Excel 重活走 Rust 原生后端。仓库里同时存在「应用外壳」「Tk
 | 安装版载荷 | `%LOCALAPPDATA%\电力工具箱\payload` | 否 |
 | 用户配置、登录态、浏览器 profile | 各工具目录下的 `config.json`、`auth_state.json`、`.browser-profile/` | 否 |
 | 构建产物 | `dist/`、`desktop/src-tauri/target/`、`native/price-xlsx/target/` | 否 |
-| 载荷暂存 | `desktop/src-tauri/payload/`（`app`/`python` 每次重建，`runtime` 可复用） | 否 |
+| 载荷暂存 | `desktop/src-tauri/payload/`（`app`/`runtime/python` 每次归档后重建，`runtime` 可复用） | 否 |
 
 `.venv` 的基础解释器是 `.toolbox/standalone-python`（见 `.venv/pyvenv.cfg` 的 `home`），清理前务必确认。
 
 ## 改动守则
 
 1. 改页面/业务前，先查这个工具目录的调用方：`pages.py`（界面）、`commands.py`（命令）、`service_catalog.py`（服务表单）、`page_contracts.py`（字段契约）四层都要看。
-2. 新增工具页：`pages.py` 注册 `tool_id`、`commands.py` 接线、`service_catalog.py` 补表单、`page_contracts.py` 加字段，四层缺一处服务模式就静默失效。
+2. 新增工具页：`pages.py` 注册 `tool_id`、`commands.py` 接线、`service_catalog.py` 补表单、`page_contracts.py` 加字段，按当前实现同步四层并检查服务模式；后续允许收敛为统一注册源，不新增重复手写清单。
 3. 新增共享模块：放仓库根并按 `toolbox_*.py` 命名即自动进载荷；命名不合规则不会报错，只在安装版缺文件。新增业务目录需同时加进 `prepare_payload.py` 的 `MODULE_DIRECTORIES`。
 4. 改打包或更新逻辑：先读 `packaging/windows/README.md` 与 `docs/windows-maintenance-model.md`，补丁验证必须真机还原。
-5. 每次改动按 `AGENTS.md` 的「最小充分验证」执行，并在 `CHANGELOG.md` 写明验证结果。
-6. 清理磁盘前先看「数据与状态放在哪」：`.toolbox/standalone-python`（`.venv` 的基础解释器）与 `runtime/node`（便携 Node）删掉会直接弄坏源码调试环境，且删除后报错信息不直观；`dist/`、`desktop/src-tauri/target/`、`native/price-xlsx/target/`、`logs/` 可随时清理。
+5. 按 `AGENTS.md` 的风险验证规则执行；用户可见变化进入 CHANGELOG 的 Unreleased，内部整理无需凑条目。需要留存的本轮验证放 reviews，发行验收放对应 releases，不改写历史验证。
+6. 清理磁盘前先看「数据与状态放在哪」：`.toolbox/standalone-python`（`.venv` 的基础解释器）与 `runtime/node`（便携 Node）删掉会直接弄坏源码调试环境，且删除后报错信息不直观；构建归档只通过 `prune_build_archive.py` 回收；其他缓存和日志按维护模型先核对再清理，不删除正在使用的目录。

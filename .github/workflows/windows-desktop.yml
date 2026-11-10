@@ -6,11 +6,25 @@ on:
     branches: [main]
   workflow_call:
     inputs:
+      tag:
+        type: string
+        default: ''
+      full_only:
+        type: boolean
+        default: false
       installer:
         type: boolean
         default: true
   workflow_dispatch:
     inputs:
+      tag:
+        description: Optional existing version tag (empty builds main)
+        type: string
+        default: ''
+      full_only:
+        description: Reset the patch baseline with a full installer
+        type: boolean
+        default: false
       installer:
         description: Build the self-contained NSIS installer
         type: boolean
@@ -28,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.ref }}
+          ref: ${{ inputs.tag || (github.event_name == 'workflow_dispatch' && 'main' || github.ref) }}
       - uses: actions/setup-python@v5
         with:
           python-version-file: .python-version
@@ -44,28 +58,29 @@ jobs:
             native/price-xlsx -> target
             desktop/src-tauri -> target
       - run: python -m pip install uv -r packaging/windows/requirements.txt
+      - name: Install Chromium for browser lifecycle regressions
+        run: python -m playwright install chromium
+      - name: Source launcher dependency and version smoke
+        run: ./start_source_test.ps1 -Smoke -Python (Get-Command python).Source
       - run: python native/price-xlsx/build.py
       - run: cargo test --manifest-path native/price-xlsx/Cargo.toml --locked
-      - name: Desktop and toolbox fast tier
-        run: python tools/run_tests.py
-      - name: Windows updater, service and UI contracts
-        run: >-
-          python tools/run_tests.py
-          --module test_windows_platform --module test_windows_update
-          --module test_update_ui --module test_rust_service
-          --module test_windows_update_helper --module test_windows_delta
-          --module test_windows_update_build --module test_service
-          --module test_ui_layers --module test_rust_ui_bridge
-      - name: Workbook and native backend regression
+      - name: Validate version and release notes
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        shell: pwsh
+        run: |
+          $versionArgs = @('packaging/tauri/version.py', 'check', '--require-notes')
+          if ($env:RELEASE_TAG) { $versionArgs += @('--tag', $env:RELEASE_TAG) }
+          python @versionArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install optional uploader dependencies
+        run: npm ci --prefix 电力工具脚本/private-data-uploader-tool --ignore-scripts --no-audit --no-fund
+      - name: All registered Python and Node regressions
         env:
           TOOLBOX_XLSX_BACKEND: rust
           TOOLBOX_COMPUTE_BACKEND: rust
-        run: >-
-          python tools/run_tests.py
-          --module test_native_excel --module test_native_updates
-          --module test_workbook_commit --module test_report_output_lock
-          --module test_date_inputs --module test_transaction_info_update
-          --module test_guangdong_price
+          TOOLBOX_500KV_BACKEND: rust
+        run: python tools/run_tests.py full --strict
       - run: npm ci
         working-directory: desktop
       - run: npm run web:build
@@ -84,10 +99,16 @@ jobs:
           uv python install (Get-Content .python-version) --install-dir .toolbox/standalone-python --no-bin
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $runtime = Get-ChildItem .toolbox/standalone-python -Directory -Filter '*windows-x86_64-none' | Select-Object -First 1
-          ./packaging/windows/build.ps1 -PythonRoot $runtime.FullName
+          if (-not $runtime) { throw 'Pinned standalone Python runtime was not installed.' }
+          $buildArgs = @{ PythonRoot = $runtime.FullName }
+          if (-not '${{ inputs.tag }}') { $buildArgs.DevelopmentBuild = $true }
+          if ('${{ inputs.full_only }}' -eq 'true') { $buildArgs.FullOnly = $true }
+          ./packaging/windows/build.ps1 @buildArgs
       - uses: actions/upload-artifact@v4
         if: (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && inputs.installer
         with:
-          name: electricity-toolbox-windows-x64
-          path: dist/windows/*
+          name: ${{ inputs.tag && 'electricity-toolbox-windows-x64' || 'electricity-toolbox-windows-x64-development' }}
+          path: |
+            dist/windows/*
+            dist/windows-development/*
           if-no-files-found: error

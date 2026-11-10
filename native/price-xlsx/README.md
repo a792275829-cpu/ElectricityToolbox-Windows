@@ -2,8 +2,8 @@
 
 可执行程序名和安装位置沿用首阶段的 `toolbox-price-xlsx`，共用于 500kV 清洗、电量汇总和市场日报的实时机组复盘取数。源码构建：
 
-```bash
-.venv/bin/python native/price-xlsx/build.py
+```powershell
+.venv/Scripts/python.exe native/price-xlsx/build.py
 ```
 
 WPS 配置窗口复用此 Rust 核心的 `wps_url_choices` 操作，将已读取的表格名称显示为 `网址（表格名称）`，下拉项与输入框保持一致。名称单独缓存在本机配置，导入／导出时一并保留；网络请求与写入配置始终使用原始网址，标题内含括号时也不会截断网址。尚未读取名称的链接保留原网址，读取成功后自动更新。
@@ -39,18 +39,18 @@ WPS 配置窗口复用此 Rust 核心的 `wps_url_choices` 操作，将已读取
 
 ## 验证和性能比较
 
-```bash
-cd 电力工具箱
-TOOLBOX_XLSX_BACKEND=rust PYTHONPATH=.. ../.venv/bin/python -m unittest discover -s tests -p test_native_excel.py -v
+```powershell
+$env:TOOLBOX_XLSX_BACKEND = "rust"
+.venv/Scripts/python.exe tools/run_tests.py --module test_native_excel
 ```
 
 从仓库根目录对自备样本比较，所有导出结果仅写临时目录：
 
-```bash
-.venv/bin/python native/price-xlsx/benchmark_consumers.py \
-  --summary-dir /path/to/日期场站目录 \
-  --market-file /path/to/出清情况.xlsx \
-  --market-date 2026-09-20 --repeats 5 --output /path/to/benchmark.json
+```powershell
+.venv/Scripts/python.exe native/price-xlsx/benchmark_consumers.py `
+  --summary-dir D:/样本/日期场站目录 `
+  --market-file D:/样本/出清情况.xlsx `
+  --market-date 2026-09-20 --repeats 5 --output D:/样本/benchmark.json
 ```
 
 比较电量汇总读取、完整本地汇总导出、独立机组复盘解析；包含原生进程启动和 JSON 通信。核对机组数据、全部输出单元格值／类型／数字格式／样式、合并区域、冻结窗格、行列尺寸及完整复盘数据。不会登录网站、上传文件或生成远程市场数据。
@@ -91,8 +91,6 @@ TOOLBOX_XLSX_BACKEND=rust PYTHONPATH=.. ../.venv/bin/python -m unittest discover
 - 总表按日期／时刻只对受影响的历史行和增量做原有 groupby.last，再与未触及历史拼接排序。仅唯一且非空的历史键、受支持列类型与一致 dtype 才启用；其他情况回退原完整合并。`TOOLBOX_FORECAST_MERGE=incremental|full` 默认 incremental。
 - 交易报告批次包含重复来源时，默认在批次作用域内复用原生进程和只读 JSON 缓存；不同来源批次仍用原路径。`TOOLBOX_EXCEL_SESSION=auto|oneshot|session` 可选择策略。缓存最多 4 项／16 MiB，按文件身份、大小、mtime／ctime 与请求参数失效；每次命中重新解析对象，退出批次清空并回收进程。read_frame 不缓存。
 
-真实样本每项交替三轮、独立工作进程的中位数：收益完整检查／副本写入／回读 2.177→1.968 秒（其中回读 0.505→0.281 秒）；97,440×55 总表读取 3.145→2.821 秒，Python／Rust 各自峰值 557→452／918→549 MiB；192 条含覆盖增量合并 0.110→0.092 秒，96 条纯追加 0.107→0.088 秒；重复来源四次批量 0.341→0.243 秒。不同文件批量仅 0.343→0.337 秒，收益不足，未默认启用会话。
+历史测量及当时的验证限制见 [性能记录](../../docs/reviews/native-performance-2026-10-21.md)。
 
 `benchmark_all_trials.py` 使用 `--baseline-dir` 快照（包含 bin/toolbox-price-xlsx）、`--forecast`、`--benefit`、`--batch-inputs`、`--output`。全部业务输出在临时目录；核对全部 XLSX 包成员、DataFrame 数据／dtype 及 HTML 字节，确认原输入摘要不变。RSS 包含进程导入和输入准备，分别记录 Python／子进程各自高水位，不相加，也不代表完整 GUI／联网任务峰值。无需新增依赖或二进制传输协议。
-
-验证：590 项回归为 589 通过、1 项已有日期弹窗 Escape 关闭测试失败；兼容路径额外 35 项、启动器 smoke test 和 Rust 格式检查通过。两份真实收益模板副本共 2,160 格经局部及完整加载分别回读值／格式／样式，原文件未改。未构建／发布 DMG，未测跨 Mac 安装或联网更新全流程。

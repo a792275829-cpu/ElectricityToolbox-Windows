@@ -33,7 +33,10 @@ if ($Smoke) {
     if (-not $python -or -not (Test-Path -LiteralPath $python)) {
         throw 'Python interpreter missing; run setup_windows.ps1 or pass -Python.'
     }
-    & $python -c "import sys, tkinter, importlib.util; names = ('cryptography','docx','openpyxl','pandas','playwright','sklearn'); missing = [n for n in names if not importlib.util.find_spec(n)]; print('TOOLBOX_DEPS=' + ('OK' if not missing else 'MISSING:' + ','.join(missing))); sys.exit(1 if missing else 0)"
+    $expectedPython = (Get-Content -LiteralPath (Join-Path $root '.python-version') -Raw).Trim()
+    & $python -c "import sys,struct,tkinter;sys.exit(0 if sys.version.split()[0]==sys.argv[1] and struct.calcsize('P')==8 else 1)" $expectedPython
+    if ($LASTEXITCODE -ne 0) { throw "Python $expectedPython x64 is required by .python-version." }
+    & $python -c "import importlib; names = ('cryptography','docx','openpyxl','pandas','playwright.sync_api','sklearn','jinja2','pypdf','pdfplumber','pypdfium2','PIL','numpy','joblib'); [importlib.import_module(n) for n in names]; print('TOOLBOX_DEPS=OK')"
     if ($LASTEXITCODE -ne 0) { throw "Dependency check failed ($LASTEXITCODE)." }
     Write-Output 'TOOLBOX_SMOKE=OK'
     exit 0

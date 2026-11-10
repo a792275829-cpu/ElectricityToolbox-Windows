@@ -7,7 +7,7 @@ Windows 10 / 11 x64 使用同一套原版 Tk 页面和独立的 Windows 更新�
 日常发布同时保留完整 NSIS 安装包、SHA-256、最近三个版本的直达补丁及
 `windows-update-manifest.json`。历史补丁继续保留在原 Release，索引保留其
 升级路径。跨主／次版本或 `build.ps1 -FullOnly` 重设基线。
-这些附件与 macOS 的 DMG、`update-manifest.json` 和 Apple 芯片补丁分别维护。
+本仓库仅构建和验证 Windows 发行附件。
 
 更新时在安装目录旁建立完整临时目录，使用 NTFS 硬链接复用未改变的文件，
 仅解压变化文件；不支持硬链接时自动复制。旧版与新版均按完整文件清单校验，
@@ -37,8 +37,7 @@ Windows 10 / 11 x64 使用同一套原版 Tk 页面和独立的 Windows 更新�
 ```powershell
 .venv/Scripts/python.exe packaging/windows/build_updates.py D:/验收安装目录 `
   --base-root D:/旧版验收目录 --no-fetch-history --output dist/windows
-.venv/Scripts/python.exe -m unittest discover -s desktop/tests/python -p 'test_*update*.py'
-.venv/Scripts/python.exe -m unittest discover -s desktop/tests/python -p test_windows_delta.py
+.venv/Scripts/python.exe tools/run_tests.py --group desktop
 ```
 
 补丁清单拒绝路径穿越、Windows 设备名／ADS、大小写或 Unicode 冲突、链接和
@@ -46,32 +45,25 @@ Windows 10 / 11 x64 使用同一套原版 Tk 页面和独立的 Windows 更新�
 或强制结束其他程序。安装到受保护目录导致无法创建同级临时目录时，使用完整
 安装程序处理权限问题。
 
-## 构建机清理约定
+## 构建来源与开发验证
 
-Agent 会话会把批量删除守卫注入到所有子进程：`PYTHONPATH` 指向的
-`sitecustomize` 接管 `shutil.rmtree`，`NODE_OPTIONS` 的 `--require` 接管 node
-的删除（`npm ci` 清空 `node_modules` 走这条），`PATH` 首位的 `safe-bin` 包装
-`rm`。守卫在非交互子进程里没有确认通道，累计删除量达到阈值即按 fail-closed
-退出 1：实测会让 `prepare_payload.py` 清空 `payload/app`、`npm ci` 清空
-`node_modules`、`build_updates.py` 删除临时还原目录三处先后中断。人手在普通
-终端构建不受影响，但同一条构建链路不能有两套行为，故按下面两层处理：
+正式构建先检查干净 Git 工作区，仅导出已跟踪源码。载荷 `manifest.json` 的 `source` 和
+`dist/windows/source-X.Y.Z.json` 记录提交号及开发标记。正式构建禁止携带本地业务总表。
+这固定了源码边界，不宣称整个依赖下载链已经达到逐字节可复现。
 
-- **入口还原环境**：`build.ps1` 通过 `build_env.ps1` 的 `Reset-BuildEnvironment`
-  只移除指向 `vendor\shim` 的 `NODE_OPTIONS`／`PYTHONPATH`／`PATH` 条目和
-  `CODEBUDDY_SAFE_DELETE_BULK_GUARD`，其余环境原样保留，效果等同人工终端。
-  需要保留守卫时加 `-KeepGuard`（此时补丁验证阶段可能因临时目录删除被拦）。
-- **生成目录只归档**：`prepare_payload.py` 与 `build.ps1` 把 `payload/app`、
-  `payload/runtime/python`、`desktop/node_modules` 改名到
-  `dist/build-archive/<时间戳>/` 后重建，不原地删除；即使守卫仍在也能完成
-  这两步。改名同卷完成，不产生批量删除。
+未提交改动的验证使用 `build.ps1 -DevelopmentBuild -PythonRoot <目录>`；产物进入
+`dist/windows-development/`，不制作正式增量附件，禁止上传 Release。
+完整的提交、验收、公开顺序见 [维护流程](../../docs/windows-maintenance-model.md)。
 
-回收与自检：
+## 构建归档与回收
 
-- `prune_build_archive.py`（默认保留最近 1 份快照，`--all` 全清）先用 robocopy
-  空目录镜像清空快照，再删空目录骨架，可处理上万文件与超长路径；
-  `build.ps1 -PruneArchive` 在构建成功后自动调用。
-- `build.ps1 -DryRun` 只打印将归档的目标与规模，不改动任何文件；
-  `prepare_payload.py --dry-run` 提供同等能力。
-- 不要对 `payload/`、`node_modules/`、`dist/build-archive/` 使用 `rm -rf`、
-  `shutil.rmtree` 或回收站删除：守卫会 fail-closed，回收站通道对海量文件和
-  超长路径也不可靠（实测 1.1 万文件的目录只能靠 robocopy 清空）。
+`payload/app`、`payload/runtime/python`、`desktop/node_modules` 替换前改名归档到
+`dist/build-archive/<时间戳>/`。构建默认保留调用环境与安全守卫，`-KeepGuard` 仅兼容旧调用；
+不再默认调用历史 `Reset-BuildEnvironment`。遇到环境阻塞须报告，不通过其他删除通道绕过。
+
+- `build.ps1 -DryRun` 或 `prepare_payload.py --dry-run` 预览归档，不改文件。
+- 清理默认只预览：`prune_build_archive.py --keep 1`；显式加 `--apply` 执行。
+- `build.ps1 -PruneArchive` 在构建成功后执行回收，保留最近一份；构建前先预览核对清理边界，失败现场保留至诊断结束。
+- 回收只允许本仓库 `dist/build-archive/` 内、时间戳命名的快照，拒绝链接和重解析点，失败直接报错。
+- 自定义 `-ArchiveRoot` 可用于构建诊断；若位于仓库归档树外，统一清理工具会拒绝，不能与 `-PruneArchive` 联用。
+- 每轮大构建后检查归档体积并预览回收；日志按排障需要限期保留，用户数据不套用缓存回收规则。

@@ -61,6 +61,22 @@ class WindowsPlatformTests(unittest.TestCase):
                 child.kill()
                 child.wait()
 
+    def test_platform_termination_closes_only_the_requested_tree(self):
+        from toolbox_platform import hidden_process_options, terminate_windows_process
+
+        child = subprocess.Popen(
+            [sys.executable, '-c', 'import time;time.sleep(30)'],
+            **hidden_process_options(),
+        )
+        try:
+            result = terminate_windows_process(child.pid, force=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            child.wait(timeout=5)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+
     def test_windows_updater_never_contacts_mac_release_channel(self):
         sys.path.insert(0, str(ROOT / 'desktop/python'))
         from github_update import GitHubUpdater, UpdateError
@@ -87,7 +103,7 @@ class WindowsPlatformTests(unittest.TestCase):
             target = Path(tmp) / '表.xlsx'
             script = (
                 'from pathlib import Path; from toolbox_workbook_commit import workbook_commit_lock; '
-                f'lock=workbook_commit_lock([Path({str(target)!r})]); lock.__enter__(); print("locked")'
+                f'\nwith workbook_commit_lock([Path({str(target)!r})]):\n    print("locked")'
             )
             with workbook_commit_lock([target]):
                 result = subprocess.run([sys.executable, '-c', script], cwd=ROOT,

@@ -1,4 +1,8 @@
-# 桌面构建与发布
+# 历史 macOS 打包脚本与共享资源
+
+本目录原位保留。macOS 构建、DMG 与自动发布流程已停止，不作为 Windows 操作说明。
+Windows 只复用源码筛选、版本同步及目录迁移等共享功能；当前构建见 [Windows 打包](../windows/README.md)。
+以下 macOS 构建细节仅作历史参考。
 
 见 `../../desktop/README.md`。
 

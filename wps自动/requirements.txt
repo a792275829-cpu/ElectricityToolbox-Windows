@@ -1,2 +1,2 @@
-openpyxl>=3.1.0
-playwright>=1.44.0
+# Windows dependency versions are maintained centrally.
+-r ../packaging/windows/requirements.txt

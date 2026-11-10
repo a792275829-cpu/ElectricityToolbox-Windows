@@ -1,4 +1,4 @@
-name: Publish macOS release from main
+name: Build Windows release artifacts from main
 on:
   workflow_dispatch:
     inputs:
@@ -11,11 +11,10 @@ on:
         type: boolean
         default: false
 permissions:
-  contents: write
+  contents: read
 jobs:
   release:
-    uses: a792275829-cpu/ElectricityToolbox-Windows/.github/workflows/desktop-release.yml@main
+    uses: ./.github/workflows/desktop-release.yml
     with:
       tag: ${{ inputs.tag }}
       full_only: ${{ inputs.full_only }}
-    secrets: inherit

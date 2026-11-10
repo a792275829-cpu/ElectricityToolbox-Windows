@@ -31,8 +31,12 @@ def api_row(day: date, offset: float = 0.0):
 
 
 class WindForecastScreenshotTests(unittest.TestCase):
+    def setUp(self):
+        MODULE._font.cache_clear()
+        self.addCleanup(MODULE._font.cache_clear)
+
     def test_bundled_font_keeps_size_and_chinese_glyphs_without_system_fonts(self) -> None:
-        with patch.object(MODULE.sys, "platform", "font-fallback-test"):
+        with patch.object(MODULE, "sys", SimpleNamespace(platform="win32")):
             regular = MODULE._font(44)
             bold = MODULE._font(48, bold=True)
             same_size_bold = MODULE._font(44, bold=True)
@@ -53,7 +57,7 @@ class WindForecastScreenshotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="风力预测 字体测试-") as directory:
             root = Path(directory)
             shutil.copytree(MODULE_PATH.parent / "fonts", root / "fonts")
-            with patch.object(MODULE, "SCRIPT_DIR", root), patch.object(MODULE.sys, "platform", "font-fallback-test"):
+            with patch.object(MODULE, "SCRIPT_DIR", root), patch.object(MODULE, "sys", SimpleNamespace(platform="win32")):
                 output = MODULE.render_table_png(rows, root / "输出" / "test.png")
             with Image.open(output) as image:
                 # Exclude cell borders; tiny default fonts only occupy ~10 rows.
@@ -71,7 +75,7 @@ class WindForecastScreenshotTests(unittest.TestCase):
 
     def test_missing_bundled_font_reports_error_instead_of_rendering_tiny_text(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            with patch.object(MODULE, "SCRIPT_DIR", Path(directory)), patch.object(MODULE.sys, "platform", "font-fallback-test"):
+            with patch.object(MODULE, "SCRIPT_DIR", Path(directory)), patch.object(MODULE, "sys", SimpleNamespace(platform="win32")):
                 with self.assertRaisesRegex(RuntimeError, "截图中文字体加载失败"):
                     MODULE._font(48, bold=True)
 

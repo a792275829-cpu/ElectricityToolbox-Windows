@@ -12,6 +12,7 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill
 
 from toolbox.runtime import ToolPaths, load_module
+from toolbox_storage import data_path
 
 
 class PowerBenefitTests(unittest.TestCase):
@@ -174,11 +175,13 @@ class PowerBenefitTests(unittest.TestCase):
             self.assertFalse(list(Path(folder).glob(".*.xlsx")))
 
     def test_auth_profile_and_lock_are_independent(self):
-        m=self.module; auth=m.load_auth_module()
-        self.assertEqual(auth.AUTH_STATE_PATH,m.SCRIPT_DIR/"auth_state.json")
-        self.assertEqual(auth.AUTH_LOCK_PATH,m.SCRIPT_DIR/"auth_state.json.lock")
-        self.assertEqual(auth.PROFILE_DIR,m.SCRIPT_DIR/".browser-profile")
-        self.assertNotEqual(auth.AUTH_STATE_PATH,self.paths.online_energy_dir/"auth_state.json")
+        module = self.module
+        auth = module.load_auth_module()
+        directory = data_path(module.SCRIPT_DIR)
+        self.assertEqual(auth.AUTH_STATE_PATH, directory / "auth_state.json")
+        self.assertEqual(auth.AUTH_LOCK_PATH, directory / "auth_state.json.lock")
+        self.assertEqual(auth.PROFILE_DIR, directory / ".browser-profile")
+        self.assertNotEqual(auth.AUTH_STATE_PATH, data_path(self.paths.online_energy_dir / "auth_state.json"))
 
     def haifeng_template(self, folder):
         path = Path(folder) / "海风博弈收益统计-新.xlsx"

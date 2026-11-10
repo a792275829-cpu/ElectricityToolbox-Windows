@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+TOOLBOX_TEST_TAGS = ()
+
 spec = importlib.util.spec_from_file_location(
     "release_version", Path(__file__).resolve().parents[3] / "packaging/tauri/version.py"
 )
@@ -61,6 +63,12 @@ class VersionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             version.set_version("0.1.3", ["不应覆盖"], "2026-10-19")
         self.assertEqual((self.root / "CHANGELOG.md").read_text(), self.history)
+
+    def test_version_rollback_is_rejected_before_any_write(self):
+        with self.assertRaises(ValueError):
+            version.set_version('0.1.2', ['不得倒退'])
+        self.assertEqual(version.check(), 'v0.1.3')
+        self.assertEqual((self.root / 'CHANGELOG.md').read_text(), self.history)
 
     def test_release_does_not_include_unreleased_history(self):
         (self.root / "CHANGELOG.md").write_text(

@@ -15,6 +15,17 @@ def hidden_process_options():
     return {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
 
 
+def terminate_windows_process(pid: int, *, force: bool = False, timeout: float = 5):
+    """Close one verified process tree; the caller verifies browser ownership."""
+    if pid <= 0:
+        raise ValueError("Process ID must be positive")
+    command = ["taskkill.exe", "/PID", str(pid), "/T"]
+    if force:
+        command.append("/F")
+    return subprocess.run(command, capture_output=True, timeout=timeout,
+                          **hidden_process_options())
+
+
 def detached_browser_process_options():
     """Keep the persistent WPS browser outside a short-lived worker's job."""
     if os.name == "nt":
