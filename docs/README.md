@@ -30,6 +30,7 @@
 | [`reviews/repository-conventions-2026-11-10.md`](reviews/repository-conventions-2026-11-10.md) | 本轮仓库约定扫描、整改及验证记录 |
 | [`reviews/maintenance-policy-2026-11-10.md`](reviews/maintenance-policy-2026-11-10.md) | 维护流程分层、版本解耦、构建与回收门禁的调整及验证 |
 | [`reviews/upstream-review-2026-11-05.md`](reviews/upstream-review-2026-11-05.md) | 最新上游比对基线 |
+| [`releases/v0.1.38.md`](releases/v0.1.38.md) | 0.1.38 的发行验收范围、环境与结果 |
 | [`releases/v0.1.37.md`](releases/v0.1.37.md) | 0.1.37 的发行验收范围、环境与结果 |
 | [`releases/v0.1.36.md`](releases/v0.1.36.md) | 0.1.36 的历史实现与验证细节 |
 | [`releases/v0.1.35.md`](releases/v0.1.35.md) | 0.1.35 的历史实现与验证细节 |
