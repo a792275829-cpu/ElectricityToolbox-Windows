@@ -302,6 +302,55 @@ class ReportDateReaderTests(unittest.TestCase):
                 self.assertEqual(MODULE.infer_report_date(path), date(2026, 11, 9))
             self.assertEqual(calls, [True, False])
 
+    def test_current_template_alias_sheet_skips_the_full_parse(self):
+        """Current workbooks carry 新 (not 新快报); the fast path must follow.
+
+        加了 D 日全天出清明细后，日报表仍叫“新”。此前只读通道只认“新快报”，
+        导致每次识别日期都退化成整本工作簿的完整解析（数秒）。
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            workbook = openpyxl.Workbook()
+            workbook.active.title = "基础信息"
+            workbook.active["A1"] = "基础信息"
+            for name in ("快报", "快报  (日前)"):
+                workbook.create_sheet(name)["A4"] = "占位"
+            report = workbook.create_sheet(MODULE.ENERGY_METRICS_SHEET_NAME)
+            report["A4"] = "日前市场简析"
+            report["A6"] = datetime(2026, 11, 10)
+            report["A70"] = "实时市场简析"
+            report["Q4"] = "占位"
+            for row in range(200, 1400):
+                for column in range(1, 21):
+                    report.cell(row, column).value = f"={row}.{column}" if column > 1 else f"{row}:00"
+            path = Path(folder) / "出清情况（分公司2026.11.10）.xlsx"
+            workbook.save(path)
+            workbook.close()
+            calls, patcher = self.track_loads()
+            with patcher:
+                self.assertEqual(MODULE.infer_report_date(path), date(2026, 11, 10))
+            self.assertEqual(calls, [True])
+
+    def test_alias_sheet_without_narrative_keeps_the_full_parser(self):
+        # A4 为空时完整解析改按收益模板识别，只读通道不猜，仍然交回完整解析。
+        with tempfile.TemporaryDirectory() as folder:
+            workbook = openpyxl.Workbook()
+            sheet = workbook.active
+            sheet.title = MODULE.ENERGY_METRICS_SHEET_NAME
+            sheet["A6"] = date(2026, 11, 8)
+            sheet["B2"] = "日前出清"
+            sheet.merge_cells("B2:C2")
+            sheet["B3"] = "电量"
+            sheet["C3"] = "电价"
+            sheet["A5"] = "分公司火电"
+            sheet["Q4"] = "占位"
+            path = Path(folder) / "出清情况.xlsx"
+            workbook.save(path)
+            workbook.close()
+            calls, patcher = self.track_loads()
+            with patcher:
+                self.assertEqual(MODULE.infer_report_date(path), date(2026, 11, 8))
+            self.assertEqual(calls, [True, False])
+
     def test_unsupported_read_only_channel_falls_back_to_full_parser(self):
         with tempfile.TemporaryDirectory() as folder:
             path = self.make_workbook(Path(folder))

@@ -99,6 +99,59 @@ def _has_realtime_section(sheet: Any) -> bool:
     )
 
 
+def _has_realtime_section_light(sheet: Any) -> bool | None:
+    """``_has_realtime_section`` for a streaming handle; ``None`` when unsure."""
+    try:
+        last_row = min(int(sheet.max_row or 200), 200)
+        for row in sheet.iter_rows(min_row=1, max_row=last_row, max_col=1, values_only=True):
+            value = row[0] if row else None
+            if isinstance(value, str) and "实时市场简析" in value:
+                return True
+        return False
+    except Exception:
+        return None
+
+
+def _looks_like_report_sheet_light(sheet: Any) -> bool | None:
+    """Streaming equivalent of ``_looks_like_report_sheet``.
+
+    Only the structural conditions that are cheap on a read-only handle are
+    checked. Sheets whose recognition needs the merged benefit-template scan
+    (empty A4), or handles that reject the streaming reads, return ``None`` so
+    the caller keeps the full parser and its error messages untouched.
+    """
+    try:
+        if int(sheet.max_column or 0) < 17:
+            return False
+        if not _is_day_narrative(sheet["A4"].value):
+            return None
+        return _has_realtime_section_light(sheet)
+    except Exception:
+        return None
+
+
+def _select_report_sheet_light(workbook: Any) -> Any | None:
+    """Pick the report sheet from a read-only handle without a full parse.
+
+    Mirrors ``_select_report_sheet`` for the current template (``新快报`` and the
+    ``新`` alias every current workbook uses). ``快报*`` legacy workbooks, and
+    anything the streaming checks cannot confirm, return ``None`` so the caller
+    falls back to the full parser instead of guessing.
+    """
+    names = list(workbook.sheetnames)
+    if SHEET_NAME in names:
+        return workbook[SHEET_NAME]
+    for name in REPORT_SHEET_ALIASES:
+        if name not in names:
+            continue
+        verdict = _looks_like_report_sheet_light(workbook[name])
+        if verdict:
+            return workbook[name]
+        if verdict is None:
+            return None
+    return None
+
+
 def _missing_narrative_sheets(workbook: Any) -> list[str]:
     """Report-shaped sheets whose only defect is an empty A4 day narrative.
 
@@ -752,13 +805,20 @@ def infer_report_date(path: str | Path) -> date:
     """Read only the date cells, never the full-day clearing tables.
 
     The D-day full-day clearing tables made the input workbook much larger.
-    ``read_only=False`` builds every cell, style and merged range of those
-    tables just to read A6/A2/A7, so the toolbox date hint grew to seconds.
-    Standalone calls (the GUI) use a streaming read-only handle; callers that
-    already hold the full workbook (CLI validation, pipeline) reuse it instead
-    of opening a second handle. Legacy workbooks without the ``新快报`` sheet
-    still go through the full parser, whose sheet selection depends on merged
-    headers and must keep its original behaviour and error messages.
+    ``read_only=False`` builds every cell, style, chart and merged range of
+    those tables just to read A6/A2/A7, which cost seconds per call and, being
+    pure Python, starved the Tk main loop while the toolbox read the date on a
+    worker thread.
+
+    The streaming handle is now used for every sheet the fast selector
+    understands: ``新快报`` and the ``新`` alias that current workbooks carry.
+    The selector previously accepted only ``新快报``, so current workbooks - the
+    ones with the D-day clearing tables - always fell back to the full parse.
+    Callers that already hold the full workbook (CLI validation, pipeline)
+    reuse it instead of opening a second handle. Legacy workbooks without a
+    recognisable alias still go through the full parser, whose sheet selection
+    depends on merged headers and must keep its original behaviour and error
+    messages.
     """
     source = _workbook_source(path)
     caller_workbook = cached_workbook(source, data_only=True, read_only=False)
@@ -766,9 +826,18 @@ def infer_report_date(path: str | Path) -> date:
         return _report_date_from_sheet(_select_report_sheet(caller_workbook), source)
 
     try:
-        light = load_workbook(source, data_only=True, read_only=True)
-        if SHEET_NAME in light.sheetnames:
-            return _report_date_from_sheet(light[SHEET_NAME], source)
+        light = cached_workbook(source, data_only=True, read_only=True)
+        owned_light = light is None
+        if owned_light:
+            light = load_workbook(source, data_only=True, read_only=True)
+        try:
+            light_sheet = _select_report_sheet_light(light)
+            if light_sheet is not None:
+                return _report_date_from_sheet(light_sheet, source)
+        finally:
+            # 调用方作用域里的句柄由 reuse_workbook_inputs 统一关闭，避免提前关闭后复用。
+            if owned_light:
+                light.close()
     except ValueError:
         raise  # 真实的日期/工作表错误保持原口径，不静默回退
     except Exception:

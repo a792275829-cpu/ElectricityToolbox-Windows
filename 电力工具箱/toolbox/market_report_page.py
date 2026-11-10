@@ -13,7 +13,7 @@ from .page_support import add_path_row, open_directory
 from .runtime import TaskRegistry, ToolPaths, python_executable
 from .widgets import ToolPage
 from .market_editor import MarketEditor, market_module
-from .market_report_dates import report_date_from_day_report
+from .market_report_dates import report_date_from_day_report, report_dates_module
 
 
 class MarketReportPage(ToolPage):
@@ -70,6 +70,18 @@ class MarketReportPage(ToolPage):
         self.manual_button = ttk.Button(self.actions, text="手动填写数据", command=self.open_market_editor)
         self.manual_button.pack(side="left", padx=(8, 0))
         self.register_busy_widgets(self.run_button, self.manual_button, *buttons)
+        # 首次识别日期还要付一次模块导入/编译成本（内存里约 1 秒，慢机器更久）。
+        # 页面打开时就在后台预热，避免这段开销都压在“选完文件才等”的那一步。
+        threading.Thread(
+            target=self._warm_report_date_reader, name="market-report-date-warmup", daemon=True
+        ).start()
+
+    @staticmethod
+    def _warm_report_date_reader() -> None:
+        try:
+            report_dates_module()
+        except Exception:
+            pass  # 预热失败不改变正常识别路径，真正的错误留给读取时反馈
 
     def _clear_manual_on_date_change(self, *_):
         if self.report_date.get() == self._manual_date:
