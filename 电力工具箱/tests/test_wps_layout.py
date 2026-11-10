@@ -6,6 +6,9 @@ import tkinter as tk
 import unittest
 from pathlib import Path
 from tkinter import ttk
+from unittest import mock
+
+TOOLBOX_TEST_TAGS = ("gui",)
 
 
 def descendants(widget: tk.Misc):
@@ -15,6 +18,55 @@ def descendants(widget: tk.Misc):
 
 
 class WpsToolbarLayoutTests(unittest.TestCase):
+    def test_wide_columns_stay_inside_table_in_toolbox_shell(self) -> None:
+        from toolbox.app import ToolboxApp
+        from toolbox.runtime import ToolPaths, load_module
+
+        workspace = Path(__file__).resolve().parents[2]
+        module = load_module("wps_shell_layout_test", ToolPaths(workspace).wps_writer)
+        with (
+            mock.patch("toolbox.app.configure_dpi"),
+            mock.patch("toolbox.pages.load_module", return_value=module),
+            mock.patch("toolbox.ui.credentials_panel.CredentialStore.load", return_value={}),
+            mock.patch.object(module.WpsWriterFrame, "load_initial_config"),
+            mock.patch.object(module.WpsWriterFrame, "_schedule_login_check"),
+        ):
+            app = ToolboxApp(workspace=workspace, check_updates=lambda: None)
+            self.addCleanup(app.destroy)
+            app.show_page("WPS写入工具")
+
+            def settle():
+                deadline = time.monotonic() + 0.6
+                while time.monotonic() < deadline:
+                    app.update()
+                    time.sleep(0.01)
+
+            deadline = time.monotonic() + 5
+            while not hasattr(app.pages["WPS写入工具"], "writer_frame") and time.monotonic() < deadline:
+                app.update()
+                time.sleep(0.01)
+            page = app.pages["WPS写入工具"]
+            frame = page.writer_frame
+            frame.selection_status.set("已选择：" + "每日生产经营情况汇总表" * 8)
+            for width, height in (app.minsize(), (app.winfo_width(), app.winfo_height())):
+                for rail_visible in (True, False):
+                    with self.subTest(size=(width, height), rail_visible=rail_visible):
+                        if app.right_rail_visible != rail_visible:
+                            app.toggle_right_rail()
+                        app.geometry(f"{width}x{height}")
+                        settle()
+                        view = app.page_viewport
+                        self.assertEqual(view.horizontal.winfo_manager(), "", (
+                            app.winfo_width(), view.canvas.winfo_width(), page.winfo_reqwidth()
+                        ))
+                        self.assertEqual(view.canvas.xview(), (0.0, 1.0))
+                        self.assertLessEqual(page.winfo_reqwidth(), view.canvas.winfo_width())
+                        for button in descendants(frame):
+                            if isinstance(button, ttk.Button) and button.cget("text") in {"预览", "开始写入"}:
+                                self.assertTrue(button.winfo_ismapped())
+                                self.assertGreaterEqual(button.winfo_rootx(), view.canvas.winfo_rootx())
+                                self.assertLessEqual(button.winfo_rootx() + button.winfo_width(), view.canvas.winfo_rootx() + view.canvas.winfo_width())
+
     def test_all_document_config_buttons_fit_at_520_pixels(self) -> None:
         try:
             root = tk.Tk()

@@ -5,6 +5,7 @@ import os
 import queue
 import re
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -19,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font, messagebox, ttk
 
 try:
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -42,6 +43,8 @@ from toolbox_platform import (
     process_is_alive,
     terminate_windows_process,
     windows_browser_processes,
+    window_scale,
+    windows_work_area,
 )
 from toolbox_wps_config import (_document_config_from_dict, _region_config_from_dict, _string_list, build_config_export, load_config_export, normalize_browser_mode, normalize_document_titles, normalize_runtime_config, runtime_config_from_export_payload, save_config_export)
 from toolbox_log_console import LogConsole, explain_error, redact
@@ -75,17 +78,26 @@ CONFIG_EXPORT_VERSION = 1
 _REMOTE_BUSINESS = None
 
 
+def configure_wps_tree_style(widget: tk.Misc) -> str:
+    style = ttk.Style(widget)
+    tree_font = font.Font(widget, font=style.lookup("Treeview", "font") or "TkDefaultFont")
+    style.configure("Wps.Treeview", rowheight=max(36, tree_font.metrics("linespace") + 14))
+    return "Wps.Treeview"
+
+
 def center_window(window: tk.Toplevel | tk.Tk, width: int | None = None, height: int | None = None) -> None:
     window.update_idletasks()
     actual_width = width or window.winfo_width() or window.winfo_reqwidth()
     actual_height = height or window.winfo_height() or window.winfo_reqheight()
-    screen_width = window.winfo_screenwidth()
-    screen_height = window.winfo_screenheight()
+    work_area = windows_work_area()
+    left, top, screen_width, screen_height = work_area or (
+        0, 0, window.winfo_screenwidth(), window.winfo_screenheight()
+    )
     actual_width = min(actual_width, max(640, screen_width - 80))
     actual_height = min(actual_height, max(480, screen_height - 80))
-    x = max(0, (screen_width - actual_width) // 2)
-    y = max(0, (screen_height - actual_height) // 2)
-    window.geometry(f"{actual_width}x{actual_height}+{x}+{y}")
+    x = left + max(0, (screen_width - actual_width) // 2)
+    y = top + max(0, (screen_height - actual_height) // 2)
+    window.geometry(f"{actual_width}x{actual_height}{x:+d}{y:+d}")
 
 
 @dataclass
@@ -1341,6 +1353,24 @@ def managed_chrome_is_headless(pid: int) -> bool:
     return "--headless" in managed_chrome_command(pid)
 
 
+def select_managed_cdp_url(cdp_url: str) -> str:
+    """Never reuse another workspace's browser just because its port responds."""
+    host, port = managed_cdp_host_port(cdp_url)
+    if not try_resolve_cdp_endpoint(cdp_url):
+        return cdp_url
+    pid = managed_chrome_pid()
+    if pid is not None and re.search(
+        rf"--remote-debugging-port={port}(?:\s|$)", managed_chrome_command(pid)
+    ):
+        return cdp_url
+    # Keep the other installation's profile and browser intact. Persist the
+    # selected endpoint in the UI so subsequent reads/writes use this profile.
+    with socket.socket() as listener:
+        listener.bind((host, 0))
+        available_port = listener.getsockname()[1]
+    return f"http://{host}:{available_port}"
+
+
 def stop_outdated_managed_chrome(
     log, cdp_url: str, *, headless: bool = False
 ) -> None:
@@ -2035,8 +2065,14 @@ class DocumentConfigDialog(tk.Toplevel):
         super().__init__(parent)
         self._local_reader = BackgroundRead(self)
         self.title(title)
-        self.geometry("900x620")
-        self.minsize(820, 520)
+        scale = window_scale(self)
+        dialog_width, dialog_height = int(1180 * scale), int(820 * scale)
+        work_area = windows_work_area()
+        available_width, available_height = (
+            work_area[2:] if work_area else (self.winfo_screenwidth(), self.winfo_screenheight())
+        )
+        self.geometry(f"{dialog_width}x{dialog_height}")
+        self.minsize(min(int(960 * scale), available_width - 80), min(int(640 * scale), available_height - 80))
         self.result: DocumentConfig | None = None
         self.recent_urls = recent_urls or []
         self.browser_mode = browser_mode
@@ -2107,7 +2143,7 @@ class DocumentConfigDialog(tk.Toplevel):
 
         self.transient(parent)
         self.grab_set()
-        center_window(self, 900, 620)
+        center_window(self, dialog_width, dialog_height)
         self.wait_visibility()
         self.focus()
         self.wait_window(self)
@@ -2174,20 +2210,32 @@ class DocumentConfigDialog(tk.Toplevel):
         tree_frame = ttk.Frame(regions_frame)
         tree_frame.pack(fill="both", expand=True, padx=8, pady=8)
         columns = ("source_sheet", "source_start", "source_end", "target_sheet", "target_start", "target_end")
-        self.region_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=10)
+        self.region_tree = ttk.Treeview(
+            tree_frame, columns=columns, show="headings", height=8,
+            style=configure_wps_tree_style(self),
+        )
+        heading_font = font.Font(
+            self, font=ttk.Style(self).lookup("Treeview.Heading", "font") or "TkDefaultFont"
+        )
         for key, label, width in [
-            ("source_sheet", "来源工作表", 180),
-            ("source_start", "来源起始单元格", 100),
-            ("source_end", "来源结束单元格", 100),
-            ("target_sheet", "目标工作表", 180),
-            ("target_start", "目标起始单元格", 100),
-            ("target_end", "目标结束单元格", 100),
+            ("source_sheet", "来源工作表", 220),
+            ("source_start", "来源起始单元格", 150),
+            ("source_end", "来源结束单元格", 150),
+            ("target_sheet", "目标工作表", 220),
+            ("target_start", "目标起始单元格", 150),
+            ("target_end", "目标结束单元格", 150),
         ]:
             self.region_tree.heading(key, text=label)
-            self.region_tree.column(key, width=width)
-        self.region_tree.pack(side="left", fill="both", expand=True)
+            width = max(width, heading_font.measure(label) + 32)
+            self.region_tree.column(key, width=width, minwidth=width)
+        tree_frame.rowconfigure(0, weight=1)
+        tree_frame.columnconfigure(0, weight=1)
+        self.region_tree.grid(row=0, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.region_tree.yview)
-        scrollbar.pack(side="left", fill="y")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        horizontal_scrollbar = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.region_tree.xview)
+        horizontal_scrollbar.grid(row=1, column=0, sticky="ew")
+        self.region_tree.configure(xscrollcommand=horizontal_scrollbar.set)
         self.region_tree.configure(yscrollcommand=scrollbar.set)
         self.region_tree.bind("<Double-1>", lambda _event: self.edit_region())
 
@@ -2562,6 +2610,7 @@ class WpsWriterFrame(ttk.Frame):
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.browser_event_queue: queue.Queue[tuple[bool, str, bool]] = queue.Queue()
         self.login_event_queue: queue.Queue[tuple[str, str, WpsLoginStatus]] = queue.Queue()
+        self.browser_endpoint_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self.worker: threading.Thread | None = None
         self.browser_worker: threading.Thread | None = None
         self.configs: list[DocumentConfig] = []
@@ -2704,32 +2753,40 @@ class WpsWriterFrame(ttk.Frame):
 
         self.bind("<Configure>", fit_mapping_toolbar, add="+")
 
-        tree_frame = ttk.Frame(mapping_frame)
+        # The table owns horizontal scrolling. Its column widths must not
+        # propagate into the tool page and widen the toolbox's outer viewport.
+        tree_frame = ttk.Frame(mapping_frame, width=1)
+        tree_frame.grid_propagate(False)
         tree_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
 
         columns = ("name", "source_type", "source", "kdocs_url", "region_count", "summary")
-        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=8)
+        self.tree = ttk.Treeview(
+            tree_frame, columns=columns, show="headings", height=5,
+            style=configure_wps_tree_style(self),
+        )
         self.tree.heading("name", text="配置名称")
         self.tree.heading("source_type", text="数据来源")
         self.tree.heading("source", text="来源文件或链接")
         self.tree.heading("kdocs_url", text="目标表格链接")
         self.tree.heading("region_count", text="区域数量")
         self.tree.heading("summary", text="首个写入区域")
-        # Match the reference image: compact names/counts, wider source and summary.
-        column_widths = (145, 115, 470, 320, 125, 495)
+        column_widths = (180, 100, 260, 230, 90, 320)
         for column, width in zip(columns, column_widths):
             self.tree.heading(column, anchor="center")
-            self.tree.column(column, width=width // 2, anchor="center", stretch=False)
+            self.tree.column(
+                column, width=width, minwidth=width,
+                anchor="center" if column in {"source_type", "region_count"} else "w", stretch=False,
+            )
 
         configured_width = None
 
         def resize_config_columns(event) -> None:
             nonlocal configured_width
-            # Keep all six columns visible at normal sizes, with horizontal
-            # scrolling available when the window is too narrow.
-            available = max(840, event.width - 2)
+            # Keep readable minimum widths and distribute extra table space;
+            # narrow pages scroll inside the table rather than growing wider.
+            available = max(sum(column_widths), event.width - 2)
             if available == configured_width:
                 return
             configured_width = available
@@ -2751,28 +2808,35 @@ class WpsWriterFrame(ttk.Frame):
         horizontal_scrollbar.grid(row=1, column=0, sticky="ew")
         self.tree.configure(xscrollcommand=horizontal_scrollbar.set)
         self.tree.configure(yscrollcommand=scrollbar.set)
+        tree_frame.configure(height=self.tree.winfo_reqheight() + horizontal_scrollbar.winfo_reqheight())
         self.tree.bind("<Double-1>", lambda _event: self.edit_config())
         self.tree.bind("<<TreeviewSelect>>", lambda _event: self.update_selection_status())
 
         self.execution_toolbar = ttk.Frame(mapping_frame)
         self.execution_toolbar.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 8))
+        self.execution_toolbar.columnconfigure(0, weight=1)
         self.selection_status = tk.StringVar(value="请先选择配置，再预览或写入。")
-        ttk.Label(
+        selection_label = ttk.Label(
             self.execution_toolbar,
             textvariable=self.selection_status,
-            style="Muted.TLabel",
-        ).pack(side="left")
+            style="Muted.TLabel", wraplength=260,
+        )
+        selection_label.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.execution_toolbar.bind(
+            "<Configure>", lambda event: selection_label.configure(wraplength=min(420, max(120, event.width - 200)))
+        )
         ttk.Button(
             self.execution_toolbar, text="开始写入", command=self.write, style="Primary.TButton"
-        ).pack(side="right")
+        ).grid(row=0, column=2, sticky="e")
         ttk.Button(
             self.execution_toolbar, text="预览", command=self.preview
-        ).pack(side="right", padx=(0, 6))
+        ).grid(row=0, column=1, sticky="e", padx=(0, 6))
 
         self.log_console = LogConsole(root, module="WPS写入工具", directory=LOG_DIR / "runs")
         self.module_log_frame = self.log_console
         self.module_log_frame.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
         self.log_text = self.log_console.text
+        self.log_text.configure(width=1, height=4)
 
     def add_config(self) -> None:
         dialog = DocumentConfigDialog(
@@ -2986,6 +3050,7 @@ class WpsWriterFrame(ttk.Frame):
             not pending.empty() for pending in (
                 self.log_queue, self.login_event_queue,
                 self.browser_event_queue, self._remote_messages,
+                self.browser_endpoint_queue,
             )
         )
 
@@ -3068,7 +3133,16 @@ class WpsWriterFrame(ttk.Frame):
         remote_config = self.current_runtime_config() if getattr(getattr(self, "task_registry", None), "remote_business", False) is True else None
 
         def worker() -> None:
+            nonlocal cdp_url
             try:
+                if browser_mode == "managed_cdp":
+                    selected_url = select_managed_cdp_url(cdp_url)
+                    if selected_url != cdp_url:
+                        self.browser_endpoint_queue.put((cdp_url, selected_url))
+                        cdp_url = selected_url
+                        if remote_config is not None:
+                            remote_config["cdp_url"] = cdp_url
+                        self.log("原浏览器端口正由其他工作区使用，已为本工作区选择独立端口。")
                 if remote_config is not None:
                     result = self.task_registry.wps_action("login" if start else "status", remote_config, [],
                         (lambda _message: None) if quiet else self.log, operation={"initial_url": initial_url})
@@ -3159,6 +3233,17 @@ class WpsWriterFrame(ttk.Frame):
         if self._drain_after_id is not None:
             self.after_cancel(self._drain_after_id)
         self._drain_after_id = None
+        while True:
+            try:
+                previous_url, selected_url = self.browser_endpoint_queue.get_nowait()
+            except queue.Empty:
+                break
+            if self.browser_mode.get() == "managed_cdp" and self.cdp_url.get().strip() == previous_url:
+                self.cdp_url.set(selected_url)
+                try:
+                    self.save_current_config()
+                except OSError as exc:
+                    self.log(f"独立浏览器端口未能保存，本次运行仍继续使用：{exc}")
         while True:
             try:
                 title, error = self._remote_messages.get_nowait()

@@ -7,8 +7,9 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
-
 from toolbox.runtime import load_module
+
+TOOLBOX_TEST_TAGS = ("gui",)
 
 
 def load_writer():
@@ -27,6 +28,28 @@ class WpsLoginStatusTests(unittest.TestCase):
         self.context.request.get.return_value = mock.Mock(status=status)
         self.context.request.get.return_value.json.return_value = data
         return self.module.read_wps_login_status(self.context)
+
+    def test_foreign_workspace_endpoint_gets_separate_port(self):
+        with (
+            mock.patch.object(self.module, "try_resolve_cdp_endpoint", return_value="endpoint"),
+            mock.patch.object(self.module, "managed_chrome_pid", return_value=None),
+        ):
+            selected = self.module.select_managed_cdp_url("http://127.0.0.1:9222")
+        host, port = self.module.managed_cdp_host_port(selected)
+        self.assertEqual(host, "127.0.0.1")
+        self.assertNotEqual(port, 9222)
+
+    def test_owned_browser_keeps_its_port(self):
+        with (
+            mock.patch.object(self.module, "try_resolve_cdp_endpoint", return_value="endpoint"),
+            mock.patch.object(self.module, "managed_chrome_pid", return_value=123),
+            mock.patch.object(self.module, "managed_chrome_command", return_value="chrome.exe --remote-debugging-port=9222 --headless=new"),
+        ):
+            self.assertEqual(self.module.select_managed_cdp_url("http://127.0.0.1:9222"), "http://127.0.0.1:9222")
+
+    def test_free_endpoint_keeps_configured_port(self):
+        with mock.patch.object(self.module, "try_resolve_cdp_endpoint", return_value=None):
+            self.assertEqual(self.module.select_managed_cdp_url("http://127.0.0.1:9222"), "http://127.0.0.1:9222")
 
     def test_server_confirmed_account_is_logged_in(self):
         result = self.response(200, {"result": "ok", "userid": 123})
@@ -171,6 +194,9 @@ class WpsLoginStatusUiTests(unittest.TestCase):
         except tk.TclError as exc:
             self.skipTest(str(exc))
         self.module = load_writer()
+        selector = mock.patch.object(self.module, "select_managed_cdp_url", side_effect=lambda url: url)
+        self.select_endpoint = selector.start()
+        self.addCleanup(selector.stop)
         with mock.patch.object(self.module, "load_config", return_value={}):
             self.frame = self.module.WpsWriterFrame(self.root)
 
@@ -223,6 +249,46 @@ class WpsLoginStatusUiTests(unittest.TestCase):
         self.assertEqual(launch.call_args.kwargs["initial_url"], "https://www.kdocs.cn/latest")
         self.assertTrue(launch.call_args.kwargs["preload_url"])
         self.assertNotIn("headless", launch.call_args.kwargs)
+
+    def test_login_persists_separate_endpoint_and_accepts_its_status(self):
+        self.select_endpoint.side_effect = None
+        self.select_endpoint.return_value = "http://127.0.0.1:9333"
+        with (
+            mock.patch.object(self.frame, "save_current_config") as save,
+            mock.patch.object(self.module, "ensure_wps_dedicated_chrome", return_value={"started": True}) as launch,
+            mock.patch.object(self.module, "check_wps_login_status", return_value=self.module.WpsLoginStatus("logged_out", "请登录")),
+        ):
+            self.frame.start_wps_browser()
+            self.frame.browser_worker.join(2)
+            self.frame.drain_logs()
+        self.assertEqual(self.frame.cdp_url.get(), "http://127.0.0.1:9333")
+        self.assertEqual(launch.call_args.args[0], "http://127.0.0.1:9333")
+        self.assertEqual(self.frame.login_status.get(), "请登录")
+        self.assertEqual(save.call_count, 2)
+
+    def test_remote_login_receives_separate_endpoint(self):
+        self.select_endpoint.side_effect = None
+        self.select_endpoint.return_value = "http://127.0.0.1:9333"
+        registry = mock.Mock(remote_business=True)
+        registry.wps_action.return_value = {"state": "logged_out", "message": "请登录"}
+        self.frame.task_registry = registry
+        with mock.patch.object(self.frame, "save_current_config"):
+            self.frame.start_wps_browser()
+            self.frame.browser_worker.join(2)
+            self.frame.drain_logs()
+        action, config, *_ = registry.wps_action.call_args.args
+        self.assertEqual(action, "login")
+        self.assertEqual(config["cdp_url"], "http://127.0.0.1:9333")
+        self.assertEqual(self.frame.cdp_url.get(), config["cdp_url"])
+        self.assertEqual(self.frame.login_status.get(), "请登录")
+
+    def test_external_connection_keeps_user_endpoint(self):
+        self.frame.browser_mode.set("cdp")
+        with mock.patch.object(self.module, "check_wps_login_status", return_value=self.module.WpsLoginStatus("logged_out", "请登录")):
+            self.frame.check_wps_browser()
+            self.frame.browser_worker.join(2)
+            self.frame.drain_logs()
+        self.select_endpoint.assert_not_called()
 
     def test_login_click_during_status_probe_opens_browser_afterwards(self):
         import threading
