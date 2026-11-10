@@ -33,6 +33,7 @@ BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR.parent) not in sys.path:
     sys.path.insert(0, str(BASE_DIR.parent))
 from toolbox_file_button import FileSelectButton
+from toolbox_background_read import BackgroundRead
 from toolbox_storage import data_path
 from toolbox_platform import process_is_alive, hidden_process_options, detached_browser_process_options, windows_browser_processes, find_windows_browser
 from toolbox_wps_config import (_document_config_from_dict, _region_config_from_dict, _string_list, build_config_export, load_config_export, normalize_browser_mode, normalize_document_titles, normalize_runtime_config, runtime_config_from_export_payload, save_config_export)
@@ -604,13 +605,41 @@ def read_excel_ranges(
 
 
 def read_excel_sheet_names(workbook_path: Path) -> list[str]:
-    if not workbook_path.exists():
-        raise FileNotFoundError(f"找不到表格文件：{workbook_path}")
-    wb = load_excel_workbook(workbook_path, read_only=True)
+    """Read only OOXML metadata, without loading cells, styles or shared strings."""
+    from xml.etree import ElementTree
+
+    workbook_path = Path(workbook_path)
+    if workbook_path.suffix.lower() not in {".xlsx", ".xlsm", ".xltx", ".xltm"}:
+        raise ValueError("请选择 .xlsx 格式的表格文件；旧版 .xls 请先另存为 .xlsx。")
     try:
-        return list(wb.sheetnames)
-    finally:
-        wb.close()
+        with zipfile.ZipFile(workbook_path) as archive:
+            def metadata(name):
+                # Even an invalid metadata part must not allocate unlimited RAM.
+                if archive.getinfo(name).file_size > 16 * 1024 * 1024:
+                    raise ValueError("表格目录信息过大，请用表格软件重新另存为 .xlsx 后重试。")
+                return ElementTree.fromstring(archive.read(name))
+
+            manifest = metadata("[Content_Types].xml")
+            workbook_types = {
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+                "application/vnd.ms-excel.sheet.macroEnabled.main+xml",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml",
+                "application/vnd.ms-excel.template.macroEnabled.main+xml",
+            }
+            part = next((item.get("PartName", "").lstrip("/") for item in manifest
+                         if item.get("ContentType") in workbook_types), None)
+            if not part:
+                raise ValueError("所选文件不包含有效的 Excel 工作簿。")
+            book = metadata(part)
+            ns = book.tag.rsplit("}", 1)[0] + "}" if "}" in book.tag else ""
+            return [sheet.attrib["name"] for sheet in book.findall(f"{ns}sheets/{ns}sheet")]
+    except zipfile.BadZipFile as exc:
+        with workbook_path.open("rb") as source:
+            partial = source.read(4).startswith(b"PK")
+        reason = "表格文件尚未生成完整，请重新生成后再选择。" if partial else "表格文件不完整或格式不符，请另存为 .xlsx 后重试。"
+        raise ValueError(reason) from exc
+    except (KeyError, ElementTree.ParseError) as exc:
+        raise ValueError("表格目录不完整或已损坏，请重新生成或另存为 .xlsx 后重试。") from exc
 
 
 def prepare_mappings(
@@ -1750,6 +1779,7 @@ class MappingDialog(tk.Toplevel):
         log=None,
     ):
         super().__init__(parent)
+        self._local_reader = BackgroundRead(self)
         self.title(title)
         self.resizable(False, False)
         self.result: MappingRow | None = None
@@ -1866,21 +1896,25 @@ class MappingDialog(tk.Toplevel):
     def refresh_local_sheets(self, show_errors: bool = True) -> None:
         if self.local_sheet_combo is None:
             return
+        self._local_reader.cancel()
         path_text = self.vars["local_file"].get().strip()
         if not path_text:
             self.local_sheet_combo.configure(values=[])
             return
-        try:
-            names = read_excel_sheet_names(Path(path_text).expanduser())
-        except Exception as exc:
-            self.local_sheet_combo.configure(values=[])
-            if show_errors:
-                messagebox.showerror("读取工作表失败", str(exc), parent=self)
-            return
-        self.local_sheet_combo.configure(values=names)
-        current = self.vars["source_sheet"].get().strip()
-        if names and not current:
-            self.vars["source_sheet"].set(names[0])
+        path = Path(path_text).expanduser()
+
+        def finish(names, error):
+            if path_text != self.vars["local_file"].get().strip():
+                return
+            if error:
+                if show_errors:
+                    messagebox.showerror("读取工作表失败", error, parent=self)
+                return
+            self.local_sheet_combo.configure(values=names)
+            if names and not self.vars["source_sheet"].get().strip():
+                self.vars["source_sheet"].set(names[0])
+
+        self._local_reader.start(lambda: read_excel_sheet_names(path), finish)
 
     def refresh_online_sheets(self, auto: bool = False) -> None:
         if self.online_sheet_combo is None:
@@ -1999,6 +2033,7 @@ class DocumentConfigDialog(tk.Toplevel):
         on_document_title=None,
     ):
         super().__init__(parent)
+        self._local_reader = BackgroundRead(self)
         self.title(title)
         self.geometry("900x620")
         self.minsize(820, 520)
@@ -2058,6 +2093,7 @@ class DocumentConfigDialog(tk.Toplevel):
 
         self.create_widgets()
         self._refresh_target_url_choices()
+        self.source_type.trace_add("write", self._source_type_changed)
         self.target_url_display.trace_add("write", self._target_url_edited)
         self.kdocs_url.trace_add("write", self._target_raw_url_changed)
         # Editing an existing configuration should immediately restore the
@@ -2161,6 +2197,14 @@ class DocumentConfigDialog(tk.Toplevel):
         ttk.Button(button_frame, text="取消", command=self.destroy).pack(side="right", padx=4)
         self.refresh_regions()
 
+    def _source_type_changed(self, *_args) -> None:
+        self._local_reader.cancel()
+        self._request_ids["source"] += 1
+        self._pending_online_reads.pop("source", None)
+        self.refresh_source_button.configure(state="normal")
+        self.source_doc_title.set("")
+        self.read_status.set("来源已切换，请刷新来源工作表。")
+
     def browse_local_file(self) -> None:
         path = filedialog.askopenfilename(
             parent=self,
@@ -2172,6 +2216,7 @@ class DocumentConfigDialog(tk.Toplevel):
             self.refresh_local_sheets(show_errors=True)
 
     def refresh_local_sheets(self, show_errors: bool = True) -> None:
+        self._local_reader.cancel()
         if self.source_type.get() == "kdocs":
             url = self.source_url.get().strip()
             if not url:
@@ -2186,18 +2231,30 @@ class DocumentConfigDialog(tk.Toplevel):
         self._request_ids["source"] += 1
         self._pending_online_reads.pop("source", None)
         self.refresh_source_button.configure(state="normal")
-        try:
-            path_text = self.local_file.get().strip()
-            if not path_text:
-                self.local_sheets = []
-                self.source_doc_title.set("")
-                return
-            self.local_sheets = read_excel_sheet_names(Path(path_text).expanduser())
-            self.source_doc_title.set(Path(path_text).name)
-        except Exception as exc:
+        path_text = self.local_file.get().strip()
+        if not path_text:
             self.local_sheets = []
-            if show_errors:
-                messagebox.showerror("读取来源工作表失败", str(exc), parent=self)
+            self.source_doc_title.set("")
+            return
+        path = Path(path_text).expanduser()
+        self.source_doc_title.set("正在读取…")
+        self.read_status.set("正在后台读取本地工作表，您可以继续编辑配置…")
+
+        def finish(names, error):
+            if self.source_type.get() != "excel" or path_text != self.local_file.get().strip():
+                return
+            if error:
+                self.source_doc_title.set("读取失败")
+                self.read_status.set("读取失败，已保留原有工作表配置。请检查文件或刷新重试。")
+                self.log(f"读取来源工作表失败：{error}")
+                if show_errors:
+                    messagebox.showerror("读取来源工作表失败", error, parent=self)
+                return
+            self.local_sheets = names
+            self.source_doc_title.set(path.name)
+            self.read_status.set(f"已读取 {len(names)} 个本地工作表。")
+
+        self._local_reader.start(lambda: read_excel_sheet_names(path), finish)
 
     def _refresh_target_url_choices(self) -> None:
         url = self.kdocs_url.get().strip()
@@ -2297,6 +2354,7 @@ class DocumentConfigDialog(tk.Toplevel):
             self._online_poll_after_id = self.after(50, self._drain_online_results)
 
     def destroy(self) -> None:
+        self._local_reader.cancel()
         if self._online_poll_after_id is not None:
             try:
                 self.after_cancel(self._online_poll_after_id)
