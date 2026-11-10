@@ -42,15 +42,17 @@ powershell -ExecutionPolicy Bypass -File start_source_test.ps1 -Smoke  # 自检�
 1. 只改完成当前对齐所需的文件，先 `git status --short` 记录并保留已有改动。
 2. 复用本仓库已有的解析、计算、登录、写入与 GUI 适配逻辑，不建旁路实现。
 3. 中文字段名、日期口径（`D`/`D-1`/`D-2`）、工作表名、单元格范围、输出文件名视作精确契约。
-4. 每轮补 `CHANGELOG.md`，写清用户可见的新增／修复／变更**和实际验证结果**。
+4. 每轮补 `CHANGELOG.md`：3～6 条用户能感知的变化、每条一两行，它同时是应用内更新说明与 Release 正文；实现细节、单测条数与耗时写进 `docs/releases/vX.Y.Z.md`。
 
-针对性验证（在 `电力工具箱/` 目录逐模块运行）：
+针对性验证统一走测试入口（在仓库任意目录执行，入口自己处理 PYTHONPATH、工作目录与超时）：
 
-```bash
-PYTHONPATH=<仓库根>;<电力工具箱>;<电力工具箱>\tests PYTHONUTF8=1 ..\.venv\Scripts\python.exe -m unittest tests.<模块>
+```powershell
+.venv\Scripts\python.exe tools\run_tests.py                    # fast 档：工具箱非 GUI/非联网 + 桌面
+.venv\Scripts\python.exe tools\run_tests.py --module test_date_inputs   # 指定模块，可重复
+.venv\Scripts\python.exe tools\run_tests.py full               # 全量，发版前或大改动后
 ```
 
-Git Bash 下先把路径用 `cygpath -w` 转成 Windows 形式，否则 `PYTHONPATH` 不生效。
+不要在 CI 或文档里另抄一份模块清单：新增测试目录、调整分组时只改 `tools/run_tests.py`，工作流调用它即可。
 
 ### ④ 打包
 
@@ -60,7 +62,7 @@ powershell -ExecutionPolicy Bypass -File packaging/windows/build.ps1 -PythonRoot
 powershell -ExecutionPolicy Bypass -File packaging/windows/build.ps1 -PythonRoot <同上> -FullOnly
 ```
 
-- `-PythonRoot` 必须指向**独立 CPython 发行版**（有 `python.exe`、无 `pyvenv.cfg`），不能是 `.venv`。
+- `-PythonRoot` 必须指向**独立 CPython 发行版**（有 `python.exe`、无 `pyvenv.cfg`），不能是 `.venv`；版本必须等于根目录 `.python-version`，`build.ps1` 与 `verify_payload.py` 都会校验，不一致直接失败（避免同一版本号在本地与 CI 之间内置不同运行时）。
 - 产物落 `dist/windows/`：`ElectricityToolbox_<版本>_windows_x64_setup.exe`、同名 `.sha256`，以及 `updates-<版本>/windows-update-manifest.json` 与 `.sha256`。
 - 构建结束会校验增量索引确实生成，缺失即报错。历史发布列表优先走 `gh`，未安装时走 GitHub REST API，都不可用时用 `dist/windows/` 里的本地历史包。
 - 载荷准备会清空并重建 `desktop/src-tauri/payload/app`、`payload/python`，这些是纯生成目录。

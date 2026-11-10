@@ -31,6 +31,18 @@ if ($DryRun) {
     Write-Host 'Windows dry run complete; no file was changed.'
     exit 0
 }
+# `.python-version` is the single source of truth for the packaged interpreter.
+# Without this check the same version number could ship 3.11.15 from a local
+# build and 3.12 from CI, and the difference only surfaces on a user's machine.
+$expectedPython = (Get-Content -LiteralPath (Join-Path $root '.python-version') -Raw).Trim()
+if (-not $expectedPython) { throw '.python-version is empty.' }
+$runtimePython = Join-Path $PythonRoot 'python.exe'
+if (-not (Test-Path -LiteralPath $runtimePython)) { throw "PythonRoot must contain python.exe: $PythonRoot" }
+$actualPython = (& $runtimePython '-c' 'import sys;print(".".join(map(str,sys.version_info[:3])))').Trim()
+if ($actualPython -ne $expectedPython) {
+    throw "PythonRoot runs $actualPython but .python-version pins $expectedPython; use that CPython or update .python-version first."
+}
+Write-Host "Packaging runtime Python $actualPython (matches .python-version)"
 Run-Native "$root/.venv/Scripts/python.exe" @('-m', 'pip', 'install', 'uv')
 Run-Native "$root/.venv/Scripts/python.exe" $arguments
 # prepare_payload.py rebuilds the Rust helper into the payload. Refuse to package

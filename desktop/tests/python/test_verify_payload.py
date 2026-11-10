@@ -8,12 +8,14 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "packaging/windows"))
 import verify_payload
 
 OLD = 1_000_000_000  # 2001-09-09, safely before any freshly built helper
+PINNED = "3.11.15"
 
 
 class PayloadVerifyTests(unittest.TestCase):
@@ -30,7 +32,14 @@ class PayloadVerifyTests(unittest.TestCase):
         os.utime(self.source, (OLD, OLD))
         (self.root / "desktop/package.json").write_text(
             json.dumps({"version": "0.1.35"}), encoding="utf-8")
+        (self.root / ".python-version").write_text(PINNED + "\n", encoding="utf-8")
+        self.runtime = self.root / "desktop/src-tauri/payload/runtime/python/python.exe"
+        self.runtime.parent.mkdir(parents=True)
+        self.runtime.write_bytes(b"MZruntime")
         self.write_manifest("0.1.35", hashlib.sha256(self.helper.read_bytes()).hexdigest())
+        patch = mock.patch.object(verify_payload, "runtime_version", return_value=PINNED)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -68,4 +77,14 @@ class PayloadVerifyTests(unittest.TestCase):
     def test_missing_manifest_is_rejected(self):
         self.manifest.unlink()
         with self.assertRaisesRegex(RuntimeError, "manifest.json 缺失"):
+            verify_payload.verify(self.root)
+
+    def test_runtime_python_mismatch_is_rejected(self):
+        with mock.patch.object(verify_payload, "runtime_version", return_value="3.12.0"):
+            with self.assertRaisesRegex(RuntimeError, "而 .python-version 固定为 3.11.15"):
+                verify_payload.verify(self.root)
+
+    def test_missing_runtime_python_is_rejected(self):
+        self.runtime.unlink()
+        with self.assertRaisesRegex(RuntimeError, "内置 Python 运行时缺失"):
             verify_payload.verify(self.root)

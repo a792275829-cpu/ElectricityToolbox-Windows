@@ -8,11 +8,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 HELPER_SUFFIX = "/bin/toolbox-service.exe"
+
+
+def runtime_version(python: Path) -> str:
+    result = subprocess.run(
+        [str(python), "-c", 'import sys;print(".".join(map(str,sys.version_info[:3])))'],
+        capture_output=True, text=True, check=True,
+    )
+    return result.stdout.strip()
 
 
 def verify(root: Path = ROOT) -> str:
@@ -43,7 +52,18 @@ def verify(root: Path = ROOT) -> str:
             f"内置 toolbox-service.exe 早于 Rust 源码 {sources[-1].name}；"
             "请重新运行 build.ps1 重编译"
         )
-    return f"PAYLOAD_FRESH=OK (version {version}, helper matches manifest and Rust sources)"
+    pinned = (root / ".python-version").read_text(encoding="utf-8").strip()
+    runtime = payload / "runtime/python/python.exe"
+    if not runtime.is_file():
+        raise RuntimeError("内置 Python 运行时缺失；请重新运行 build.ps1（prepare_payload.py）")
+    if pinned:
+        actual = runtime_version(runtime)
+        if actual != pinned:
+            raise RuntimeError(
+                f"内置运行时为 Python {actual}，而 .python-version 固定为 {pinned}；"
+                "请用该版本的 CPython 重新运行 build.ps1"
+            )
+    return f"PAYLOAD_FRESH=OK (version {version}, helper matches manifest and Rust sources, runtime Python {pinned or 'unpinned'})"
 
 
 if __name__ == "__main__":

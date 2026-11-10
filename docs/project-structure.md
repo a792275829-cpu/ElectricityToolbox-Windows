@@ -42,8 +42,10 @@ Excel 重活走 Rust 原生后端。仓库里同时存在「应用外壳」「Tk
 | `setup_windows.ps1` | 首次初始化：建 `.venv`、装依赖、准备便携 Node |
 | `start_windows.ps1` | 启动（优先用已构建的 native 产物，`-Source` 强制走源码） |
 | `start_source_test.ps1` | 源码调试版启动，`-Smoke` 自检，数据隔离在 `.toolbox/source-test` |
+| `.python-version` | 解释器版本的唯一来源：`.venv`、内置运行时与 CI 都按它对齐，`build.ps1`／`verify_payload.py` 会校验 |
+| `tools/run_tests.py` | 统一测试入口（fast／full／分组／指定模块），CI 与文档都调它，不再手抄模块清单 |
 | `setup_macos.command`、`package_macos.command` | macOS 历史入口，保留不维护，不参与 Windows 构建 |
-| `requirements.txt` | Python 依赖清单 |
+| `requirements.txt` | 转引 `packaging/windows/requirements.txt`；依赖版本只在后者维护 |
 
 ## 根目录 `toolbox_*.py`（33 个扁平模块）
 

@@ -1,7 +1,7 @@
 name: Windows desktop
 on:
   push:
-    branches: [main, "codex/**"]
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_call:
@@ -31,7 +31,7 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.ref }}
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version-file: .python-version
       - uses: actions/setup-node@v4
         with:
           node-version: "22.23.3"
@@ -46,33 +46,26 @@ jobs:
       - run: python -m pip install uv -r packaging/windows/requirements.txt
       - run: python native/price-xlsx/build.py
       - run: cargo test --manifest-path native/price-xlsx/Cargo.toml --locked
-      - run: python -m unittest discover -s desktop/tests/python -p test_windows_platform.py -v
-      - name: Windows updater and task handoff regression
-        run: |
-          python -m unittest discover -s desktop/tests/python -p test_windows_update.py -v
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m unittest discover -s desktop/tests/python -p test_update_ui.py -v
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m unittest discover -s desktop/tests/python -p test_rust_service.py -v
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m unittest discover -s desktop/tests/python -p test_windows_update_helper.py -v
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m unittest discover -s desktop/tests/python -p test_windows_delta.py -v
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m unittest discover -s desktop/tests/python -p test_windows_update_build.py -v
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Service and original UI contract regression
-        run: |
-          foreach ($module in @('test_service.py', 'test_ui_layers.py', 'test_rust_ui_bridge.py')) {
-            python -m unittest discover -s desktop/tests/python -p $module -v
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+      - name: Desktop and toolbox fast tier
+        run: python tools/run_tests.py
+      - name: Windows updater, service and UI contracts
+        run: >-
+          python tools/run_tests.py
+          --module test_windows_platform --module test_windows_update
+          --module test_update_ui --module test_rust_service
+          --module test_windows_update_helper --module test_windows_delta
+          --module test_windows_update_build --module test_service
+          --module test_ui_layers --module test_rust_ui_bridge
       - name: Workbook and native backend regression
-        working-directory: 电力工具箱
-        run: |
-          $env:PYTHONPATH = (Resolve-Path '..').Path
-          python -m unittest tests.test_native_excel tests.test_native_updates tests.test_workbook_commit tests.test_report_output_lock tests.test_date_inputs tests.test_transaction_info_update tests.test_guangdong_price -v
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        env:
+          TOOLBOX_XLSX_BACKEND: rust
+          TOOLBOX_COMPUTE_BACKEND: rust
+        run: >-
+          python tools/run_tests.py
+          --module test_native_excel --module test_native_updates
+          --module test_workbook_commit --module test_report_output_lock
+          --module test_date_inputs --module test_transaction_info_update
+          --module test_guangdong_price
       - run: npm ci
         working-directory: desktop
       - run: npm run web:build
@@ -88,7 +81,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           python -m venv .venv --system-site-packages
-          uv python install 3.12 --install-dir .toolbox/standalone-python --no-bin
+          uv python install (Get-Content .python-version) --install-dir .toolbox/standalone-python --no-bin
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $runtime = Get-ChildItem .toolbox/standalone-python -Directory -Filter '*windows-x86_64-none' | Select-Object -First 1
           ./packaging/windows/build.ps1 -PythonRoot $runtime.FullName

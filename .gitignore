@@ -66,3 +66,6 @@ Thumbs.db
 
 # WorkBuddy session data
 /.workbuddy/
+
+# 测试跑出来的临时根目录（tempfile 在缺 TEMP 时会退回当前目录）；该目录只放扁平 test_*.py
+/desktop/tests/python/*/

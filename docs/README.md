@@ -9,7 +9,7 @@
 | [`project-structure.md`](project-structure.md) | 仓库文件地图、工具页与目录对应、改动守则 | 找文件、判断能不能动 |
 | [`windows-maintenance-model.md`](windows-maintenance-model.md) | 常态维护六环节：对齐 mac → 打包 → 发布 → 安装验证 | 每轮对齐与发版 |
 | [`RUST_MIGRATION.md`](RUST_MIGRATION.md) | 哪些计算迁到 Rust、边界与验证口径 | 改计算、判断该走 Rust 还是 Python |
-| [`upstream-review-2026-11-05.md`](upstream-review-2026-11-05.md) | 上游 mac 仓库比对基线与逐项取舍 | 下一轮对齐前确认起点 |
+| [`reviews/upstream-review-2026-11-05.md`](reviews/upstream-review-2026-11-05.md) | 上游 mac 仓库比对基线与逐项取舍（最新一轮） | 下一轮对齐前确认起点 |
 
 根目录另有：
 
@@ -21,11 +21,14 @@
 
 ## 历史记录
 
-只用于追溯当时的决策与验证，不要据此判断当前实现。
+只用于追溯当时的决策与验证，不要据此判断当前实现。一次性评审、比对、验证记录统一放
+`docs/reviews/` 与 `docs/releases/`，不要放在 `docs/` 根目录。
 
 | 位置 | 内容 |
 | --- | --- |
-| [`code-review-0.1.31.md`](code-review-0.1.31.md) | 0.1.31 的代码审查记录 |
+| [`reviews/code-review-0.1.31.md`](reviews/code-review-0.1.31.md) | 0.1.31 的代码审查记录 |
+| [`reviews/code-review-fixes-2026-11-09.md`](reviews/code-review-fixes-2026-11-09.md) | 2026-11-09 审查问题的修复记录 |
+| [`reviews/`](reviews/) | 历次评审与上游比对快照（按日期命名） |
 | [`releases/windows-0.1.30-verification.md`](releases/windows-0.1.30-verification.md) | 0.1.30 实机验证记录 |
 | [`releases/windows-0.1.31-build-checklist.md`](releases/windows-0.1.31-build-checklist.md) | 0.1.31 构建与发布清单 |
 | [`superpowers/plans/`](superpowers/plans/) | 各轮改造的实施计划（自动更新、增量更新、Rust 迁移、0.1.30 发布等） |
@@ -34,4 +37,5 @@
 ## 版本与发布文档的边界
 
 - `CHANGELOG.md` 是逐版本内容的唯一来源，`packaging/tauri/release_notes.md` 只放通用安装说明；发布说明由 `version.py` 拼接生成。
-- 历史发布的验证记录留在 `docs/releases/`，不要改写；新版本的记录直接写进 `CHANGELOG.md`。
+- `CHANGELOG.md` 的版本条目直接作为用户可见的更新说明：每个版本写 3～6 条用户能感知的变化，每条一两行；实现细节、单测条数、耗时对比写进 `docs/releases/vX.Y.Z.md`，不要塞进 CHANGELOG。
+- 历史发布的验证记录留在 `docs/releases/`，不要改写；新版本的记录按版本号新建 `docs/releases/vX.Y.Z.md`。

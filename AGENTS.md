@@ -15,6 +15,7 @@
 - 本仓库是混合运行时项目：Rust/Tauri 宿主、Rust 任务服务与 Excel 后端、多个 Python/Tk 工具、少量 Node 工具，不要当作单一 Python 包处理。
 - **源码主线是 `main`**：本机工作副本、GitHub `origin/main` 与 CI 都以它为准，提交默认推送到 `origin/main`。`development` 仅保留历史提交，不再推送新改动。
 - 动手前先看 `docs/project-structure.md` 判断目录性质；不清楚某目录能不能改时先查该文档，不猜。
+- 一次性产物不要放 `docs/` 根目录：评审与上游比对快照进 `docs/reviews/`，逐版本验证记录进 `docs/releases/vX.Y.Z.md`；`docs/README.md` 只索引当前有效文档与归档入口。
 - 修改前运行 `git status --short`，记录并保留用户已有改动；不得清理、覆盖或顺带格式化无关文件。
 - 只编辑完成当前任务所需的文件。真实配置、登录态、Cookie、`.browser-profile/`、业务数据、缓存与构建产物一律 Git 忽略，不入库、不写进日志和回复。
 - 修改现有功能时先查找其调用方、测试和 GUI 入口，避免只修脚本而遗漏工具箱页面或启动路径。
@@ -22,7 +23,8 @@
 
 ## 启动与依赖
 
-- Python 环境以根目录 `.venv` 为准，Windows 解释器是 `.venv\Scripts\python.exe`；不要把个人机器上的绝对解释器路径写入代码。
+- Python 版本只有一处事实源：根目录 `.python-version`（当前 `3.11.15`）。本地 `.venv`、内置运行时和 CI 都按它安装，`build.ps1` 与 `verify_payload.py` 会校验，不一致直接报错；改动版本必须同时重建 payload。Windows 解释器是 `.venv\Scripts\python.exe`，不要把个人机器上的绝对解释器路径写入代码。
+- 依赖版本只在 `packaging/windows/requirements.txt` 维护（内置运行时用的同一套 pin）；根 `requirements.txt` 只转引它，不要另写版本号。macOS 侧仍用 `packaging/tauri/requirements-macos.lock`。
 - 入口：初始化 `setup_windows.ps1`，正式启动 `start_windows.ps1`，源码调试 `start_source_test.ps1`（`-Smoke` 自检输出 `TOOLBOX_SMOKE=OK`），安装包构建 `packaging/windows/build.ps1`。使用原版 Tk 页面，不另写一套外观近似的 UI。
 - 构建只归档不删除：`prepare_payload.py` 与 `build.ps1` 用改名把 `payload/app`、`payload/runtime/python`、`desktop/node_modules` 移入 `dist/build-archive/<时间戳>/` 后重建，回收统一走 `packaging/windows/prune_build_archive.py`。禁止对上述目录及 `dist/build-archive/` 使用 `rm -rf`、`shutil.rmtree` 或回收站删除——Agent 会话注入的批量删除守卫在非交互子进程中没有确认通道，会 fail-closed 中断构建。细节见 `packaging/windows/README.md`。
 - `build.ps1` 会先用 `build_env.ps1` 的 `Reset-BuildEnvironment` 还原被会话注入的环境（`-KeepGuard` 可保留守卫）；不确定参数时用 `-DryRun` 自检。
@@ -50,21 +52,21 @@
 
 ## 验证策略
 
-- 采用“最小充分验证”，先跑与改动最相关的测试，再按风险扩大范围。
-- 文案或小范围 GUI 修改：至少完成模块导入或页面创建 smoke test。
-- 计算、解析、映射修改：运行针对性测试，并用小型或真实样本核对结果。
-- 登录、真实写入、安装、并发改动：运行端到端流程，并检查实际产物或持久化状态。
-- 工具箱测试在 `电力工具箱/` 目录逐模块运行（`unittest discover` 会卡在 GUI／网络用例）。PowerShell：
+- 采用“最小充分验证”，先跑与改动最相关的测试，再按风险扩大范围。测试统一走一个入口，不要手拼 `PYTHONPATH` 或直接 `unittest discover`（会卡在 GUI／网络用例上）：
 
   ```powershell
-  $env:PYTHONPATH = "<仓库根>;<电力工具箱>;<电力工具箱>\tests"
-  $env:PYTHONUTF8 = "1"
-  ..\.venv\Scripts\python.exe -m unittest tests.<模块>
+  .venv\Scripts\python.exe tools\run_tests.py                    # fast 档：工具箱非 GUI/非联网 + 桌面
+  .venv\Scripts\python.exe tools\run_tests.py full               # 全量：含 GUI、联网与 500kV
+  .venv\Scripts\python.exe tools\run_tests.py --group desktop     # 只跑某一组
+  .venv\Scripts\python.exe tools\run_tests.py --module test_date_inputs   # 指定的模块，可重复
   ```
 
-  Git Bash 下必须先用 `cygpath -w` 把三个目录转成 Windows 路径，否则 `PYTHONPATH` 失效。
-- 更新器、增量补丁与打包相关用例在仓库根目录运行，例如 `.venv\Scripts\python.exe -m unittest discover -s desktop/tests/python -p "test_*update*.py"`。
-- 启动器 smoke test：`powershell -ExecutionPolicy Bypass -File start_source_test.ps1 -Smoke`（输出 `TOOLBOX_SMOKE=OK`）。
+  入口会按模块起子进程并带超时，某个模块挂住只影响它自己，最后给出通过数与失败模块；需要 Rust 后端的模块照常用 `TOOLBOX_XLSX_BACKEND=rust` 之类的环境变量，入口会原样传给子进程。改动测试分组或新增目录时同步更新 `tools/run_tests.py` 与 `.github/workflows/`，不要在 CI 里另抄一份模块清单。
+- 文案或小范围 GUI 修改：至少跑对应模块或完成页面创建 smoke test。
+- 计算、解析、映射修改：运行针对性模块，并用小型或真实样本核对结果。
+- 登录、真实写入、安装、并发改动：运行端到端流程，并检查实际产物或持久化状态。
+- 更新器、增量补丁与打包相关用例同样用该入口的 `--group desktop`。
+- 启动器 smoke test：`start_source_test.ps1 -Smoke`（输出 `TOOLBOX_SMOKE=OK`）。
 - 修改依赖或启动流程时，运行 `setup_windows.ps1` 或等价的 `.venv` 导入检查，并验证启动器实际可用。
 - 测试被环境、权限或外部服务阻塞时，明确报告未验证部分及具体原因，不要把部分成功表述成全部完成。
 
@@ -77,7 +79,7 @@
 ## 版本与更新日志
 
 - Windows 版本号跟随 macOS 基线：当前基线为 mac v0.1.32，Windows 已在其上递增到 0.1.36；对齐到新的 mac 版本时直接使用对方的 `x.y.z`。Windows 专属修补在同一基线上递增版本号，并在 `CHANGELOG.md` 标注对应的 mac 基线。已正式发布的版本号（0.1.33～0.1.36 等）不得复用。
-- 自动维护根目录 `CHANGELOG.md`：每次更新版本时同步记录该版本日期、用户可见的新增／修复／变更及实际验证结果，不得只改版本号或使用空泛占位内容。
+- 自动维护根目录 `CHANGELOG.md`：每个版本写 3～6 条用户能感知的新增／修复／变更，每条一两行；它同时是应用内更新说明和 Release 正文，不要塞实现细节、单测条数或耗时数字，细节写进 `docs/releases/vX.Y.Z.md`。版本日期、用户可见变更与实际验证结果必须齐全，不得只改版本号或使用空泛占位内容。
 - 用 `.venv\Scripts\python.exe packaging\tauri\version.py set X.Y.Z --notes "具体变更"` 同步版本和日志；多项变更重复传入 `--notes`。日期默认采用 Asia/Shanghai，历史记录必须保留。
 - `CHANGELOG.md` 是逐版本更新内容的唯一来源；`packaging/tauri/release_notes.md` 只维护通用安装说明。发布时由 `version.py --release-notes` 提取当前版本内容并拼接安装说明。
 - 发布前执行 `version.py check --tag vX.Y.Z --require-notes`，确认版本一致且更新内容非空；缺少对应日志时禁止打包发布。已发布的版本不覆盖，下一次发布递增版本号。
