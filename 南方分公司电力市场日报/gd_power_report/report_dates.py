@@ -16,3 +16,18 @@ if str(REPORT_ROOT) not in sys.path:
 from gd_power_report.company_clearing_xlsx import infer_report_date
 
 __all__ = ["infer_report_date"]
+
+
+if __name__ == "__main__":
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--read-date", required=True, type=Path)
+    arguments = parser.parse_args()
+    try:
+        detected = infer_report_date(arguments.read_date)
+    except Exception as exc:
+        print(json.dumps({"error": str(exc) or type(exc).__name__}, ensure_ascii=False))
+        raise SystemExit(1)
+    print(json.dumps({"date": detected.isoformat()}))

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import tkinter as tk
 import json
-import queue
-import threading
 from datetime import date
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -13,7 +11,8 @@ from .page_support import add_path_row, open_directory
 from .runtime import TaskRegistry, ToolPaths, python_executable
 from .widgets import ToolPage
 from .market_editor import MarketEditor, market_module
-from .market_report_dates import report_date_from_day_report, report_dates_module
+from .market_report_dates import report_date_in_subprocess as report_date_from_day_report
+from toolbox_background_read import BackgroundRead
 
 
 class MarketReportPage(ToolPage):
@@ -35,10 +34,9 @@ class MarketReportPage(ToolPage):
         self.report_date.trace_add("write", self._clear_manual_on_date_change)
         # The report date is never typed: it comes from the D workbook, read off
         # the Tk thread so a large workbook cannot freeze the window.
-        self._date_token = 0
         self._date_source = ""
         self._date_error = ""
-        self._date_polls: dict[int, str] = {}
+        self._date_reader = BackgroundRead(self, timeout=30)
 
         form = ttk.LabelFrame(self.content, text="输入", padding=14)
         form.grid(row=0, column=0, sticky="ew")
@@ -70,18 +68,6 @@ class MarketReportPage(ToolPage):
         self.manual_button = ttk.Button(self.actions, text="手动填写数据", command=self.open_market_editor)
         self.manual_button.pack(side="left", padx=(8, 0))
         self.register_busy_widgets(self.run_button, self.manual_button, *buttons)
-        # 首次识别日期还要付一次模块导入/编译成本（内存里约 1 秒，慢机器更久）。
-        # 页面打开时就在后台预热，避免这段开销都压在“选完文件才等”的那一步。
-        threading.Thread(
-            target=self._warm_report_date_reader, name="market-report-date-warmup", daemon=True
-        ).start()
-
-    @staticmethod
-    def _warm_report_date_reader() -> None:
-        try:
-            report_dates_module()
-        except Exception:
-            pass  # 预热失败不改变正常识别路径，真正的错误留给读取时反馈
 
     def _clear_manual_on_date_change(self, *_):
         if self.report_date.get() == self._manual_date:
@@ -95,41 +81,23 @@ class MarketReportPage(ToolPage):
         self.manual_market.set(json.dumps(data, ensure_ascii=False) if data else "")
 
     def read_report_date(self, path: Path) -> None:
-        """Identify the report date from the chosen D workbook without blocking Tk."""
-        self._date_token += 1
-        token = self._date_token
+        """Read in an isolated process; apply only the latest selection on Tk."""
         self._date_error = ""
+        self._date_source = ""
+        self.report_date.set("")
         self.date_hint.configure(text="正在识别报告日期…")
-        results: queue.Queue = queue.Queue()
 
-        def read() -> None:
-            try:
-                results.put((path, report_date_from_day_report(path), ""))
-            except Exception as exc:  # 读取失败必须回到界面提示，不能静默吞掉
-                results.put((path, None, str(exc) or exc.__class__.__name__))
+        def finish(detected, error):
+            if error:
+                self._date_error = error
+                self.date_hint.configure(text=f"识别失败：{error}")
+                self.append_log(f"报告日期识别失败：{error}")
+                return
+            self._date_source = str(path)
+            self.report_date.set(detected.isoformat())
+            self.date_hint.configure(text="已按 D 日收益表识别")
 
-        threading.Thread(target=read, name="market-report-date", daemon=True).start()
-        self._poll_report_date(results, token)
-
-    def _poll_report_date(self, results: queue.Queue, token: int) -> None:
-        try:
-            path, detected, error = results.get_nowait()
-        except queue.Empty:
-            if self.winfo_exists():
-                self._date_polls[token] = self.after(80, lambda: self._poll_report_date(results, token))
-            return
-        self._date_polls.pop(token, None)
-        if token != self._date_token:
-            return  # 用户已重新选择文件，丢弃过期结果
-        if detected is None:
-            self._date_error = error
-            self._date_source = ""
-            self.report_date.set("")
-            self.date_hint.configure(text=f"识别失败：{error}")
-            return
-        self._date_source = str(path)
-        self.report_date.set(detected.isoformat())
-        self.date_hint.configure(text="已按 D 日收益表识别")
+        self._date_reader.start(lambda: report_date_from_day_report(path), finish)
 
     def derive_report_date(self, path: Path) -> date:
         try:
@@ -138,21 +106,19 @@ class MarketReportPage(ToolPage):
             raise ValueError(f"无法从 D 日收益表识别报告日期：{exc}") from exc
 
     def current_report_date(self) -> date:
-        """Report date bound to the selected D workbook; a stale value is re-read."""
+        """Never restart a blocking read from a generate/editor button callback."""
         text = self.report_date.get().strip()
         day_path = self.day_report.get().strip()
         if text and (not day_path or self._date_source in ("", day_path)):
             return parse_date_input(text)
+        if self._date_reader.pending:
+            raise ValueError("正在识别报告日期，请识别完成后再操作。")
+        if self._date_error:
+            raise ValueError(f"无法从 D 日收益表识别报告日期：{self._date_error}")
         if not day_path:
-            if self._date_error:
-                raise ValueError(f"无法从 D 日收益表识别报告日期：{self._date_error}")
             raise ValueError("请先选择 D 日收益表，报告日期将自动识别。")
-        detected = self.derive_report_date(Path(day_path))
-        self._date_source = day_path
-        self._date_error = ""
-        self.report_date.set(detected.isoformat())
-        self.date_hint.configure(text="已按 D 日收益表识别")
-        return detected
+        self.read_report_date(Path(day_path))
+        raise ValueError("正在识别报告日期，请识别完成后再操作。")
 
     def open_market_editor(self):
         try:
@@ -196,12 +162,7 @@ class MarketReportPage(ToolPage):
         return command
 
     def destroy(self) -> None:
-        for after_id in self._date_polls.values():
-            try:
-                self.after_cancel(after_id)
-            except tk.TclError:
-                pass
-        self._date_polls.clear()
+        self._date_reader.cancel()
         super().destroy()
 
     def start_report(self) -> None:

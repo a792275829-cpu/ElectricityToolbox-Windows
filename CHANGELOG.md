@@ -2,6 +2,9 @@
 
 ## [未发布] - 2026-11-10
 
+- 加固南方分公司电力市场日报选文件后的日期识别：将模块导入、Excel 读取及整本解析回退移到独立进程，避免后台 Python 线程仍与 Tk 共享 GIL 和模块加载锁；移除同进程预热。读取进程超过 25 秒自动终止并提示原因；界面轮询最多等待 30 秒，切换文件和关闭页面会取消旧轮询，过期结果不再覆盖新选择，同时限制并发读取数量。识别开始立即清除旧日期和补录数据；点击生成或手动填写时只检查识别状态，不再同步重读文件。
+- 验证：8 项新增回归与 6 项既有日报 UI 测试通过，覆盖慢读取下界面事件仍响应、超时、连续换文件、关闭页面、识别中操作、子进程异常、损坏文件及 A6 优先于 A2/文件名；7 份本机真实收益表均正确识别（独立进程含启动约 0.60–0.73 秒）；源码启动自检 TOOLBOX_SMOKE=OK。另一台电脑尚待安装更新后复测，本次未发布安装包。
+
 - 修复打包在 Agent 会话中反复中断：会话会把批量删除守卫注入所有子进程，`prepare_payload.py` 清空 `payload/app`、`npm ci` 清空 `node_modules`、`build_updates.py` 删除补丁还原目录三处先后被 fail-closed 掐断。现改为两层处理——`build.ps1` 先用新增的 `build_env.ps1`／`Reset-BuildEnvironment` 只移除指向 `vendor\shim` 的 `NODE_OPTIONS`／`PYTHONPATH`／`PATH` 条目和 `CODEBUDDY_SAFE_DELETE_BULK_GUARD`，还原成人工终端环境（`-KeepGuard` 可保留）；生成目录则改为改名归档到 `dist/build-archive/<时间戳>/` 后重建，不再原地删除。
 - 新增 `packaging/windows/prune_build_archive.py` 统一回收归档：默认保留最近 1 份，先 robocopy 空目录镜像再删空骨架，可处理上万文件与超长路径；`build.ps1 -PruneArchive` 构建成功后自动调用，`-DryRun` 只打印归档计划不改文件。`packaging/windows/README.md` 与 `AGENTS.md` 补充构建机清理约定。
 - 验证：`prepare_payload.py --dry-run` 输出归档目标且未改动文件；连续两次真实重建成功（第二次走归档路径，app 63.1 MB、runtime/python 410.1 MB），`PAYLOAD_FRESH=OK`、payload 692 个受管文件；`npm ci` 在 `node_modules` 归档后重装 50 个包并恢复 `tauri` 命令；修复前全量 `build.ps1` 在补丁还原目录处第 3 次被拦，加入环境还原后 `build_updates.py` 一次产出 0.1.32/0.1.33/0.1.34 三条直达补丁（3,678,576 / 5,074,260 / 5,142,324 字节）且全部通过还原校验；`prune_build_archive.py --keep 1` 实际回收 473.1 MB 与 450.0 MB 两份快照、保留 1 份；新增 10 项归档与回收单测通过。本次构建产物仅作验证，未覆盖已发布的 0.1.35 资产。
