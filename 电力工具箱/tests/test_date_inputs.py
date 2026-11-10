@@ -211,7 +211,7 @@ class CalendarInputTests(unittest.TestCase):
 
         for page_type, expected_count in (
             (OnlineEnergyPage, 2), (ReportPage, 1), (MarketTableUpdatePage, 1),
-            (GuangdongPricePage, 1), (MarketReportPage, 0), (SpotPriceUpdatePage, 2),
+            (GuangdongPricePage, 1), (MarketReportPage, 1), (SpotPriceUpdatePage, 2),
             (TransactionInfoUpdatePage, 2), (WindForecastPage, 1),
 
         ):
@@ -241,7 +241,7 @@ class CalendarInputTests(unittest.TestCase):
                             page.start_generate()
                         self.assertEqual(run.call_args.args[0][-1], "2026-05-03")
                     elif page_type is MarketReportPage:
-                        # 报告日期只读展示，由 D 日收益表自动识别。
+                        # 报告日期与其它页面一致：日历控件手动选择，不再由 D 日收益表反推。
                         form = next(child for child in page.content.winfo_children()
                                     if isinstance(child, ttk.LabelFrame))
 
@@ -256,7 +256,14 @@ class CalendarInputTests(unittest.TestCase):
                         self.assertIn("D-1 日收益表", labels)
                         date_entries = [child for child in descendants(form) if isinstance(child, ttk.Entry)
                                         and str(child.cget("textvariable")) == str(page.report_date)]
-                        self.assertEqual([str(entry.cget("state")) for entry in date_entries], ["readonly"])
+                        self.assertEqual([str(entry.cget("state")) for entry in date_entries], ["normal"])
+                        page.report_date.set("2026-5-3")
+                        runner = ROOT / "南方分公司电力市场日报/run_market_report.py"
+                        for variable in (page.day_report, page.previous_report, page.d2_report):
+                            variable.set(str(runner))
+                        with patch.object(page, "run_process") as run:
+                            page.start_report()
+                        self.assertEqual(run.call_args.args[0][2], "2026-05-03")
                 finally:
                     page.destroy()
 

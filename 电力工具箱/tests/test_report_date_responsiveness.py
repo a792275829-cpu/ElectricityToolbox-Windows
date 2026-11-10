@@ -14,6 +14,7 @@ from toolbox.market_report_page import MarketReportPage
 from toolbox.runtime import TaskRegistry, ToolPaths
 
 ROOT = Path(__file__).resolve().parents[2]
+REPORT_RUNNER = ROOT / "南方分公司电力市场日报/run_market_report.py"
 
 
 class BackgroundReadTests(unittest.TestCase):
@@ -90,23 +91,22 @@ class BackgroundReadTests(unittest.TestCase):
         self.assertIsNone(reader._after)
         self.assertEqual(results, [])
 
-    def test_generate_while_reading_never_calls_synchronous_reader(self):
+    def test_report_command_uses_manually_selected_date_without_workbook_read(self):
         registry = TaskRegistry()
         page = MarketReportPage(self.root, ToolPaths(ROOT), registry)
-        release = self.release
         try:
-            with mock.patch("toolbox.market_report_page.report_date_from_day_report",
-                            side_effect=lambda _: release.wait(2)), \
-                 mock.patch.object(page, "derive_report_date") as derive:
-                page.day_report.set("slow.xlsx")
+            with mock.patch("toolbox.market_report_dates.report_date_in_subprocess") as reader:
                 page.report_date.set("2026-11-09")
-                page.read_report_date(Path("slow.xlsx"))
-                self.assertEqual(page.report_date.get(), "")
+                for variable in (page.day_report, page.previous_report, page.d2_report):
+                    variable.set(str(REPORT_RUNNER))
                 start = time.monotonic()
-                with self.assertRaisesRegex(ValueError, "正在识别"):
-                    page.current_report_date()
+                command = page.build_command()
                 self.assertLess(time.monotonic() - start, .1)
-                derive.assert_not_called()
+                reader.assert_not_called()
+            self.assertEqual(command[2], "2026-11-09")
+            page.report_date.set("")
+            with self.assertRaisesRegex(ValueError, "请选择报告日期"):
+                page.build_command()
         finally:
             page.destroy()
             registry.terminate_all()

@@ -6,13 +6,11 @@ from datetime import date
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from .page_support import parse_date_input
+from .page_support import DATE_INPUT_HINT, DateInput, parse_date_input
 from .page_support import add_path_row, open_directory
 from .runtime import TaskRegistry, ToolPaths, python_executable
 from .widgets import ToolPage
 from .market_editor import MarketEditor, market_module
-from .market_report_dates import report_date_in_subprocess as report_date_from_day_report
-from toolbox_background_read import BackgroundRead
 
 
 class MarketReportPage(ToolPage):
@@ -24,7 +22,7 @@ class MarketReportPage(ToolPage):
             title="南方分公司电力市场日报",
         )
         self.paths = paths
-        self.report_date = tk.StringVar(master=self)
+        self.report_date = tk.StringVar(master=self, value=date.today().isoformat())
         self.day_report = tk.StringVar(master=self)
         self.previous_report = tk.StringVar(master=self)
         self.d2_report = tk.StringVar(master=self)
@@ -32,11 +30,6 @@ class MarketReportPage(ToolPage):
         self.market_editor = None
         self._manual_date = self.report_date.get()
         self.report_date.trace_add("write", self._clear_manual_on_date_change)
-        # The report date is never typed: it comes from the D workbook, read off
-        # the Tk thread so a large workbook cannot freeze the window.
-        self._date_source = ""
-        self._date_error = ""
-        self._date_reader = BackgroundRead(self, timeout=30)
 
         form = ttk.LabelFrame(self.content, text="输入", padding=14)
         form.grid(row=0, column=0, sticky="ew")
@@ -44,19 +37,20 @@ class MarketReportPage(ToolPage):
         ttk.Label(form, text="报告日期").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=5)
         date_row = ttk.Frame(form)
         date_row.grid(row=0, column=1, columnspan=2, sticky="w", pady=5)
-        ttk.Entry(date_row, textvariable=self.report_date, width=18, state="readonly").pack(side="left")
-        self.date_hint = ttk.Label(date_row, text="选择 D 日收益表后自动识别", style="Muted.TLabel")
+        # 与其他页面共用同一套日期控件：点日期框弹出月历，也可直接粘贴日期。
+        DateInput(date_row, textvariable=self.report_date, width=18).pack(side="left")
+        self.date_hint = ttk.Label(date_row, text=DATE_INPUT_HINT, style="Muted.TLabel")
         self.date_hint.pack(side="left", padx=(10, 0))
 
         buttons = []
-        for row, label, variable, hook in (
-            (1, "D 日收益表", self.day_report, self.read_report_date),
-            (2, "D-1 日收益表", self.previous_report, None),
-            (3, "D-2 日收益表", self.d2_report, None),
+        for row, label, variable in (
+            (1, "D 日收益表", self.day_report),
+            (2, "D-1 日收益表", self.previous_report),
+            (3, "D-2 日收益表", self.d2_report),
         ):
             buttons.append(add_path_row(
                 form, row=row, label=label, variable=variable,
-                command=lambda value=variable, callback=hook: self.choose_file(value, callback),
+                command=lambda value=variable: self.choose_file(value),
                 button_text="选择文件",
             ))
 
@@ -80,45 +74,12 @@ class MarketReportPage(ToolPage):
     def save_manual_market(self, data):
         self.manual_market.set(json.dumps(data, ensure_ascii=False) if data else "")
 
-    def read_report_date(self, path: Path) -> None:
-        """Read in an isolated process; apply only the latest selection on Tk."""
-        self._date_error = ""
-        self._date_source = ""
-        self.report_date.set("")
-        self.date_hint.configure(text="正在识别报告日期…")
-
-        def finish(detected, error):
-            if error:
-                self._date_error = error
-                self.date_hint.configure(text=f"识别失败：{error}")
-                self.append_log(f"报告日期识别失败：{error}")
-                return
-            self._date_source = str(path)
-            self.report_date.set(detected.isoformat())
-            self.date_hint.configure(text="已按 D 日收益表识别")
-
-        self._date_reader.start(lambda: report_date_from_day_report(path), finish)
-
-    def derive_report_date(self, path: Path) -> date:
-        try:
-            return report_date_from_day_report(path)
-        except Exception as exc:
-            raise ValueError(f"无法从 D 日收益表识别报告日期：{exc}") from exc
-
     def current_report_date(self) -> date:
-        """Never restart a blocking read from a generate/editor button callback."""
+        """报告日期只按页面选择取值，不再回读 D 日收益表。"""
         text = self.report_date.get().strip()
-        day_path = self.day_report.get().strip()
-        if text and (not day_path or self._date_source in ("", day_path)):
-            return parse_date_input(text)
-        if self._date_reader.pending:
-            raise ValueError("正在识别报告日期，请识别完成后再操作。")
-        if self._date_error:
-            raise ValueError(f"无法从 D 日收益表识别报告日期：{self._date_error}")
-        if not day_path:
-            raise ValueError("请先选择 D 日收益表，报告日期将自动识别。")
-        self.read_report_date(Path(day_path))
-        raise ValueError("正在识别报告日期，请识别完成后再操作。")
+        if not text:
+            raise ValueError("请选择报告日期。")
+        return parse_date_input(text)
 
     def open_market_editor(self):
         try:
@@ -132,15 +93,12 @@ class MarketReportPage(ToolPage):
         initial = json.loads(self.manual_market.get()) if self.manual_market.get() else {}
         self.market_editor = MarketEditor(self, selected, initial, self.save_manual_market)
 
-    def choose_file(self, variable: tk.StringVar, on_selected=None) -> None:
+    def choose_file(self, variable: tk.StringVar) -> None:
         selected = filedialog.askopenfilename(
             parent=self, title="选择收益表 Excel", filetypes=[("Excel 工作簿", "*.xlsx")]
         )
-        if not selected:
-            return
-        variable.set(selected)
-        if on_selected is not None:
-            on_selected(Path(selected))
+        if selected:
+            variable.set(selected)
 
     def build_command(self) -> list[str]:
         variables = (self.day_report, self.previous_report, self.d2_report)
@@ -160,10 +118,6 @@ class MarketReportPage(ToolPage):
             data = market_module().normalize_manual_market(json.loads(self.manual_market.get()), selected)
             command.extend(["--manual-market", json.dumps(data, ensure_ascii=False)])
         return command
-
-    def destroy(self) -> None:
-        self._date_reader.cancel()
-        super().destroy()
 
     def start_report(self) -> None:
         try:

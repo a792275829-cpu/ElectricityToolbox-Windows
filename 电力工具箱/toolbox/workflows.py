@@ -149,8 +149,12 @@ def plan(paths, tool_id, action, p):
         return [(commands.daily_pdf(paths, source, output, p["mode"]), paths.daily_pdf_parser_dir)]
     elif tool_id == "market-report":
         sources = [required_path(p, key) for key in ("day_report", "previous_report", "d2_report")]
-        from .market_report_dates import report_date_from_day_report
-        report_day = report_date_from_day_report(sources[0])
+        # 报告日期由表单手动选择；只有旧存档载荷缺该字段时才回退到按 D 日收益表识别。
+        if str(p.get("report_date", "")).strip():
+            report_day = day("report_date")
+        else:
+            from .market_report_dates import report_date_from_day_report
+            report_day = report_date_from_day_report(sources[0])
         command = [py, str(paths.market_report_runner), report_day.isoformat(),
                    "--day-report", str(sources[0]), "--previous-report", str(sources[1]), "--d2-report", str(sources[2])]
         if str(p.get("manual_market", "")).strip():

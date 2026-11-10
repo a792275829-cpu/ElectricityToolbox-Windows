@@ -5,7 +5,6 @@ import json
 import os
 import sys
 import tempfile
-import time
 import tkinter as tk
 import unittest
 import unicodedata
@@ -302,7 +301,7 @@ class ManualUiTests(unittest.TestCase):
                 var.set(str(path.resolve()))
             command = self.page.build_command()
             values = {key: getattr(self.page, key).get() for key in (
-                "day_report", "previous_report", "d2_report", "manual_market")}
+                "report_date", "day_report", "previous_report", "d2_report", "manual_market")}
 
             validated = workflows.validate(ToolPaths(ROOT), "market-report", "run", values)
             service_command = workflows.plan(ToolPaths(ROOT), "market-report", "run", validated)[0][0]
@@ -315,55 +314,38 @@ class ManualUiTests(unittest.TestCase):
                 self.assertEqual(worker(None), 0)
                 self.assertEqual(json.loads(execute.call_args.args[2]["manual_market"]), complete_manual())
 
-    def wait_until(self, predicate, timeout=15):
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            self.root.update()
-            if predicate():
-                return
-            time.sleep(0.02)
-        self.fail("等待报告日期识别超时")
-
-    def test_day_report_selection_fills_report_date_without_typing(self):
+    def test_manual_report_date_survives_day_report_selection(self):
         with tempfile.TemporaryDirectory() as directory:
-            day = write_report_workbook(Path(directory) / "分公司2026.10.15.xlsx", "新快报", "A6", DAY)
-            self.page.report_date.set("")
-            self.page.read_report_date(day)
-            self.wait_until(lambda: self.page.report_date.get() == DAY.isoformat())
-            self.assertIn("已按", self.page.date_hint.cget("text"))
-
-    def test_replacing_day_report_rebinds_report_date_and_drops_manual_values(self):
-        with tempfile.TemporaryDirectory() as directory:
-            first = write_report_workbook(Path(directory) / "分公司2026.10.15.xlsx", "新快报", "A6", DAY)
-            second = write_report_workbook(Path(directory) / "分公司2026.10.16.xlsx", "新快报", "A6",
-                                           DAY + timedelta(days=1))
-            self.page.day_report.set(str(first.resolve()))
-            self.page.read_report_date(first)
-            self.wait_until(lambda: self.page.report_date.get() == DAY.isoformat())
+            root = Path(directory)
+            day = write_report_workbook(root / "分公司2026.10.16.xlsx", "新快报", "A6", DAY + timedelta(days=1))
             self.page.save_manual_market(complete_manual())
-            self.page.day_report.set(str(second.resolve()))
-            self.page.read_report_date(second)
-            self.wait_until(lambda: self.page.report_date.get() == (DAY + timedelta(days=1)).isoformat())
-            self.assertEqual(self.page.manual_market.get(), "")
+            for variable, name in ((self.page.day_report, day),
+                                   (self.page.previous_report, root / "previous.xlsx"),
+                                   (self.page.d2_report, root / "d2.xlsx")):
+                Path(name).touch()
+                variable.set(str(Path(name).resolve()))
+            # 选择 D 日收益表不再改写报告日期：日期只认页面选择。
+            self.assertEqual(self.page.report_date.get(), DAY.isoformat())
+            command = self.page.build_command()
+        self.assertEqual(command[2], DAY.isoformat())
+        self.assertTrue(self.page.manual_market.get())
 
-    def test_unreadable_day_report_reports_date_error_instead_of_guessing(self):
+    def test_blank_or_invalid_report_date_blocks_generation(self):
         with tempfile.TemporaryDirectory() as directory:
-            day = Path(directory) / "分公司2026.10.15.xlsx"
-            day.touch()
-            for name in ("previous.xlsx", "d2.xlsx"):
-                (Path(directory) / name).touch()
-            for path, var in zip((day, Path(directory) / "previous.xlsx", Path(directory) / "d2.xlsx"),
-                                 (self.page.day_report, self.page.previous_report, self.page.d2_report)):
-                var.set(str(path))
-            self.page.report_date.set("")
-            self.page.read_report_date(day)
-            self.wait_until(lambda: "失败" in self.page.date_hint.cget("text"))
-            self.assertEqual(self.page.report_date.get(), "")
-            with mock.patch("toolbox.market_report_page.messagebox.showerror") as showerror, \
-                    mock.patch.object(self.page, "run_process") as run:
-                self.page.start_report()
-            self.assertIn("识别", showerror.call_args.args[1])
-            run.assert_not_called()
+            root = Path(directory)
+            for variable, name in ((self.page.day_report, "day.xlsx"),
+                                   (self.page.previous_report, "previous.xlsx"),
+                                   (self.page.d2_report, "d2.xlsx")):
+                (root / name).touch()
+                variable.set(str((root / name).resolve()))
+            for value, expected in (("", "请选择报告日期"), ("2026-2-30", "有效年月日")):
+                with self.subTest(value=value):
+                    self.page.report_date.set(value)
+                    with mock.patch("toolbox.market_report_page.messagebox.showerror") as showerror, \
+                            mock.patch.object(self.page, "run_process") as run:
+                        self.page.start_report()
+                    run.assert_not_called()
+                    self.assertIn(expected, showerror.call_args.args[1])
 
 
 
