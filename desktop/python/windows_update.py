@@ -20,6 +20,7 @@ from github_update import Cancelled, GitHubUpdater, Release, UpdateError, truste
 from windows_delta import INDEX_NAME, cleanup_stage, install_version, prepare_update, select_windows_route
 
 WINDOWS_REPOSITORY = "a792275829-cpu/ElectricityToolbox-Windows"
+FALLBACK_NAME = 'windows-update-fallback.json'
 
 
 def unblock_file(path):
@@ -151,6 +152,7 @@ class WindowsUpdater(GitHubUpdater):
         self.fallback_reason = None
         self.update_mode = 'full'
         self._prepared = None
+        self._clear_fallback()
         directory = Path(tempfile.mkdtemp(prefix='ElectricityToolboxWindowsUpdate-'))
         path = directory / installer_name(release.version)
         try:
@@ -159,7 +161,13 @@ class WindowsUpdater(GitHubUpdater):
             if checked is None:
                 raise UpdateError('更新版本不高于当前版本')
             root = os.environ.get('TOOLBOX_INSTALL_ROOT')
-            if release.update_asset and root and not self._delta_failed(release.version):
+            blocked = self._delta_blocked_reason(release.version) if (release.update_asset and root) else ''
+            if blocked:
+                # A previous delta for this target already failed and rolled back;
+                # skip straight to the full installer but keep saying why.
+                self.fallback_reason = blocked
+                self._record_fallback(release, blocked)
+            elif release.update_asset and root:
                 try:
                     prepared = self._download_delta(release,Path(root),directory,cancel,progress)
                     if prepared:
@@ -170,6 +178,7 @@ class WindowsUpdater(GitHubUpdater):
                     raise
                 except Exception as exc:
                     self.fallback_reason = str(exc)
+                    self._record_fallback(release, exc)
                     for candidate in directory.iterdir():
                         if candidate.is_file() and not candidate.is_symlink() and not getattr(candidate.lstat(),'st_file_attributes',0)&0x400:
                             candidate.unlink()
@@ -181,12 +190,50 @@ class WindowsUpdater(GitHubUpdater):
             shutil.rmtree(directory, ignore_errors=True)
             raise
 
-    def _delta_failed(self,version):
+    def _delta_blocked_reason(self,version):
+        """Reason a previous delta attempt for this exact target failed, if any.
+
+        The rollback helper records state=failed/mode=delta. Without surfacing
+        that error here the next attempt silently downloads the full package.
+        """
         try:
             status=json.loads((Path(os.environ['TOOLBOX_APP_HOME'])/'state/windows-update.json').read_text(encoding='utf-8'))
-            return isinstance(status,dict) and status.get('state')=='failed' and status.get('mode')=='delta' and status.get('version')==version.removeprefix('v')
         except (KeyError,OSError,ValueError,TypeError):
-            return False
+            return ''
+        if not isinstance(status,dict) or status.get('state')!='failed' or status.get('mode')!='delta':
+            return ''
+        if status.get('version')!=version.removeprefix('v'):
+            return ''
+        return str(status.get('error') or '上次增量更新未完成')
+
+    def _delta_failed(self,version):
+        return bool(self._delta_blocked_reason(version))
+
+    def _fallback_path(self):
+        home = os.environ.get('TOOLBOX_APP_HOME')
+        return Path(home)/'state'/FALLBACK_NAME if home else None
+
+    def _record_fallback(self,release,reason):
+        """Persist the rejection reason: the UI and helper.log have no other trace."""
+        path = self._fallback_path()
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._atomic_json(path, dict(current=self.current.removeprefix('v'),
+                version=release.version.removeprefix('v'), reason=str(reason)[:500],
+                time=time.strftime('%Y-%m-%dT%H:%M:%S')))
+        except (OSError,ValueError):
+            pass
+
+    def _clear_fallback(self):
+        path = self._fallback_path()
+        if path is None:
+            return
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def _download_delta(self,release,root,directory,cancel,progress):
         if install_version(root)!=self.current.removeprefix('v'):

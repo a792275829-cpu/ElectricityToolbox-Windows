@@ -69,6 +69,28 @@ class UpdateUiTests(unittest.TestCase):
         self.assertIn('增量更新 · 2.0 MB',self.controller.window.status.get())
         self.assertIn('复用运行环境',self.controller.window.status.get())
 
+    def test_windows_full_fallback_states_the_rejected_patch_reason(self):
+        self.controller.release = Release('v0.1.35','更新','https://github.com/test/repo/releases/tag/v0.1.35',
+                                          {'name':'ElectricityToolbox_0.1.35_windows_x64_setup.exe'})
+        self.controller.show()
+        window=self.controller.window
+        self.updater.update_mode='full';self.updater.download_bytes=310*1024**2
+        self.updater.phase='下载完整安装包'
+        # A rejected patch must not look like a silent double download.
+        self.updater.fallback_reason='旧版程序文件已变化或版本不匹配，改用完整安装包'
+        window.download_progress(.12,None)
+        text=window.status.get()
+        self.assertIn('完整更新（补丁不适用）',text)
+        self.assertIn('旧版程序文件已变化',text)
+        self.assertIn('已改用完整安装包',text)
+        # Without a reason (and for mock/unset updaters) the extra line stays hidden.
+        self.updater.fallback_reason=''
+        window.download_progress(.12,None)
+        self.assertNotIn('补丁不适用',window.status.get())
+        del self.updater.fallback_reason
+        window.download_progress(.12,None)
+        self.assertNotIn('补丁不适用',window.status.get())
+
     def test_automatic_errors_are_silent_but_manual_errors_are_visible(self):
         with patch("update_ui.messagebox.showerror") as error:
             self.controller.checked(None, ValueError("离线"))

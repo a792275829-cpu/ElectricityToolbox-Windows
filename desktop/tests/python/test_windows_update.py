@@ -102,20 +102,49 @@ class WindowsChannelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             old,data,payloads=self.delta_fixture(folder)
             data['assets'][0].update(size=len(PAYLOAD))
+            home=Path(folder)/'home'
             # Keep the delta smaller than the full test artifact through a mocked route.
             release=parse_windows_release(data,'0.1.21');calls=[]
             def opener(request,timeout):
                 name=request.full_url.rsplit('/',1)[-1];calls.append(name)
                 return Response(PAYLOAD if name.endswith('.exe') else b'corrupt')
             updater=WindowsUpdater('0.1.21',opener=opener)
-            with patch.dict(os.environ,{'TOOLBOX_INSTALL_ROOT':str(old)}):
+            with patch.dict(os.environ,{'TOOLBOX_INSTALL_ROOT':str(old),'TOOLBOX_APP_HOME':str(home)}):
                 path=updater.download(release,threading.Event(),lambda _:None)
                 self.addCleanup(lambda:__import__('shutil').rmtree(path.parent,ignore_errors=True))
                 self.assertEqual(path.read_bytes(),PAYLOAD)
                 self.assertTrue(updater.fallback_reason)
+                # The rejection reason must outlive the attempt for later diagnosis.
+                report=json.loads((home/'state/windows-update-fallback.json').read_text(encoding='utf-8'))
+                self.assertEqual(report['version'],'0.1.22')
+                self.assertEqual(report['current'],'0.1.21')
+                self.assertTrue(report['reason'].strip())
                 calls.clear();cancel=threading.Event();cancel.set()
                 with self.assertRaises(Cancelled):updater.download(release,cancel,lambda _:None)
                 self.assertFalse(any(name.endswith('.exe') for name in calls))
+
+    def test_failed_delta_target_skips_the_patch_and_keeps_the_reason(self):
+        with tempfile.TemporaryDirectory() as folder:
+            old,data,payloads=self.delta_fixture(folder)
+            data['assets'][0].update(size=len(PAYLOAD))
+            home=Path(folder)/'home';(home/'state').mkdir(parents=True)
+            (home/'state/windows-update.json').write_text(json.dumps(dict(
+                state='failed',mode='delta',version='0.1.22',
+                error='Windows 补丁文件内容校验失败')),encoding='utf-8')
+            calls=[]
+            def opener(request,timeout):
+                name=request.full_url.rsplit('/',1)[-1];calls.append(name);return Response(PAYLOAD)
+            updater=WindowsUpdater('0.1.21',opener=opener)
+            with patch.dict(os.environ,{'TOOLBOX_INSTALL_ROOT':str(old),'TOOLBOX_APP_HOME':str(home)}):
+                path=updater.download(parse_windows_release(data,'0.1.21'),threading.Event(),lambda _:None)
+            self.addCleanup(lambda:__import__('shutil').rmtree(path.parent,ignore_errors=True))
+            self.assertEqual(path.read_bytes(),PAYLOAD)
+            self.assertEqual(updater.update_mode,'full')
+            self.assertEqual(updater.fallback_reason,'Windows 补丁文件内容校验失败')
+            self.assertFalse([name for name in calls if name.endswith(('.patch.tar.xz','.json'))],calls)
+            report=json.loads((home/'state/windows-update-fallback.json').read_text(encoding='utf-8'))
+            self.assertEqual(report['reason'],'Windows 补丁文件内容校验失败')
+            self.assertEqual(report['version'],'0.1.22')
 
     def test_optional_index_does_not_break_full_channel_when_invalid(self):
         data=metadata();data['assets'].append(dict(name='windows-update-manifest.json',size=True))

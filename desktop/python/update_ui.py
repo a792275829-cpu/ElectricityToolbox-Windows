@@ -356,15 +356,36 @@ class UpdateWindow(tk.Toplevel):
                 raise
         self.controller.worker(download, self.download_finished)
 
+    @staticmethod
+    def _fallback_reason(updater):
+        """Only a real string counts; mocks and older updaters must stay silent."""
+        try:
+            reason = getattr(updater, 'fallback_reason', '')
+        except Exception:
+            return ''
+        return reason.strip() if isinstance(reason, str) else ''
+
+    @staticmethod
+    def _short_reason(reason, limit=60):
+        text = ' '.join(reason.split())
+        return text if len(text) <= limit else text[:limit] + '…'
+
     def download_progress(self, fraction, error):
         if self.winfo_exists():
             self.progress["value"] = fraction * 100
             updater = self.controller.updater
             phase = getattr(updater, 'phase', '')
             size = getattr(updater, 'download_bytes', 0)
-            mode = '增量更新' if getattr(updater, 'update_mode', '') == 'delta' else '完整更新'
-            self.status.set(f"{mode} · {size/1024**2:.1f} MB · {phase} · {fraction:.0%}"
-                            if phase and size else f"正在下载并准备更新 · {fraction:.0%}")
+            delta = getattr(updater, 'update_mode', '') == 'delta'
+            # A rejected patch is replaced by the full installer without any other
+            # signal: state the reason where the user is already looking.
+            fallback = '' if delta else self._fallback_reason(updater)
+            mode = '增量更新' if delta else ('完整更新（补丁不适用）' if fallback else '完整更新')
+            text = (f"{mode} · {size/1024**2:.1f} MB · {phase} · {fraction:.0%}"
+                    if phase and size else f"正在下载并准备更新 · {fraction:.0%}")
+            if fallback:
+                text += f"\n原因：{self._short_reason(fallback)}；已改用完整安装包。"
+            self.status.set(text)
 
     def download_finished(self, path, error):
         if not self.winfo_exists():
@@ -390,7 +411,12 @@ class UpdateWindow(tk.Toplevel):
         self.installing = True
         self.primary.configure(text="安装准备中…", state='disabled')
         self.cancel_button.configure(state='disabled')
-        self.status.set('正在校验 Windows 安装包并准备退出交接…' if self.is_windows else '正在校验镜像和应用，准备自动安装…')
+        status = ('正在校验 Windows 安装包并准备退出交接…' if self.is_windows
+                  else '正在校验镜像和应用，准备自动安装…')
+        fallback = self._fallback_reason(self.controller.updater)
+        if fallback:
+            status += f"\n增量补丁不适用（{self._short_reason(fallback)}），已改用完整安装包。"
+        self.status.set(status)
         def prepare():
             try:
                 return self.controller.updater.prepare_install(self.release, path)
