@@ -103,6 +103,18 @@ class WpsToolbarLayoutTests(unittest.TestCase):
                 self.assertGreaterEqual(button.winfo_rootx(), left)
                 self.assertLessEqual(button.winfo_rootx() + button.winfo_width(), right)
 
+        checkbox = next(widget for widget in descendants(frame)
+                        if isinstance(widget, ttk.Checkbutton)
+                        and widget.cget("text") == "覆盖非空单元格")
+        self.assertTrue(frame.overwrite.get())
+        self.assertTrue(checkbox.winfo_ismapped())
+        self.assertGreaterEqual(checkbox.winfo_rootx(), left)
+        self.assertLessEqual(checkbox.winfo_rootx() + checkbox.winfo_width(), right)
+        with mock.patch.object(module, "save_config") as save:
+            checkbox.invoke()
+        self.assertFalse(frame.overwrite.get())
+        self.assertFalse(save.call_args.args[0]["overwrite"])
+
         tree_top = frame.tree.winfo_rooty()
         tree_bottom = tree_top + frame.tree.winfo_height()
         for text in ("添加配置", "编辑", "复制", "删除", "上移", "下移", "导入", "导出"):

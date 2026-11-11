@@ -61,6 +61,7 @@ def normalize_runtime_config(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(documents, list):
         documents = legacy_documents(data)
     config = {
+        "overwrite": data.get("overwrite", True) is not False,
         "recent_urls": _string_list(data.get("recent_urls", [])),
         "browser_mode": normalize_browser_mode(data.get("browser_mode")),
         "cdp_url": str(data.get("cdp_url", "http://127.0.0.1:9222") or "http://127.0.0.1:9222"),

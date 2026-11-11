@@ -48,7 +48,7 @@ from toolbox_platform import (
 )
 from toolbox_wps_config import (_document_config_from_dict, _region_config_from_dict, _string_list, build_config_export, load_config_export, normalize_browser_mode, normalize_document_titles, normalize_runtime_config, runtime_config_from_export_payload, save_config_export)
 from toolbox_log_console import LogConsole, explain_error, redact
-from toolbox_choices import SegmentedGroup
+from toolbox_choices import SegmentedGroup, SettingCheckbutton
 from toolbox_wps_urls import url_choices
 
 DATA_DIR = data_path(BASE_DIR)
@@ -1624,6 +1624,7 @@ def write_to_wps(
     log,
     browser_mode: str = "managed_cdp",
     cdp_url: str = "http://127.0.0.1:9222",
+    overwrite: bool = True,
 ) -> dict[str, Any]:
     if sync_playwright is None:
         raise RuntimeError("缺少浏览器自动化组件，请运行初始化脚本 setup_windows.ps1。")
@@ -1636,6 +1637,7 @@ def write_to_wps(
             "rows": item.rows,
             "cols": item.cols,
             "values": item.values,
+            "overwrite": overwrite,
         }
         for item in prepared
     ]
@@ -1669,14 +1671,47 @@ def write_to_wps(
                 const range = sheet.Range(item.targetRange);
                 const assignment = item.rows === 1 && item.cols === 1 ? item.values[0][0] : item.values;
                 const mergeCells = await range.MergeCells;
-                range.Value = assignment;
+                let expected = item.values;
+                let skipped = 0;
+                if (item.overwrite) {
+                  range.Value = assignment;
+                } else {
+                  expected = item.values.map(row => row.slice());
+                  const start = item.targetRange.split(":")[0].replace(/[$]/g, "");
+                  const [, letters, rowNumber] = /^([A-Z]+)([0-9]+)$/i.exec(start);
+                  let startCol = 0;
+                  for (const letter of letters.toUpperCase()) startCol = startCol * 26 + letter.charCodeAt(0) - 64;
+                  const columnName = (number) => {
+                    let name = "";
+                    while (number > 0) {
+                      number--;
+                      name = String.fromCharCode(65 + number % 26) + name;
+                      number = Math.floor(number / 26);
+                    }
+                    return name;
+                  };
+                  for (let r = 0; r < item.rows; r++) {
+                    for (let c = 0; c < item.cols; c++) {
+                      const cell = sheet.Range(columnName(startCol + c) + (Number(rowNumber) + r));
+                      const current = await cell.Value;
+                      const formula = await cell.Formula;
+                      if ((current !== null && current !== undefined && current !== "") ||
+                          (typeof formula === "string" && formula.startsWith("="))) {
+                        expected[r][c] = current;
+                        skipped++;
+                      } else {
+                        cell.Value = item.values[r][c];
+                      }
+                    }
+                  }
+                }
                 results.push({
                   index: item.index,
                   targetSheet: item.targetSheet,
                   targetRange: item.targetRange,
                   rows: item.rows,
                   cols: item.cols,
-                  mergeCells
+                  mergeCells, expected, skipped
                 });
               }
               await api.save();
@@ -1979,6 +2014,7 @@ class RegionDialog(tk.Toplevel):
         initial: RegionRow | None = None,
         local_sheets: list[str] | None = None,
         online_sheets: list[str] | None = None,
+        sheet_provider=None,
     ):
         super().__init__(parent)
         self.title(title)
@@ -2010,6 +2046,9 @@ class RegionDialog(tk.Toplevel):
                 entry = ttk.Combobox(self, textvariable=self.vars[key], values=online_sheets or [], width=42)
             else:
                 entry = ttk.Entry(self, textvariable=self.vars[key], width=44)
+            if sheet_provider is not None and key in {"source_sheet", "target_sheet"}:
+                entry.configure(postcommand=lambda widget=entry, field=key:
+                                widget.configure(values=sheet_provider(field)))
             entry.grid(row=row, column=1, padx=10, pady=6, sticky="ew")
 
         if not initial:
@@ -2082,6 +2121,7 @@ class DocumentConfigDialog(tk.Toplevel):
         self.document_titles = document_titles if document_titles is not None else {}
         self.on_document_title = on_document_title
         self._updating_target_url = False
+        self._updating_source_url = False
         self.local_sheets: list[str] = list(
             dict.fromkeys(
                 region.source_sheet
@@ -2113,10 +2153,11 @@ class DocumentConfigDialog(tk.Toplevel):
         self.config_name = tk.StringVar(value=initial.name if initial else "")
         self.source_type = tk.StringVar(value=initial.source_type if initial else "excel")
         self.source_url = tk.StringVar(value=default_source_url)
+        self.source_url_display = tk.StringVar(value=default_source_url)
         self.kdocs_url = tk.StringVar(value=default_url)
         self.target_url_display = tk.StringVar(value=default_url)
         self.local_file = tk.StringVar(value=initial.local_file if initial else "")
-        self.source_doc_title = tk.StringVar(value="")
+        self.source_doc_title = tk.StringVar(value=self.document_titles.get(default_source_url, ""))
         self.target_doc_title = tk.StringVar(value=self.document_titles.get(default_url, ""))
         cached_sheet_count = len(self.online_sheets)
         cached_status = (
@@ -2129,6 +2170,9 @@ class DocumentConfigDialog(tk.Toplevel):
 
         self.create_widgets()
         self._refresh_target_url_choices()
+        self._refresh_url_choices("source")
+        self.source_url_display.trace_add("write", lambda *_: self._url_edited("source"))
+        self.source_url.trace_add("write", lambda *_: self._raw_url_changed("source"))
         self.source_type.trace_add("write", self._source_type_changed)
         self.target_url_display.trace_add("write", self._target_url_edited)
         self.kdocs_url.trace_add("write", self._target_raw_url_changed)
@@ -2140,6 +2184,8 @@ class DocumentConfigDialog(tk.Toplevel):
             self.refresh_online_sheets(auto=True)
         if self.source_type.get() == "excel":
             self.refresh_local_sheets(show_errors=False)
+        elif default_source_url:
+            self.refresh_source_sheets(auto=True)
 
         self.transient(parent)
         self.grab_set()
@@ -2165,10 +2211,15 @@ class DocumentConfigDialog(tk.Toplevel):
         source_frame.grid(row=1, column=1, columnspan=2, padx=8, pady=6, sticky="w")
 
         ttk.Label(docs, text="来源表格链接").grid(row=2, column=0, padx=8, pady=6, sticky="w")
-        source_url_combo = ttk.Combobox(docs, textvariable=self.source_url, values=self.recent_urls)
-        source_url_combo.grid(row=2, column=1, padx=8, pady=6, sticky="ew")
+        self.source_url_combo = ttk.Combobox(
+            docs, textvariable=self.source_url_display,
+            postcommand=lambda: self._refresh_url_choices("source"),
+        )
+        self.source_url_combo.grid(row=2, column=1, padx=8, pady=6, sticky="ew")
+        self.source_url_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh_source_sheets(auto=True))
+        self.source_url_combo.bind("<FocusOut>", lambda _event: self._refresh_url_choices("source"))
         self.refresh_source_button = ttk.Button(
-            docs, text="刷新来源工作表", command=self.refresh_local_sheets
+            docs, text="刷新来源工作表", command=self.refresh_source_sheets
         )
         self.refresh_source_button.grid(row=2, column=2, padx=8, pady=6)
 
@@ -2250,7 +2301,8 @@ class DocumentConfigDialog(tk.Toplevel):
         self._request_ids["source"] += 1
         self._pending_online_reads.pop("source", None)
         self.refresh_source_button.configure(state="normal")
-        self.source_doc_title.set("")
+        self.local_sheets = []
+        self.source_doc_title.set(self.document_titles.get(self.source_url.get().strip(), "") if self.source_type.get() == "kdocs" else "")
         self.read_status.set("来源已切换，请刷新来源工作表。")
 
     def browse_local_file(self) -> None:
@@ -2304,34 +2356,71 @@ class DocumentConfigDialog(tk.Toplevel):
 
         self._local_reader.start(lambda: read_excel_sheet_names(path), finish)
 
-    def _refresh_target_url_choices(self) -> None:
-        url = self.kdocs_url.get().strip()
+    def _url_controls(self, kind: str):
+        if kind == "source":
+            return self.source_url, self.source_url_display, self.source_url_combo, self.source_doc_title
+        return self.kdocs_url, self.target_url_display, self.target_url_combo, self.target_doc_title
+
+    def _refresh_url_choices(self, kind: str) -> None:
+        raw, display, combo, _title = self._url_controls(kind)
+        url = raw.get().strip()
         choices = url_choices(self.recent_urls + ([url] if url else []), self.document_titles, url)
-        self.target_url_combo.configure(values=[option["label"] for option in choices["options"]])
-        self._updating_target_url = True
+        combo.configure(values=[option["label"] for option in choices["options"]])
+        guard = f"_updating_{kind}_url"
+        setattr(self, guard, True)
         try:
-            self.target_url_display.set(choices["label"])
+            display.set(choices["label"])
         finally:
-            self._updating_target_url = False
+            setattr(self, guard, False)
+
+    def _url_edited(self, kind: str) -> None:
+        guard = f"_updating_{kind}_url"
+        if getattr(self, guard):
+            return
+        raw, display, _combo, title = self._url_controls(kind)
+        choices = url_choices(self.recent_urls + ([raw.get()] if raw.get() else []),
+                              self.document_titles, display.get())
+        url = choices["url"]
+        if url != raw.get():
+            # Preserve typed input while storing only raw addresses.
+            setattr(self, guard, True)
+            try:
+                raw.set(url)
+            finally:
+                setattr(self, guard, False)
+            self._raw_url_changed(kind, decorate=False)
+
+    def _raw_url_changed(self, kind: str, decorate: bool = True) -> None:
+        if getattr(self, f"_updating_{kind}_url"):
+            return
+        raw, _display, _combo, title = self._url_controls(kind)
+        title.set(self.document_titles.get(raw.get().strip(), ""))
+        if kind == "source":
+            self._request_ids["source"] += 1
+            self._pending_online_reads.pop("source", None)
+            self.refresh_source_button.configure(state="normal")
+            if self.source_type.get() == "kdocs":
+                self.local_sheets = []
+        if decorate:
+            self._refresh_url_choices(kind)
+
+    def _refresh_target_url_choices(self) -> None:
+        self._refresh_url_choices("target")
 
     def _target_url_edited(self, *_args) -> None:
-        if self._updating_target_url:
-            return
-        choices = url_choices(self.recent_urls, self.document_titles, self.target_url_display.get())
-        url = choices["url"]
-        if url != self.kdocs_url.get():
-            # Keep typed input editable; decorating happens on selection/blur/read.
-            self._updating_target_url = True
-            try:
-                self.kdocs_url.set(url)
-                self.target_doc_title.set(self.document_titles.get(url, ""))
-            finally:
-                self._updating_target_url = False
+        self._url_edited("target")
 
     def _target_raw_url_changed(self, *_args) -> None:
-        if not self._updating_target_url:
-            self.target_doc_title.set(self.document_titles.get(self.kdocs_url.get().strip(), ""))
-            self._refresh_target_url_choices()
+        self._raw_url_changed("target")
+
+    def refresh_source_sheets(self, auto: bool = False) -> None:
+        if not self.source_url.get().strip():
+            if not auto:
+                messagebox.showerror("请填写表格链接", "请填写来源表格链接。", parent=self)
+            return
+        if self.source_type.get() != "kdocs":
+            self.source_type.set("kdocs")
+        self.refresh_local_sheets(show_errors=not auto)
 
     def refresh_online_sheets(self, auto: bool = False) -> None:
         url = self.kdocs_url.get().strip()
@@ -2427,6 +2516,8 @@ class DocumentConfigDialog(tk.Toplevel):
             button.configure(state="normal")
             if kind == "target" and url != self.kdocs_url.get().strip():
                 continue
+            if kind == "source" and (self.source_type.get() != "kdocs" or url != self.source_url.get().strip()):
+                continue
             if error is not None:
                 if kind == "source":
                     self.source_doc_title.set("读取失败")
@@ -2455,13 +2546,18 @@ class DocumentConfigDialog(tk.Toplevel):
                 self.target_doc_title.set(document_title)
                 self.last_online_sheet_url = url
             self._refresh_target_url_choices()
+            self._refresh_url_choices("source")
             self.read_status.set(f"已读取 {len(sheets)} 个工作表。")
 
         if self._pending_online_reads:
             self._online_poll_after_id = self.after(50, self._drain_online_results)
 
+    def _region_sheet_choices(self, key: str) -> list[str]:
+        return self.local_sheets if key == "source_sheet" else self.online_sheets
+
     def add_region(self) -> None:
-        dialog = RegionDialog(self, "添加区域", local_sheets=self.local_sheets, online_sheets=self.online_sheets)
+        dialog = RegionDialog(self, "添加区域", local_sheets=self.local_sheets, online_sheets=self.online_sheets,
+                              sheet_provider=self._region_sheet_choices)
         if dialog.result:
             self.regions.append(dialog.result)
             self.refresh_regions()
@@ -2478,6 +2574,7 @@ class DocumentConfigDialog(tk.Toplevel):
             self.regions[index],
             local_sheets=self.local_sheets,
             online_sheets=self.online_sheets,
+            sheet_provider=self._region_sheet_choices,
         )
         if dialog.result:
             self.regions[index] = dialog.result
@@ -2624,6 +2721,7 @@ class WpsWriterFrame(ttk.Frame):
         self.document_titles: dict[str, str] = {}
         self.browser_mode = tk.StringVar(master=self, value="managed_cdp")
         self.cdp_url = tk.StringVar(master=self, value="http://127.0.0.1:9222")
+        self.overwrite = tk.BooleanVar(master=self, value=True)
         self.browser_status = tk.StringVar(master=self, value="尚未检查浏览器连接")
         self.login_status = tk.StringVar(master=self, value="尚未检查")
 
@@ -2815,6 +2913,10 @@ class WpsWriterFrame(ttk.Frame):
         self.execution_toolbar = ttk.Frame(mapping_frame)
         self.execution_toolbar.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 8))
         self.execution_toolbar.columnconfigure(0, weight=1)
+        SettingCheckbutton(
+            self.execution_toolbar, text="覆盖非空单元格", variable=self.overwrite,
+            command=self.save_current_config,
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
         self.selection_status = tk.StringVar(value="请先选择配置，再预览或写入。")
         selection_label = ttk.Label(
             self.execution_toolbar,
@@ -3358,6 +3460,7 @@ class WpsWriterFrame(ttk.Frame):
         self.recent_urls = [url for url in config.get("recent_urls", []) if isinstance(url, str) and url.strip()]
         if config.get("kdocs_url"):
             self.recent_urls = update_recent_urls(self.recent_urls, config["kdocs_url"])
+        self.overwrite.set(config.get("overwrite", True))
         self.browser_mode.set(normalize_browser_mode(config.get("browser_mode")))
         self.cdp_url.set(config.get("cdp_url", "http://127.0.0.1:9222"))
         default_url = config.get("kdocs_url", "")
@@ -3470,6 +3573,7 @@ class WpsWriterFrame(ttk.Frame):
             {
                 "recent_urls": self.recent_urls,
                 "document_titles": self.document_titles,
+                "overwrite": self.overwrite.get(),
                 "browser_mode": self.browser_mode.get(),
                 "cdp_url": self.cdp_url.get(),
                 "configs": [
@@ -3490,6 +3594,7 @@ class WpsWriterFrame(ttk.Frame):
         runtime_config = normalize_runtime_config(config)
         self.recent_urls = runtime_config["recent_urls"]
         self.document_titles = runtime_config.get("document_titles", {})
+        self.overwrite.set(runtime_config["overwrite"])
         self.browser_mode.set(runtime_config["browser_mode"])
         self.cdp_url.set(runtime_config["cdp_url"])
         self.configs = [self.document_config_from_config(row) for row in runtime_config["configs"]]
@@ -3617,7 +3722,7 @@ class WpsWriterFrame(ttk.Frame):
         self.detail_log_prepared("WRITE PREPARED", prepared)
         self.worker = self._start_tracked_thread(
             self.write_worker,
-            args=(prepared, self.browser_mode.get(), self.cdp_url.get().strip()),
+            args=(prepared, self.browser_mode.get(), self.cdp_url.get().strip(), self.overwrite.get()),
             name="wps-write",
         )
 
@@ -3654,7 +3759,7 @@ class WpsWriterFrame(ttk.Frame):
                     self._remote_messages.put(("预览失败", str(exc)))
         self.worker = self._start_tracked_thread(worker, name="wps-preview" if preview else "wps-write")
 
-    def write_worker(self, prepared: list[PreparedMapping], browser_mode: str, cdp_url: str) -> None:
+    def write_worker(self, prepared: list[PreparedMapping], browser_mode: str, cdp_url: str, overwrite: bool = True) -> None:
         try:
             self.log(f"开始写入，共 {len(prepared)} 个区域。")
             self.detail_log(f"WRITE STARTED: browser_mode={browser_mode}; cdp_url={cdp_url}; regions={len(prepared)}")
@@ -3667,11 +3772,13 @@ class WpsWriterFrame(ttk.Frame):
 
             for url, group in groups.items():
                 self.detail_log(f"WRITE TARGET: url={url}; regions={len(group)}")
-                result = write_to_wps(url, group, self.log, browser_mode=browser_mode, cdp_url=cdp_url)
+                result = write_to_wps(url, group, self.log, browser_mode=browser_mode, cdp_url=cdp_url, overwrite=overwrite)
                 self.detail_log(f"WRITE TARGET RESULT: url={url}; saved={result.get('saved')}; returned={len(result.get('results', []))}")
                 for entry in result.get("results", []):
                     item = by_index[entry["index"]]
-                    mismatches = compare_matrix(item.values, entry.get("value"), item.rows, item.cols)
+                    mismatches = compare_matrix(entry.get("expected", item.values), entry.get("value"), item.rows, item.cols)
+                    if entry.get("skipped"):
+                        self.log(f"第 {item.index} 个区域已跳过 {entry['skipped']} 个非空单元格。")
                     if mismatches:
                         all_ok = False
                         self.detail_log(

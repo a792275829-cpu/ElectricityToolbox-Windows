@@ -4,6 +4,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+TOOLBOX_TEST_TAGS = ()
+
 from toolbox.runtime import load_module
 
 
@@ -201,6 +203,50 @@ class WpsBrowserRecoveryTests(unittest.TestCase):
         info = self.module.read_online_document_info(self.page.url, "cdp", "", lambda _: None)
         self.assertEqual(info, {"title": "WPS regression fixture", "sheets": ["目标"]})
 
+    def test_skip_existing_preserves_values_and_formulas_after_reload(self) -> None:
+        self.page.evaluate("""() => {
+          window.cells = {A3: 0, A6: false, A9: '已有', A12: '', A15: null};
+          sessionStorage.setItem('cells', JSON.stringify(window.cells));
+          const original = window.testApp.Worksheets;
+          window.testApp.Worksheets = (name) => ({Range: (address) => {
+            const range = original(name).Range(address);
+            range.Formula = address === 'A12' ? '=IF(TRUE,"",1)' : '';
+            return range;
+          }});
+        }""")
+        prepared = self.mappings()[:5]
+        result = self.module.write_to_wps(self.page.url, prepared, lambda _: None, overwrite=False)
+        self.assertEqual([row['skipped'] for row in result['results']], [1, 1, 1, 1, 0])
+        self.assertEqual(self.page.evaluate('() => window.writes'), 1)
+        for item, entry in zip(prepared, result['results']):
+            self.assertEqual(self.module.compare_matrix(entry['expected'], entry['value'], item.rows, item.cols), [])
+        self.page.reload()
+        self.assertEqual(self.page.evaluate('() => window.cells'),
+                         {'A3': 0, 'A6': False, 'A9': '已有', 'A12': '', 'A15': 0})
+
+    def test_skip_existing_fills_only_empty_cells_in_mixed_rectangle(self) -> None:
+        self.page.evaluate("""() => {
+          window.cells = {A18: 0, B18: '', A19: null, B19: false};
+          const original = window.testApp.Worksheets;
+          window.testApp.Worksheets = (name) => ({Range: (address) => {
+            if (address !== 'A18:B19') return original(name).Range(address);
+            return {MergeCells: false,
+              get Value() { return [[window.cells.A18, window.cells.B18], [window.cells.A19, window.cells.B19]]; },
+              get Value2() { return this.Value; }, get Text() { return this.Value; }
+            };
+          }});
+        }""")
+        item = self.mappings()[-1]
+        result = self.module.write_to_wps(self.page.url, [item], lambda _: None, overwrite=False)
+        entry = result['results'][0]
+        self.assertEqual(entry['skipped'], 2)
+        self.assertEqual(entry['value'], [[0, '文本'], [2, False]])
+        self.assertEqual(entry['expected'], entry['value'])
+        self.assertEqual(self.page.evaluate('() => [window.writes, window.saves]'), [2, 1])
+        self.page.reload()
+        self.assertEqual(self.page.evaluate('() => window.cells'),
+                         {'A18': 0, 'B18': '文本', 'A19': 2, 'B19': False})
+
     def test_batch_reads_saved_regions_using_one_connection(self) -> None:
         prepared = self.mappings()
         self.module.write_to_wps(self.page.url, prepared, lambda _: None, browser_mode="cdp")
@@ -236,6 +282,35 @@ class WpsBrowserRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "表格保存功能尚未就绪"):
             self.module.write_to_wps(self.page.url, self.mappings(), lambda _: None, browser_mode="cdp")
         self.assertEqual(self.page.evaluate("() => [window.writes, window.saves]"), [0, 0])
+
+
+class WpsOverwriteConfigTests(unittest.TestCase):
+    def test_service_forwards_option_and_verifies_preserved_values(self):
+        import json
+        from types import SimpleNamespace
+        from toolbox.workflows import execute_wps
+        module = load_writer()
+        item = SimpleNamespace(index=1, kdocs_url='https://example.invalid/doc',
+                               target_sheet='目标', target_range='A1', rows=1, cols=1, values=[[9]])
+        config = {'overwrite': False, 'configs': [{'regions': []}]}
+        result = {'saved': True, 'results': [{'index': 1, 'expected': [[0]], 'value': 0, 'skipped': 1}]}
+        with (mock.patch('toolbox.workflows.load_module', return_value=module),
+              mock.patch.object(module, 'prepare_mappings', return_value=[item]),
+              mock.patch.object(module, 'write_to_wps', return_value=result) as write):
+            execute_wps(SimpleNamespace(wps_writer=None), 'run',
+                        {'config': json.dumps(config), 'selected_indexes': '1'}, lambda _: None)
+            self.assertIs(write.call_args.kwargs['overwrite'], False)
+            result['results'][0]['value'] = 99
+            with self.assertRaisesRegex(RuntimeError, '回读不一致'):
+                execute_wps(SimpleNamespace(wps_writer=None), 'run',
+                            {'config': json.dumps(config), 'selected_indexes': '1'}, lambda _: None)
+
+    def test_option_defaults_and_export_round_trip(self):
+        from toolbox_wps_config import normalize_runtime_config, build_config_export, runtime_config_from_export_payload
+        self.assertTrue(normalize_runtime_config({})['overwrite'])
+        config = {'overwrite': False, 'configs': [{'name': 'test', 'regions': []}]}
+        restored = runtime_config_from_export_payload(build_config_export(config))
+        self.assertFalse(restored['overwrite'])
 
 
 if __name__ == "__main__":
