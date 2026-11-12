@@ -430,7 +430,21 @@ def run_daily_data(
     forecast_org_name: str = DEFAULT_FORECAST_ORG_NAME,
     forecast_unit_id: str = DEFAULT_FORECAST_UNIT_ID,
     forecast_unit_name: str = DEFAULT_FORECAST_UNIT_NAME,
+    include_startup_counts: bool = False,
 ) -> dict[str, Any]:
+    # 正文采用 D 日快报（日前）A41，不再依赖市场行情开机接口。
+    # 保留显式抓取选项，供单独核对行情数据时使用。
+    def startup_summary(context, *, date_text: str, province_area_id: str) -> dict[str, Any]:
+        if include_startup_counts:
+            return fetch_startup_count_summary(
+                context, date_text=date_text, province_area_id=province_area_id,
+            )
+        return {
+            "date": date_text, "unit": "台", "maxStartupCount": None,
+            "unitCount": [], "status": "not_requested",
+            "source": "早报市场开机及均价原文取报告日快报(日前)A41",
+        }
+
     config = load_config()
     date_plan = build_report_date_plan(selected_date)
     market_date = date_plan["dailyClearingDate"]
@@ -462,12 +476,12 @@ def run_daily_data(
                 date_text=compare_date,
                 province_area_id=province_area_id,
             )
-            selected_startup = fetch_startup_count_summary(
+            selected_startup = startup_summary(
                 context,
                 date_text=selected_date,
                 province_area_id=province_area_id,
             )
-            compare_startup = fetch_startup_count_summary(
+            compare_startup = startup_summary(
                 context,
                 date_text=compare_date,
                 province_area_id=province_area_id,
@@ -502,12 +516,12 @@ def run_daily_data(
                 date_text=market_compare_date,
                 province_area_id=province_area_id,
             )
-            market_startup = fetch_startup_count_summary(
+            market_startup = startup_summary(
                 context,
                 date_text=market_date,
                 province_area_id=province_area_id,
             )
-            market_compare_startup = fetch_startup_count_summary(
+            market_compare_startup = startup_summary(
                 context,
                 date_text=market_compare_date,
                 province_area_id=province_area_id,
@@ -635,6 +649,11 @@ def write_load_sheet(wb: openpyxl.Workbook, load_payload: dict[str, Any]) -> Non
         ws.column_dimensions[column].width = width
 
 
+def startup_count_display(summary: dict[str, Any]) -> str:
+    value = summary.get("maxStartupCount")
+    return f"{value}台" if value is not None else "未抓取（早报采用报告日快报(日前)A41原文）"
+
+
 def write_summary_sheet(wb: openpyxl.Workbook, payload: dict[str, Any]) -> None:
     ws = wb.active
     ws.title = "汇总"
@@ -651,7 +670,7 @@ def write_summary_sheet(wb: openpyxl.Workbook, payload: dict[str, Any]) -> None:
     ws["A6"] = "检修容量/开机台数"
     ws["B6"] = (
         f"{payload['operationPublicData']['capacity']['selected'].get('capacityWanKw')}万千瓦 / "
-        f"{payload['operationPublicData']['startupCount']['selected'].get('maxStartupCount')}台"
+        + startup_count_display(payload["operationPublicData"]["startupCount"]["selected"])
     )
 
     ws["A8"] = "价格类型"
@@ -775,8 +794,9 @@ def print_result(payload: dict[str, Any], path: Path) -> None:
     log(
         "检修容量/市场开机台数: "
         f"{payload['operationPublicData']['capacity']['selected'].get('capacityWanKw')}万千瓦 / "
-        f"{payload['operationPublicData']['startupCount']['selected'].get('maxStartupCount')}台 "
-        f"环比{payload['operationPublicData']['startupCount'].get('difference')}台"
+        + startup_count_display(payload["operationPublicData"]["startupCount"]["selected"])
+        + (f" 环比{payload['operationPublicData']['startupCount']['difference']}台"
+           if payload["operationPublicData"]["startupCount"].get("difference") is not None else "")
     )
     log(
         "多日滚动预测: "
@@ -819,6 +839,8 @@ def main() -> int:
     parser.add_argument("--forecast-unit-id", default=DEFAULT_FORECAST_UNIT_ID, help="多日滚动预测场站 unitId")
     parser.add_argument("--forecast-unit-name", default=DEFAULT_FORECAST_UNIT_NAME, help="多日滚动预测场站名称")
     parser.add_argument("--output-dir", default=str(OUTPUT_DIR), help="输出目录")
+    parser.add_argument("--include-startup-counts", action="store_true",
+                        help="额外抓取市场行情开机台数（早报正文采用快报(日前)A41，无需此项）")
     parser.add_argument("--login", action="store_true", help="仅打开浏览器登录并保存会话")
     args = parser.parse_args()
 
@@ -850,6 +872,7 @@ def main() -> int:
             forecast_org_name=args.forecast_org_name,
             forecast_unit_id=args.forecast_unit_id,
             forecast_unit_name=args.forecast_unit_name,
+            include_startup_counts=args.include_startup_counts,
         )
         path = save_output(payload, Path(args.output_dir).expanduser())
         print_result(payload, path)

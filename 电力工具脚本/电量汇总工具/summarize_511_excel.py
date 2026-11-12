@@ -35,6 +35,7 @@ from toolbox_native_excel import load_value_workbook, prefetch_workbooks
 from toolbox_native_write import save_workbook as save_native_workbook
 from toolbox_platform import open_path
 from toolbox_native_domain import invoke as invoke_domain, backend_mode, with_native_session
+from toolbox_node_prices import collect_node_prices
 
 FILE_TYPE_PATTERNS = {
     "realtime": "实时交易结果查询",
@@ -123,11 +124,12 @@ def run_summary(
 
     log(f"开始扫描文件夹：{input_dir}")
     units = collect_units(input_dir, log)
-    if not units:
-        raise ValueError("没有找到可汇总的 Excel 数据，请选择包含交易结果文件的场站文件夹或其上级文件夹。")
+    node_prices = collect_node_prices(input_dir, log)
+    if not units and not node_prices:
+        raise ValueError("没有找到可汇总的 Excel 数据，请选择包含交易结果或节点电价文件的文件夹。")
 
     log(f"共识别 {len(units)} 台机组，开始生成汇总表。")
-    final_output = write_workbook(units, output_path, log)
+    final_output = write_workbook(units, output_path, log, node_prices=node_prices)
     log(f"汇总完成：{final_output}")
     return final_output
 
@@ -358,6 +360,8 @@ def write_workbook(
     units: list[UnitData],
     output_path: Path,
     logger: Callable[[str], None],
+    *,
+    node_prices=None,
 ) -> Path:
     workbook = Workbook()
     grouped: dict[str, list[UnitData]] = {}
@@ -378,6 +382,26 @@ def write_workbook(
         write_station_block(worksheet, 1, station_name, grouped[station_name], include_station_title=False)
         set_widths(worksheet)
         logger(f"已生成工作表：{worksheet.title}")
+
+    if node_prices:
+        for region in ("海风", "全省"):
+            worksheet = workbook.active if first_sheet else workbook.create_sheet()
+            first_sheet = False
+            worksheet.title = f"{region}汇总"
+            for market, title_row in (("日前", 1), ("实时", 3)):
+                result = node_prices.get(market)
+                worksheet.merge_cells(start_row=title_row, start_column=1, end_row=title_row, end_column=96)
+                cell = worksheet.cell(title_row, 1, f"{region}{market}{result.day.isoformat()}" if result else f"{region}{market}（未提供）")
+                style_header(cell)
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+                if result:
+                    prices = result.prices if region == "海风" else result.province_prices
+                    for col, value in enumerate(prices, 1):
+                        cell = worksheet.cell(title_row + 1, col, value)
+                        cell.number_format = "0.00"
+                        style_body(cell, bold=False)
+            set_widths(worksheet)
+            logger(f"已生成工作表：{worksheet.title}（96 点，单位元/MWh）")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     final_path = save_workbook_with_fallback(workbook, output_path)

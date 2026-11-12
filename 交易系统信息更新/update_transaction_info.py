@@ -100,6 +100,7 @@ class PreparedWorkbook:
     pairs: tuple[DailyLoadPair, ...]
     cell_expectations: tuple[tuple[str, int | float, str], ...] = ()
     preserved_cells: dict[str, tuple[Any, str]] = field(default_factory=dict)
+    categories: tuple[str, ...] = CATEGORY_ORDER
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +108,7 @@ class WorkbookGroup:
     tail: WorkbookTail
     cells: dict[str, tuple[Any, str]]
     formulas: dict[str, tuple[Any, str]] = field(default_factory=dict)
+    categories: tuple[str, ...] = CATEGORY_ORDER
 
 
 def log(message: str) -> None:
@@ -322,19 +324,32 @@ def collect_pairs(
     return tuple(pairs)
 
 
-def _as_date(value: Any, *, epoch) -> date | None:
+def _as_date(value: Any, *, epoch, reference: date | None = None) -> date | None:
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
         return value
     if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value == int(value) and 10_000_000 <= value <= 99_999_999:
+            try:
+                return datetime.strptime(str(int(value)), "%Y%m%d").date()
+            except ValueError:
+                return None
+        if value == int(value) and 101 <= value <= 1231:
+            # 历史模板用 MMDD 数字；必须有已确认的年份，不能按 Excel 序号解读。
+            if reference is None:
+                return None
+            try:
+                return date(reference.year, int(value) // 100, int(value) % 100)
+            except ValueError:
+                return None
         try:
             converted = from_excel(value, epoch)
         except (TypeError, ValueError, OverflowError):
             return None
         return converted.date() if isinstance(converted, datetime) else converted
     if isinstance(value, str):
-        for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"):
             try:
                 return datetime.strptime(value.strip(), fmt).date()
             except ValueError:
@@ -349,6 +364,7 @@ def _read_workbook_groups(path: Path) -> dict[date, WorkbookGroup]:
     if path.suffix.lower() != ".xlsx":
         raise ValueError(f"仅支持 .xlsx 工作簿：{path}")
     workbook = openpyxl.load_workbook(path, data_only=False, read_only=True)
+    cached = openpyxl.load_workbook(path, data_only=True, read_only=True)
     try:
         if SHEET_NAME not in workbook.sheetnames:
             raise RuntimeError(f"工作簿中没有工作表 {SHEET_NAME}。")
@@ -359,26 +375,31 @@ def _read_workbook_groups(path: Path) -> dict[date, WorkbookGroup]:
         def finish_group():
             if tail is None:
                 return
-            if tuple(labels) != CATEGORY_ORDER or tuple(right_labels) != CATEGORY_ORDER:
+            if (len(labels) != len(CATEGORY_ORDER) or set(labels) != set(CATEGORY_ORDER)
+                    or right_labels != labels):
                 raise RuntimeError(f"最后一组字段顺序异常或历史组不完整：第 {tail.start_row} 行。")
             if tail.day_ahead_date - tail.actual_date != timedelta(days=DATE_OFFSET_DAYS):
                 raise RuntimeError(f"第 {tail.start_row} 行日期不符合 D / D-{DATE_OFFSET_DAYS}。")
             if tail.day_ahead_date in groups:
                 raise ValueError(f"工作簿存在重复日前日期：{tail.day_ahead_date}")
-            groups[tail.day_ahead_date] = WorkbookGroup(tail, dict(cells), dict(formulas))
+            groups[tail.day_ahead_date] = WorkbookGroup(tail, dict(cells), dict(formulas), tuple(labels))
 
-        for row, values in enumerate(workbook[SHEET_NAME].iter_rows(
-            min_col=3, max_col=15,
+        for row, (values, date_values) in enumerate(zip(
+            workbook[SHEET_NAME].iter_rows(min_col=3, max_col=15),
+            cached[SHEET_NAME].iter_rows(min_col=3, max_col=10),
         ), start=1):
             if values[1].value == "统调" and values[8].value == "统调":
-                day = _as_date(values[0].value, epoch=workbook.epoch)
-                actual = _as_date(values[7].value, epoch=workbook.epoch)
-                if day and actual:
-                    finish_group()
-                    tail = WorkbookTail(row, day, actual)
-                    cells, formulas, labels, right_labels = {}, {}, [], []
+                reference = tail.day_ahead_date + timedelta(days=1) if tail else None
+                day = _as_date(date_values[0].value, epoch=workbook.epoch, reference=reference)
+                actual = _as_date(date_values[7].value, epoch=workbook.epoch,
+                                  reference=day - timedelta(days=DATE_OFFSET_DAYS) if day else None)
+                if day is None or actual is None:
+                    raise RuntimeError(f"第 {row} 行日期无法识别；简写日期需要前一组完整日期，日期公式需要有效缓存。")
+                finish_group()
+                tail = WorkbookTail(row, day, actual)
+                cells, formulas, labels, right_labels = {}, {}, [], []
             if tail is not None and row < tail.start_row + len(CATEGORY_ORDER):
-                category = CATEGORY_ORDER[row - tail.start_row]
+                category = values[1].value
                 labels.append(values[1].value)
                 right_labels.append(values[8].value)
                 columns = (() if category == "西电" else (5, 6, 7, 8)) + (12, 13, 14, 15)
@@ -398,6 +419,7 @@ def _read_workbook_groups(path: Path) -> dict[date, WorkbookGroup]:
         return groups
     finally:
         workbook.close()
+        cached.close()
 
 
 def inspect_workbook_tail(path: Path) -> WorkbookTail:
@@ -558,9 +580,10 @@ def _build_group_rows(
     pair: DailyLoadPair,
     epoch,
     row_index: dict[str, str] | None = None,
+    categories: tuple[str, ...] = CATEGORY_ORDER,
 ) -> str:
     rows: list[str] = []
-    for offset, category in enumerate(CATEGORY_ORDER):
+    for offset, category in enumerate(categories):
         source_row = template_start + offset
         target_row = target_start + offset
         row_xml = _renumber_row(_row_xml(xml_text, source_row, row_index=row_index), source_row, target_row)
@@ -580,11 +603,11 @@ def _build_group_rows(
     return "".join(rows)
 
 
-def _native_append_rows(template_start, pairs, epoch):
+def _native_append_rows(template_start, pairs, epoch, categories=CATEGORY_ORDER):
     first_row = template_start + GROUP_HEIGHT
     native_rows = []
     for index, pair in enumerate(pairs):
-        for offset, category in enumerate(CATEGORY_ORDER):
+        for offset, category in enumerate(categories):
             target_row = first_row + index * GROUP_HEIGHT + offset
             changes = {}
             if offset == 0:
@@ -603,9 +626,10 @@ def patch_sheet_xml(
     template_start: int,
     pairs: tuple[DailyLoadPair, ...],
     epoch,
+    categories: tuple[str, ...] = CATEGORY_ORDER,
 ) -> tuple[bytes, int, int]:
     first_row = template_start + GROUP_HEIGHT
-    native = native_workbook.append_rows_xml(xml_bytes, _native_append_rows(template_start, pairs, epoch))
+    native = native_workbook.append_rows_xml(xml_bytes, _native_append_rows(template_start, pairs, epoch, categories))
     if native is not None:
         return native, first_row, first_row + (len(pairs) - 1) * GROUP_HEIGHT + 5
     xml_text = xml_bytes.decode("utf-8")
@@ -622,6 +646,7 @@ def patch_sheet_xml(
                 pair=pair,
                 epoch=epoch,
                 row_index=row_index,
+                categories=categories,
             )
         )
     if "</sheetData>" not in xml_text:
@@ -657,6 +682,7 @@ def _write_patched_workbook(
     template_start: int,
     pairs: tuple[DailyLoadPair, ...],
     changes: dict[str, int | float] | None = None,
+    categories: tuple[str, ...] = CATEGORY_ORDER,
 ) -> tuple[int, int]:
     changes = changes or {}
     sheet_part = xlsx_sheet_paths(original).get(SHEET_NAME)
@@ -668,7 +694,7 @@ def _write_patched_workbook(
     finally:
         workbook.close()
     if native_workbook.patch_package(original, temporary, {SHEET_NAME: changes},
-            append={SHEET_NAME: _native_append_rows(template_start, pairs, epoch)} if pairs else {}) is not None:
+            append={SHEET_NAME: _native_append_rows(template_start, pairs, epoch, categories)} if pairs else {}) is not None:
         verify_package_preservation(original, temporary, sheet_part)
         first_row = template_start + GROUP_HEIGHT if pairs else template_start
         return first_row, first_row + (len(pairs) - 1) * GROUP_HEIGHT + 5 if pairs else first_row + 5
@@ -698,6 +724,7 @@ def _write_patched_workbook(
                 if pairs:
                     data, first_row, last_row = patch_sheet_xml(
                         data, template_start=template_start, pairs=pairs, epoch=epoch,
+                        categories=categories,
                     )
                 else:
                     first_row, last_row = template_start, template_start + 5
@@ -744,7 +771,7 @@ def verify_workbook(path: Path, prepared: PreparedWorkbook) -> None:
                     f"日期回读失败：第 {start} 行，"
                     f"日前 {day_date} / 实际 {actual_date}"
                 )
-            for offset, category in enumerate(CATEGORY_ORDER):
+            for offset, category in enumerate(prepared.categories):
                 row = start + offset
                 if value(row, 4) != category or value(row, 11) != category:
                     raise RuntimeError(f"字段顺序回读失败：第 {row} 行。")
@@ -811,7 +838,7 @@ def prepare_workbook(path: Path, pairs: Iterable[DailyLoadPair], *, overwrite: b
             for coordinate, snapshot in group.cells.items():
                 if snapshot[0] not in (None, ""):
                     preserved_cells[coordinate] = snapshot
-        for offset, category in enumerate(CATEGORY_ORDER):
+        for offset, category in enumerate(group.categories):
             row = group.tail.start_row + offset
             values = dict(zip(("L", "M", "N", "O"), pair.actual[category]))
             if category != "西电":
@@ -828,10 +855,12 @@ def prepare_workbook(path: Path, pairs: Iterable[DailyLoadPair], *, overwrite: b
     try:
         first_row, last_row = _write_patched_workbook(
             original, temporary, template_start=tail.start_row, pairs=appended, changes=changes,
+            categories=groups[tail.day_ahead_date].categories,
         )
         prepared = PreparedWorkbook(
             original, temporary, source_fingerprint, first_row, last_row, appended, tuple(expectations),
             preserved_cells=dict(preserved_cells),
+            categories=groups[tail.day_ahead_date].categories,
         )
         verify_workbook(temporary, prepared)
         assert_workbook_unchanged(original, source_fingerprint)

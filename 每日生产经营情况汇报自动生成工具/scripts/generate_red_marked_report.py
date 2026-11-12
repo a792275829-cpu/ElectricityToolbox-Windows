@@ -962,19 +962,47 @@ def build_online_energy_text(date_text: str, energy: dict[str, Any], price_summa
     )
 
 
+ONLINE_ENERGY_SENTENCE_END = "\uff1b;"
+ONLINE_PRICE_SENTENCE_MARKER = "\u5206\u516c\u53f8\u65e5\u524d\u5747\u4ef7"
+
+
+def split_online_energy_sentence(text: str) -> str:
+    """取出段落里的电量句（含分隔用的分号），均价句部分丢弃。
+
+    以「分公司日前均价」定位均价句，再回退到它前面的分号，避免电量句内部再出现
+    分号时被截断；找不到标记时整段都视为电量句。
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return ""
+    marker = stripped.find(ONLINE_PRICE_SENTENCE_MARKER)
+    if marker < 0:
+        return stripped
+    head = stripped[:marker]
+    cut = max(head.rfind("\uff1b"), head.rfind(";"))
+    return head[: cut + 1] if cut >= 0 else head
+
+
 def build_online_pending_segments(
-    date_text: str, price_summary: dict[str, Any]
+    template_text: str, date_text: str, price_summary: dict[str, Any]
 ) -> list[tuple[str, bool]]:
-    """D-1 上网电量未出数时的段落分段：电量留待补提示（红字），日前均价照常更新（黑字）。
+    """D-1 上网电量未出数时的段落分段：电量句原样沿用模板文字（红字待人工填），均价照常更新（黑字）。
 
     均价与电量原本同属一段，电量取不到时整段被冻结，导致「快报  (日前)」已有的
-    均价数一并停在模板旧值。这里把两者拆开：电量缺失只影响电量句，且以红字提
-    示待补，均价仍按当日工作簿重写为黑字。
+    均价数一并停在模板旧值。这里把两者拆开：电量缺失只保留模板那句（含原数字，
+    标红提示需要人工核对填写），均价仍按当日工作簿重写为黑字。电量句不做任何
+    改写，只把段首日期换成 D-1，方便直接对着日期填数。
     """
-    return [
-        (f"{date_label(date_text)}分公司上网电量待补充（当日尚未出数）；", True),
-        (format_ahead_price_sentence(price_summary), False),
-    ]
+    energy_sentence = replace_leading_month_day(
+        split_online_energy_sentence(template_text), date_label(date_text)
+    )
+    segments: list[tuple[str, bool]] = []
+    if energy_sentence:
+        if energy_sentence[-1] not in ONLINE_ENERGY_SENTENCE_END:
+            energy_sentence += "\uff1b"
+        segments.append((energy_sentence, True))
+    segments.append((format_ahead_price_sentence(price_summary), False))
+    return segments
 
 
 def _cell_number(sheet, row: int, column: int) -> float | None:
@@ -1030,20 +1058,32 @@ def _add(*values: float | None) -> float | None:
 
 
 def _weighted_price(pairs: list[tuple[float | None, float | None]]) -> float | None:
+    if any(weight is None or (weight != 0 and price is None) for weight, price in pairs):
+        return None
     usable = [(weight, price) for weight, price in pairs if weight and price is not None]
-    total = sum(weight for weight, _ in usable)
+    total = _price_denominator([weight for weight, _ in usable])
     if not total:
         return None
     return sum(weight * price for weight, price in usable) / total
 
 
+def _price_denominator(values: list[float | None]) -> float | None:
+    if any(value is None for value in values):
+        return None
+    total = math.fsum(values)
+    # Excel 约 15 位有效数字；正负电量抵消后的末位尾差应视为零分母。
+    precision = sum(abs(value) for value in values) * 1e-14
+    return 0.0 if abs(total) <= precision else total
+
+
 def _energy_price(total_fee: float | None, capacity_fee: float | None,
                   online_energy: float | None) -> float | None:
     if not online_energy:
-        return 0.0
-    if total_fee is None:
+        # 分母为零或缺失时均价无定义，对应 Excel #DIV/0!，报告统一显示斜杠。
         return None
-    return (total_fee - (capacity_fee or 0.0)) / online_energy * 1000
+    if total_fee is None or capacity_fee is None:
+        return None
+    return (total_fee - capacity_fee) / online_energy * 1000
 
 
 def _fire_row(sheet, row: int) -> dict[str, float | None]:
@@ -1059,7 +1099,7 @@ def _fire_table_values(source: dict[str, float | None], *, spot_income: float | 
                        composite_price: float | None, blank_online: bool = False,
                        spot_blank: bool = False) -> dict[int, str]:
     long_term_income = source.get("中长期收益")
-    returns = None if spot_income is None else spot_income + (long_term_income or 0.0)
+    returns = _add(spot_income, long_term_income)
     return {
         3: _clear_int(source.get("中长期电量")),
         4: _clear_int(source.get("中长期电价")),
@@ -1089,7 +1129,7 @@ def _fire_table_values(source: dict[str, float | None], *, spot_income: float | 
 def _renewable_table_values(source: dict[str, float | None]) -> dict[int, str]:
     long_term_income = source.get("中长期收益")
     spot_income = source.get("现货收益")
-    returns = None if spot_income is None else spot_income + (long_term_income or 0.0)
+    returns = _add(spot_income, long_term_income)
     return {
         3: _clear_int(source.get("中长期电量")),
         4: _clear_int(source.get("中长期电价")),
@@ -1154,8 +1194,9 @@ def load_daily_clearing_inputs(date_text: str,
                 (shantou_2.get(weight_name), shantou_2.get(name)),
                 (shantou_3.get(weight_name), shantou_3.get(name)),
             ])
-        denominator = _add(shantou_3.get("中长期电量"), shantou_3.get("现货电量"),
-                           shantou_2.get("中长期电量"), shantou_2.get("现货电量"))
+        denominator_parts = [shantou_3.get("中长期电量"), shantou_3.get("现货电量"),
+                             shantou_2.get("中长期电量"), shantou_2.get("现货电量")]
+        denominator = _price_denominator(denominator_parts)
         if denominator and shantou_2.get("总电费") is not None and shantou_3.get("总电费") is not None:
             combined["综合电价"] = (shantou_2["总电费"] + shantou_3["总电费"]) / denominator * 1000
         else:
@@ -1212,8 +1253,9 @@ def load_daily_clearing_inputs(date_text: str,
                 composite_price=dongguan.get("综合电价"))),
             ("清远", None, _fire_table_values(
                 qingyuan, spot_income=None, total_fee=qingyuan.get("总电费"),
-                energy_price=0.0,
-                composite_price=qingyuan.get("综合电价") or 0.0,
+                energy_price=_energy_price(qingyuan.get("总电费"), qingyuan.get("容量电费"),
+                                           qingyuan.get("上网电量")),
+                composite_price=qingyuan.get("综合电价"),
                 blank_online=True, spot_blank=True)),
         ]
 
@@ -1857,15 +1899,55 @@ def subject_by_code(payload: dict[str, Any], code: str) -> dict[str, Any]:
     raise KeyError(code)
 
 
-def build_strategy_text(payload: dict[str, Any]) -> str:
+def load_day_ahead_market_summary(date_text: str, workbook_path: Path | None = None) -> str:
+    """直接采用指定日期快报（日前）A41 的市场开机及全省日前均价原文。"""
+    source = resolve_day_ahead_workbook(workbook_path, date_text)
+    if source is None:
+        raise FileNotFoundError(f"未找到 {date_text} 的出清情况工作簿，无法读取市场简析 A41")
+    workbook = _open_clearing_workbook(source)
+    try:
+        sheet_name = next(
+            (name for name in workbook.sheetnames if "快报" in name and "日前" in name), None
+        )
+        if sheet_name is None:
+            raise ValueError(f"{source.name} 中未找到快报（日前）工作表")
+        value = workbook[sheet_name].cell(row=41, column=1).value
+        # 先隔离首项市场简析，避免缺句时误读后面的厂级策略。
+        text = re.split(r"\n\s*[2-9]\d*[.、．]", str(value or ""), maxsplit=1)[0]
+        text = re.sub(r"\s+", "", text)
+        startup = re.search(r"市场(?:机组)?开机", text)
+        price = re.search(r"(?:全省)?日前(?:出清)?(?:均价|平均电价|平均价)", text)
+        if startup is None or price is None:
+            raise ValueError(f"{source.name}「快报（日前）」A41 缺少市场开机或全省日前均价整句")
+
+        def sentence_end(start: int) -> int:
+            # 英文句号只在不是小数点时作为句末；不解析数字、单位和涨跌措辞。
+            ending = re.search(r"[。！？!?]|(?<!\d)\.(?!\d)", text[start:])
+            return start + ending.end() if ending else len(text)
+
+        # 两项常以逗号连接为一句，也可能各自独立成句；合句只复制一次。
+        spans = sorted((match.start(), sentence_end(match.start())) for match in (startup, price))
+        sentences: list[str] = []
+        last_end = -1
+        for start, end in spans:
+            if start < last_end:
+                continue
+            sentence = text[start:end]
+            if sentence[-1] not in "。！？!?.":
+                sentence += "。"
+            sentences.append(sentence)
+            last_end = end
+        return "".join(sentences)
+    finally:
+        workbook.close()
+
+
+def build_strategy_text(payload: dict[str, Any], *, market_summary: str) -> str:
     load = subject_by_code(payload, "1")
     a_power = subject_by_code(payload, "2")
     local = subject_by_code(payload, "3")
-    price = next(row for row in payload["priceBoard"]["rows"] if row["dataType"] == "PRE")
     public_data = payload.get("operationPublicData") or {}
     capacity = (public_data.get("capacity") or {}).get("selected", {}).get("capacityWanKw")
-    startup = (public_data.get("startupCount") or {}).get("selected", {}).get("maxStartupCount")
-    startup_diff = (public_data.get("startupCount") or {}).get("difference")
     load_max = metric(load, "\u6700\u5927\u503c(MW)")
     load_min = metric(load, "\u6700\u5c0f\u503c(MW)")
     a_avg = metric(a_power, "\u5e73\u5747\u503c(MW)")
@@ -1879,10 +1961,7 @@ def build_strategy_text(payload: dict[str, Any]) -> str:
         f"A\u7c7b\u7535\u6e90\u51fa\u529b{change_word(a_avg['difference'])}\u3001"
         f"\u5730\u65b9\u7535\u6e90\u51fa\u529b{change_word(local_avg['difference'])}\u3002"
         f"\u68c0\u4fee\u5bb9\u91cf{fmt_number(capacity)}\u4e07\u5343\u74e6\u3002"
-        f"\u5e02\u573a\u5f00\u673a\u53f0\u6570{fmt_number(startup)}\u53f0\uff0c"
-        f"\u73af\u6bd4{startup_change_text(startup_diff)}\uff0c"
-        f"\u5168\u7701\u65e5\u524d\u51fa\u6e05\u5747\u4ef7{fmt_number(price['selectedDailyAvgPrice'], 2)}\u5143/\u5146\u74e6\u65f6\uff0c"
-        f"\u73af\u6bd4{delta_phrase(price['difference'], unit=UNIT_YUAN_PER_MWH, digits=2)}\u3002"
+        f"{market_summary}"
     )
 
 
@@ -1918,16 +1997,13 @@ def market_price_item(market_data: dict[str, Any], data_type: str) -> dict[str, 
     return next(row for row in market_data["priceBoard"]["rows"] if row["dataType"] == data_type)
 
 
-def build_day_ahead_market_text(payload: dict[str, Any]) -> str:
+def build_day_ahead_market_text(payload: dict[str, Any], *, market_summary: str) -> str:
     market_data = payload["marketAnalysisData"]
     load = load_info_item(market_data, "1", "dayAhead")
     a_power = load_info_item(market_data, "2", "dayAhead")
     local = load_info_item(market_data, "3", "dayAhead")
-    price = market_price_item(market_data, "PRE")
     public_data = market_data.get("operationPublicData") or {}
     capacity = (public_data.get("capacity") or {}).get("selected", {}).get("capacityWanKw")
-    startup = (public_data.get("startupCount") or {}).get("selected", {}).get("maxStartupCount")
-    startup_diff = (public_data.get("startupCount") or {}).get("difference")
     selected = load["selected"]
     return (
         f"\u8fd0\u884c\u65e5\u7edf\u8c03\u8d1f\u8377\u9700\u6c42{load_trend_word(load.get('maxDiff') or 0)}\uff0c"
@@ -1938,18 +2014,25 @@ def build_day_ahead_market_text(payload: dict[str, Any]) -> str:
         f"A\u7c7b\u7535\u51fa\u529b{change_word(a_power.get('avgDiff') or 0)}\u3001"
         f"\u5730\u65b9\u7535\u51fa\u529b{change_word(local.get('avgDiff') or 0)}\uff0c"
         f"\u68c0\u4fee\u5bb9\u91cf{fmt_number(capacity)}\u4e07\u5343\u74e6\u3002"
-        f"\u5e02\u573a\u5f00\u673a\u53f0\u6570{fmt_number(startup)}\u53f0\uff0c"
-        f"\u73af\u6bd4{startup_change_text(startup_diff)}\uff0c"
-        f"\u5168\u7701\u65e5\u524d\u51fa\u6e05\u5747\u4ef7{fmt_number(price['selectedDailyAvgPrice'], 2)}\u5143/\u5146\u74e6\u65f6\uff0c"
-        f"\u73af\u6bd4{delta_phrase(price['difference'], unit=UNIT_YUAN_PER_MWH, digits=2)}\u3002"
+        f"{market_summary}"
     )
+
+
+def actual_vs_day_ahead_change(market_data: dict[str, Any], load_type: str) -> str:
+    """实时市场出力趋势：清分日实际平均值对比同日日前平均值。"""
+    summaries = market_data["loadInfo"]["byType"][load_type]
+    actual = (summaries.get("actual") or {}).get("selected", {}).get("avg")
+    forecast = (summaries.get("dayAhead") or {}).get("selected", {}).get("avg")
+    if actual is None or forecast is None:
+        return "待核对"
+    if actual == forecast:
+        return "持平"
+    return change_word(actual - forecast)
 
 
 def build_actual_market_text(payload: dict[str, Any]) -> str:
     market_data = payload["marketAnalysisData"]
     load = load_info_item(market_data, "1", "actual")
-    a_power = load_info_item(market_data, "2", "actual")
-    local = load_info_item(market_data, "3", "actual")
     b_space = load_info_item(market_data, "6", "actual")
     price = market_price_item(market_data, "RT")
     selected = load["selected"]
@@ -1958,8 +2041,8 @@ def build_actual_market_text(payload: dict[str, Any]) -> str:
         f"\u5b9e\u65f6\u7edf\u8c03\u8d1f\u8377\u9700\u6c42{load_trend_word(load.get('maxDiff') or 0)}\uff0c"
         f"\u5168\u5929\u6700\u5927\u503c{fmt_mw_as_10k_kw(selected.get('max'))}\u4e07\u5343\u74e6\uff0c"
         f"\u6700\u5c0f\u503c{fmt_mw_as_10k_kw(selected.get('min'))}\u4e07\u5343\u74e6\uff0c"
-        f"A\u7c7b\u7535\u51fa\u529b{change_word(a_power.get('avgDiff') or 0)}\u3001"
-        f"\u5730\u65b9\u7535\u51fa\u529b{change_word(local.get('avgDiff') or 0)}\uff0c"
+        f"A\u7c7b\u7535\u51fa\u529b{actual_vs_day_ahead_change(market_data, '2')}\u3001"
+        f"\u5730\u65b9\u7535\u51fa\u529b{actual_vs_day_ahead_change(market_data, '3')}\uff0c"
         f"B\u7c7b\u7ade\u4ef7\u7a7a\u95f4\u5168\u5929\u6700\u5927\u503c{fmt_mw_as_10k_kw(b_selected.get('max'))}\u4e07\u5343\u74e6\uff0c"
         f"\u6700\u5c0f\u503c{fmt_mw_as_10k_kw(b_selected.get('min'))}\u4e07\u5343\u74e6\uff0c"
         f"\u5168\u5929\u5b9e\u65f6\u5747\u4ef7{fmt_number(price['selectedDailyAvgPrice'], 2)}\u5143/\u5146\u74e6\u65f6\u3002"
@@ -2149,6 +2232,13 @@ def generate(
         output_dir,
         prefer_previous_report=prefer_previous_template,
     )
+    market_summary = load_day_ahead_market_summary(plan["dayAheadDate"], day_ahead_workbook)
+    daily_clearing_workbook = resolve_day_ahead_workbook(
+        daily_clearing_workbook, plan["dailyClearingDate"]
+    )
+    daily_market_summary = load_day_ahead_market_summary(
+        plan["dailyClearingDate"], daily_clearing_workbook
+    )
     payload = run_daily_data(
         selected_date=plan["loadAndPriceSelectedDate"],
         compare_date=plan["loadAndPriceCompareDate"],
@@ -2202,23 +2292,26 @@ def generate(
         )
         clear_paragraph_red(online_paragraph)
     else:
-        # D-1 上网电量尚未出数时不能只改日期：留在模板里的旧数字会被误认为当天的量。
+        # D-1 上网电量尚未出数时不能凭空造数：电量句原样留在模板里（红字），
+        # 只更新均价，避免「快报  (日前)」已有的均价跟着旧数一起冻结。
         if online_energy_error is None:
             online_energy_error = (
                 f"{date_label(plan['actualOnlineEnergyDate'])} 的上网电量为 0（尚未出数），"
-                "电量句改为待补提示"
+                "电量句保留模板原文待人工填写"
             )
-        log(f"上网电量未取数，电量句改为待补提示（红字），日前均价仍按「快报  (日前)」更新：{online_energy_error}")
+        log(f"上网电量未取数，电量句保留模板原文（红字待填），日前均价仍按「快报  (日前)」更新：{online_energy_error}")
         # 电量缺失只冻结电量句，均价与日期照常更新：两者原本同属一段，一旦整段保留
         # 模板原文，均价会连同旧数一起留在报告里，看不出与表格数据不一致。
         replace_paragraph_segments(
             online_paragraph,
-            build_online_pending_segments(plan["actualOnlineEnergyDate"], online_prices),
+            build_online_pending_segments(
+                online_paragraph.text, plan["actualOnlineEnergyDate"], online_prices
+            ),
         )
     replace_paragraph(day_ahead_paragraph, build_day_ahead_clearing_text(plan["dayAheadDate"], day_ahead_clearing))
 
     strategy_heading = find_exact_paragraph(doc, "三、现货交易策略")
-    replace_paragraph(next_nonempty_paragraph(doc, strategy_heading), build_strategy_text(payload))
+    replace_paragraph(next_nonempty_paragraph(doc, strategy_heading), build_strategy_text(payload, market_summary=market_summary))
     # 粤东 500kV 线路信息不是每日固定内容，模板里带的那段直接删掉。
     remove_east_guangdong_section(doc)
     plant_strategy_source = day_ahead_workbook
@@ -2244,7 +2337,7 @@ def generate(
     clear_auto_section_red(doc, spot_filled=spot_filled)
     day_ahead_heading = find_exact_paragraph(doc, "1.日前市场")
     day_ahead_paragraph = next_nonempty_paragraph(doc, day_ahead_heading)
-    replace_paragraph(day_ahead_paragraph, build_day_ahead_market_text(payload))
+    replace_paragraph(day_ahead_paragraph, build_day_ahead_market_text(payload, market_summary=daily_market_summary))
     highlight_negative_numbers(day_ahead_paragraph)
     actual_heading = find_exact_paragraph(doc, "2.实时市场")
     actual_paragraph = next_nonempty_paragraph(doc, actual_heading)
@@ -2319,11 +2412,13 @@ def generate(
         "plantStrategiesFilled": filled_plants,
         "plantStrategiesMissing": missing_plants,
         "plantStrategiesSource": str(plant_strategy_source) if plant_strategy_source else None,
+        "dayAheadMarketSummarySource": {"file": str(day_ahead_workbook), "sheet": "快报(日前)", "cell": "A41"},
+        "dailyClearingMarketSummarySource": {"file": str(daily_clearing_workbook), "date": plan["dailyClearingDate"], "sheet": "快报(日前)", "cell": "A41"},
         "onlineEnergyError": online_energy_error,
         "dailyClearingError": daily_clearing_error,
         "weatherError": weather_error,
         "knownGaps": [
-            "上网电量取 D-1 出清情况工作簿「快报」表：火电三厂与清远取 J 列，新能源取 K 列，总数为 J7＋新能源合计；D-1 尚未出数（全为 0）时，电量句改写为「上网电量待补充」并标红，日前均价仍按「快报  (日前)」更新为黑字。",
+            "上网电量取 D-1 出清情况工作簿「快报」表：火电三厂与清远取 J 列，新能源取 K 列，总数为 J7＋新能源合计；D-1 尚未出数（全为 0）时，电量句保留模板原文并标红待人工填写（只把段首日期换成 D-1），日前均价仍按「快报  (日前)」更新为黑字。",
             "P14 日前出清电量和日前价格来自报告日出清情况 Excel；火电取快报（日前）F/G，新能源按表头取 G/H，清远计划电量按「清远上网电量」表头与「合计」标签动态定位基础信息 AA/AC 行后除以10，并计入分公司总电量。",
             "P29 未来三天最高负荷来源尚未确认，暂不替换。",
             "日清分表取 D-2 日出清情况工作簿「快报」表；分公司现货偏差收益按各厂合计（汕头/东莞取现货偏差合计边际贡献，海门取三项偏差边际贡献之和）。",

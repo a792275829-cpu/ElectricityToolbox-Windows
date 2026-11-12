@@ -197,7 +197,7 @@ async function collectPlan(sourceDir) {
       }
       const unitEntries = entriesByDirectory.get(unitDir);
       for (const entry of unitEntries) {
-        if (entry.isFile() && isExcelFile(entry.name)) {
+        if (entry.isFile() && isExcelFile(entry.name) && !entry.name.includes('节点电价查询')) {
           files.push(path.join(unitDir, entry.name));
         }
       }

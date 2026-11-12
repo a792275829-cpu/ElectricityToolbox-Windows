@@ -4,6 +4,7 @@ import tempfile
 import subprocess
 import sys
 import unittest
+import zipfile
 from unittest import mock
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -12,8 +13,96 @@ import openpyxl
 
 from toolbox.runtime import ToolPaths, load_module
 
+TOOLBOX_TEST_TAGS = ()
+
 
 class TransactionInfoUpdateTests(unittest.TestCase):
+    def test_cached_date_formulas_are_read_without_changing_formulas(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cached.xlsx"
+            self._build_fixture(path)
+            book = openpyxl.load_workbook(path)
+            book["Sheet1"]["C1"] = "=DATE(2026,9,10)"
+            book["Sheet1"]["J1"] = "=C1-3"
+            book.save(path)
+            book.close()
+            with self.assertRaisesRegex(RuntimeError, "日期公式需要有效缓存"):
+                self.module.inspect_workbook_tail(path)
+            cached = path.with_name("with-cache.xlsx")
+            with zipfile.ZipFile(path) as source, zipfile.ZipFile(cached, "w") as result:
+                for info in source.infolist():
+                    data = source.read(info.filename)
+                    if info.filename == "xl/worksheets/sheet1.xml":
+                        text = data.decode("utf-8")
+                        text = text.replace("<f>DATE(2026,9,10)</f><v></v>",
+                                            "<f>DATE(2026,9,10)</f><v>46275</v>")
+                        text = text.replace("<f>C1-3</f><v></v>", "<f>C1-3</f><v>46272</v>")
+                        data = text.encode("utf-8")
+                    result.writestr(info, data)
+            before = cached.read_bytes()
+            tail = self.module.inspect_workbook_tail(cached)
+            self.assertEqual(tail.day_ahead_date, date(2026, 9, 10))
+            self.assertEqual(tail.actual_date, date(2026, 9, 7))
+            self.assertEqual(cached.read_bytes(), before)
+
+    def test_legacy_dates_use_anchored_year_and_reject_unanchored_short_dates(self):
+        epoch = openpyxl.utils.datetime.WINDOWS_EPOCH
+        parse = self.module._as_date
+        self.assertEqual(parse(20241231, epoch=epoch), date(2024, 12, 31))
+        self.assertEqual(parse(101, epoch=epoch, reference=date(2025, 1, 1)), date(2025, 1, 1))
+        self.assertEqual(parse(1229, epoch=epoch, reference=date(2024, 12, 29)), date(2024, 12, 29))
+        self.assertIsNone(parse(815, epoch=epoch))
+        self.assertIsNone(parse(230, epoch=epoch, reference=date(2025, 2, 28)))
+
+    def test_mixed_historical_layouts_and_short_dates_write_by_label(self):
+        for backend in ("python", "rust"):
+            with self.subTest(backend=backend), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "legacy.xlsx"
+                self._build_fixture(path)
+                book = openpyxl.load_workbook(path)
+                sheet = book["Sheet1"]
+                sheet["C1"], sheet["J1"] = 20241231, 20241228
+                sheet["C1"].number_format = sheet["J1"].number_format = "General"
+                for row in range(1, 7):
+                    for col in range(3, 16):
+                        sheet.cell(row + 7, col, sheet.cell(row, col).value)
+                        sheet.cell(row + 7, col).number_format = sheet.cell(row, col).number_format
+                sheet["C8"], sheet["J8"] = 101, 1229
+                for col in (4, 11):
+                    sheet.cell(10, col, "A类")
+                    sheet.cell(11, col, "西电")
+                for col in range(5, 9):
+                    sheet.cell(10, col).value = None
+                    sheet.cell(11, col).value = None
+                    sheet.cell(10, col).number_format = "0.0000"
+                    sheet.cell(11, col).number_format = "0.0000"
+                book.save(path)
+                book.close()
+                groups = self.module._read_workbook_groups(path)
+                self.assertEqual(tuple(groups), (date(2024, 12, 31), date(2025, 1, 1)))
+                days = (date(2025, 1, 1), date(2025, 1, 2))
+                pairs = tuple(self.module.build_daily_load_pair(
+                    day, self._payload(day), self._payload(day - timedelta(days=3))) for day in days)
+                with mock.patch.dict("os.environ", {"TOOLBOX_DOMAIN_BACKEND": backend}):
+                    prepared = self.module.prepare_workbook(path, pairs, overwrite=True)
+                    self.module.commit_prepared_workbook(prepared, create_backup=False)
+                book = openpyxl.load_workbook(path)
+                try:
+                    sheet = book["Sheet1"]
+                    for start in (8, 15):
+                        self.assertEqual(sheet.cell(start + 2, 4).value, "A类")
+                        self.assertEqual(sheet.cell(start + 2, 5).value, 4000)
+                        self.assertEqual(sheet.cell(start + 2, 5).number_format, "0.0000")
+                        self.assertEqual(sheet.cell(start + 3, 4).value, "西电")
+                        self.assertIsNone(sheet.cell(start + 3, 5).value)
+                        self.assertEqual(sheet.cell(start + 3, 12).value, 3000)
+                    self.assertEqual(sheet["C1"].value, 20241231)
+                    self.assertEqual(sheet["C8"].value, 101)
+                    self.assertEqual(self.module._as_date(sheet["C15"].value, epoch=book.epoch), days[-1])
+                    self.assertEqual(self.module._as_date(sheet["J15"].value, epoch=book.epoch), date(2024, 12, 30))
+                finally:
+                    book.close()
+
     def test_commit_rejects_external_save_and_preserves_other_sheet(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "transaction.xlsx"

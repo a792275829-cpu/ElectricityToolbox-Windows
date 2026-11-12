@@ -6,7 +6,9 @@ import unittest
 from pathlib import Path
 
 from docx import Document
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
+
+TOOLBOX_TEST_TAGS = ()
 
 from generate_red_marked_report import (
     LOCAL_TEMPLATE_PATH,
@@ -14,6 +16,8 @@ from generate_red_marked_report import (
     fill_daily_clearing_table,
     fill_spot_deviation_analysis,
     load_daily_clearing_inputs,
+    _document_row_index,
+    FIRE_COLUMNS, RENEWABLE_COLUMNS, _energy_price, _weighted_price,
 )
 
 
@@ -127,6 +131,96 @@ def _build_workbook(path: Path) -> None:
 
 
 class DailyClearingFillTests(unittest.TestCase):
+    def test_excel_errors_do_not_become_zero_anywhere_in_table(self) -> None:
+        for error in ("#DIV/0!", "#VALUE!", "#N/A", None):
+            with self.subTest(error=error):
+                book = load_workbook(self.workbook_path)
+                sheet = book["快报"]
+                for row in (7, 8, 9, 10, 11, 13, 19, 25):
+                    for column in FIRE_COLUMNS.values():
+                        sheet.cell(row, column).value = error
+                for row in (31, 32, 33, 34):
+                    for column in RENEWABLE_COLUMNS.values():
+                        sheet.cell(row, column).value = error
+                book.save(self.workbook_path)
+                book.close()
+                data = load_daily_clearing_inputs("2026-11-02", self.workbook_path)
+                for label, sub, values in data["rows"]:
+                    self.assertEqual(set(values.values()), {"/"}, (error, label, sub, values))
+                document = Document(LOCAL_TEMPLATE_PATH)
+                fill_daily_clearing_table(document.tables[0], data["rows"])
+                target = Path(self._directory.name) / "all_errors.docx"
+                document.save(target)
+                table = Document(target).tables[0]
+                for label, sub, values in data["rows"]:
+                    row = _document_row_index(table, label, sub)
+                    self.assertIsNotNone(row)
+                    for column in values:
+                        self.assertEqual(table.cell(row, column - 1).text.strip(), "/",
+                                         (label, sub, column))
+
+    def test_missing_components_propagate_to_derived_values(self) -> None:
+        self.assertIsNone(_energy_price(100, None, 200))
+        self.assertIsNone(_weighted_price([(100, None), (200, 500)]))
+        self.assertIsNone(_weighted_price([(None, 400), (200, 500)]))
+        self.assertEqual(_weighted_price([(0, None), (200, 500)]), 500)
+        self.assertIsNone(_weighted_price([(750.240066521406, 400), (-750.240066521407, 500)]))
+        self.assertAlmostEqual(_weighted_price([(0.000001, 500)]), 500)
+        book = load_workbook(self.workbook_path)
+        sheet = book["快报"]
+        sheet.cell(8, FIRE_COLUMNS["中长期收益"]).value = "#DIV/0!"
+        sheet.cell(31, RENEWABLE_COLUMNS["中长期收益"]).value = "#DIV/0!"
+        book.save(self.workbook_path)
+        book.close()
+        data = load_daily_clearing_inputs("2026-11-02", self.workbook_path)
+        rows = {(label, sub): values for label, sub, values in data["rows"]}
+        self.assertEqual(rows[("汕头", None)][21], "/")
+        self.assertEqual(rows[("分公司新能源", None)][21], "/")
+
+    def test_cancelling_energy_does_not_produce_huge_composite_price(self) -> None:
+        book = load_workbook(self.workbook_path)
+        sheet = book["快报"]
+        for row in (10, 11):
+            sheet.cell(row, FIRE_COLUMNS["总电费"]).value = 20
+        for row, long_term, spot in ((10, 0, 0), (11, 750.240066521406, -750.240066521407)):
+            sheet.cell(row, FIRE_COLUMNS["中长期电量"]).value = long_term
+            sheet.cell(row, FIRE_COLUMNS["现货电量"]).value = spot
+        book.save(self.workbook_path)
+        book.close()
+        data = load_daily_clearing_inputs("2026-11-02", self.workbook_path)
+        rows = {(label, sub): values for label, sub, values in data["rows"]}
+        self.assertEqual(rows[("汕头", "#2#3")][24], "/")
+
+    def test_zero_or_missing_online_energy_displays_slash_in_saved_report(self) -> None:
+        for online in (0, None, "#DIV/0!"):
+            with self.subTest(online=online):
+                workbook = load_workbook(self.workbook_path)
+                sheet = workbook["快报"]
+                for row in (10, 11):
+                    sheet.cell(row, 10).value = online
+                    sheet.cell(row, 13).value = 20
+                    sheet.cell(row, 31).value = 5
+                    sheet.cell(row, 12).value = "#DIV/0!"
+                workbook.save(self.workbook_path)
+                workbook.close()
+                data = load_daily_clearing_inputs("2026-11-02", self.workbook_path)
+                rows = {(label, sub): values for label, sub, values in data["rows"]}
+                self.assertEqual(rows[("汕头", "#2#3")][23], "/")
+                document = Document(LOCAL_TEMPLATE_PATH)
+                fill_daily_clearing_table(document.tables[0], data["rows"])
+                target = Path(self._directory.name) / "zero_energy.docx"
+                document.save(target)
+                saved = Document(target)
+                # 23 是写入适配层使用的逻辑列号，Word 单元格索引为 22。
+                row_index = _document_row_index(saved.tables[0], "汕头", "#2#3")
+                self.assertIsNotNone(row_index)
+                self.assertEqual(saved.tables[0].cell(row_index, 22).text.strip(), "/")
+
+    def test_valid_zero_energy_price_is_still_zero(self) -> None:
+        from generate_red_marked_report import _energy_price, _clear_int
+
+        self.assertEqual(_clear_int(_energy_price(10, 10, 100)), "0")
+
     def setUp(self) -> None:
         self._directory = tempfile.TemporaryDirectory()
         self.addCleanup(self._directory.cleanup)
@@ -152,12 +246,12 @@ class DailyClearingFillTests(unittest.TestCase):
         self.assertEqual(values[23], "559")  # (350-12)/605*1000
         self.assertEqual(values[24], "640")
 
-    def test_qingyuan_row_keeps_slash_and_zero_price(self) -> None:
+    def test_qingyuan_row_keeps_slash_for_undefined_price(self) -> None:
         values = self.rows[("清远", None)]
         self.assertEqual(values[9], "/")
         self.assertEqual(values[20], "/")
         self.assertEqual(values[21], "2")
-        self.assertEqual(values[23], "0")
+        self.assertEqual(values[23], "/")
         self.assertEqual(values[24], "400")
 
     def test_renewable_row_uses_mechanism_columns(self) -> None:
