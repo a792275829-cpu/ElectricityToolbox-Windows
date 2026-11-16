@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -82,6 +83,13 @@ class WpsOperationRecoveryTests(unittest.TestCase):
         with mock.patch.object(self.module, "wait_for_wps_ready", return_value=self.ready):
             result = self.module.evaluate_wps_operation(self.page, "script", None, mock.Mock(), 120)
         self.assertIsNone(result)
+        self.page.evaluate.assert_called_once()
+
+    def test_navigation_after_write_submission_never_replays_the_write(self) -> None:
+        self.page.evaluate.side_effect = RuntimeError("Execution context was destroyed during navigation")
+        with mock.patch.object(self.module, "wait_for_wps_ready", return_value=self.ready):
+            with self.assertRaisesRegex(RuntimeError, "结果待核对；未自动重试"):
+                self.module.evaluate_wps_operation(self.page, "script", None, mock.Mock(), 180, may_write=True)
         self.page.evaluate.assert_called_once()
 
 
@@ -167,6 +175,96 @@ class WpsBrowserRecoveryTests(unittest.TestCase):
             for index, value in enumerate(values, start=1)
         ]
 
+    def test_stuck_merge_probe_times_out_and_late_completion_cannot_resume_writing(self) -> None:
+        self.page.evaluate("""() => {
+          const original = window.testApp.Worksheets;
+          window.testApp.Worksheets = name => ({Range: address => {
+            const range = original(name).Range(address);
+            range.MergeCells = new Promise(resolve => { window.finishMergeProbe = resolve; });
+            return range;
+          }});
+        }""")
+        log = mock.Mock()
+        with mock.patch.multiple(self.module, WPS_INTERFACE_TIMEOUT_SECONDS=.1, WPS_OPERATION_TIMEOUT_SECONDS=2):
+            with self.assertRaisesRegex(RuntimeError, '单次接口连续无响应.*合并状态.*结果待核对'):
+                self.module.write_to_wps(self.page.url, self.mappings(), log, browser_mode='cdp')
+        self.page.evaluate('() => window.finishMergeProbe(false)')
+        self.page.wait_for_timeout(150)
+        self.assertEqual(self.page.evaluate('() => [window.writes, window.saves]'), [0, 0])
+        self.assertTrue(any('合并状态' in call.args[0] for call in log.call_args_list))
+
+    def test_stuck_save_times_out_without_repeating_assignments_or_save(self) -> None:
+        self.page.evaluate("""() => {
+          window.WPSOpenApi.save = () => {
+            window.saves++;
+            return new Promise(() => {});
+          };
+        }""")
+        with mock.patch.multiple(self.module, WPS_INTERFACE_TIMEOUT_SECONDS=.1, WPS_OPERATION_TIMEOUT_SECONDS=2):
+            with self.assertRaisesRegex(RuntimeError, '单次接口连续无响应.*正在等待 WPS 保存完成.*结果待核对'):
+                self.module.write_to_wps(self.page.url, self.mappings(), lambda _: None, browser_mode='cdp')
+        self.assertEqual(self.page.evaluate('() => [window.writes, window.saves]'), [6, 1])
+
+    def test_stuck_readback_times_out_without_rewriting_saved_cells(self) -> None:
+        self.page.evaluate("""() => {
+          const original = window.testApp.Worksheets;
+          window.testApp.Worksheets = name => ({Range: address => {
+            const range = original(name).Range(address);
+            Object.defineProperty(range, 'Value2', {get: () => new Promise(() => {})});
+            return range;
+          }});
+        }""")
+        with mock.patch.multiple(self.module, WPS_INTERFACE_TIMEOUT_SECONDS=.1, WPS_OPERATION_TIMEOUT_SECONDS=2):
+            with self.assertRaisesRegex(RuntimeError, '单次接口连续无响应.*原始值.*结果待核对'):
+                self.module.write_to_wps(self.page.url, self.mappings(), lambda _: None, browser_mode='cdp')
+        self.assertEqual(self.page.evaluate('() => [window.writes, window.saves]'), [6, 1])
+
+    def delay_region_probes(self, milliseconds):
+        self.page.evaluate("""milliseconds => {
+          const original = window.testApp.Worksheets;
+          window.testApp.Worksheets = name => ({Range: address => {
+            const range = original(name).Range(address);
+            Object.defineProperty(range, 'MergeCells', {
+              get: () => new Promise(resolve => setTimeout(() => resolve(false), milliseconds))
+            });
+            return range;
+          }});
+        }""", milliseconds)
+
+    def test_each_successful_response_gets_a_fresh_interface_deadline(self):
+        self.delay_region_probes(60)
+        started = time.monotonic()
+        with mock.patch.multiple(self.module, WPS_INTERFACE_TIMEOUT_SECONDS=.25, WPS_OPERATION_TIMEOUT_SECONDS=3):
+            result = self.module.write_to_wps(self.page.url, self.mappings(), lambda _: None, browser_mode='cdp')
+        self.assertTrue(result['saved'])
+        self.assertGreater(time.monotonic() - started, .25)
+        self.assertEqual(self.page.evaluate('() => [window.writes, window.saves]'), [6, 1])
+
+    def test_regular_responses_cannot_extend_the_batch_total_deadline(self):
+        self.delay_region_probes(100)
+        with mock.patch.multiple(self.module, WPS_INTERFACE_TIMEOUT_SECONDS=.4, WPS_OPERATION_TIMEOUT_SECONDS=.35):
+            with self.assertRaisesRegex(RuntimeError, '整批操作超过总时限.*结果待核对'):
+                self.module.write_to_wps(self.page.url, self.mappings(), lambda _: None, browser_mode='cdp')
+        writes, saves = self.page.evaluate('() => [window.writes, window.saves]')
+        self.assertGreater(writes, 0)
+        self.assertLess(writes, 6)
+        self.assertEqual(saves, 0)
+        self.page.wait_for_timeout(200)
+        self.assertEqual(self.page.evaluate('() => [window.writes, window.saves]'), [writes, 0])
+
+    def test_source_read_also_uses_the_interface_timeout(self):
+        self.page.evaluate("""() => {
+          const original = window.testApp.Worksheets;
+          window.testApp.Worksheets = name => ({Range: address => {
+            const range = original(name).Range(address);
+            Object.defineProperty(range, 'Value', {get: () => new Promise(() => {})});
+            return range;
+          }});
+        }""")
+        with mock.patch.object(self.module, 'WPS_INTERFACE_TIMEOUT_SECONDS', .1):
+            with self.assertRaisesRegex(RuntimeError, 'WPS 读取超时.*单次接口连续无响应.*来源区域的值'):
+                self.module.read_online_range_values(self.page.url, '来源', 'A1', 1, 1, 'cdp', '', lambda _: None)
+
     def test_six_regions_recover_from_missing_api_save_and_read_back_after_reload(self) -> None:
         original_evaluate = self.page.evaluate
         operations = []
@@ -223,6 +321,103 @@ class WpsBrowserRecoveryTests(unittest.TestCase):
         self.page.reload()
         self.assertEqual(self.page.evaluate('() => window.cells'),
                          {'A3': 0, 'A6': False, 'A9': '已有', 'A12': '', 'A15': 0})
+
+    def test_partial_batch_does_not_wait_for_formula_of_an_already_filled_cell(self):
+        self.page.evaluate("""() => {
+          window.cells.A6 = 55;
+          window.formulaReads = [];
+          const original = window.testApp.Worksheets;
+          window.testApp.Worksheets = name => ({Range: address => {
+            const range = original(name).Range(address);
+            Object.defineProperty(range, 'Formula', {get() {
+              window.formulaReads.push(address);
+              return address === 'A6' ? new Promise(() => {}) : '';
+            }});
+            return range;
+          }});
+        }""")
+        with mock.patch.multiple(self.module, WPS_INTERFACE_TIMEOUT_SECONDS=.15, WPS_OPERATION_TIMEOUT_SECONDS=3):
+            result = self.module.write_to_wps(self.page.url, self.mappings()[:2], lambda _: None, overwrite=False)
+        self.assertTrue(result['saved'])
+        self.assertEqual([entry['skipped'] for entry in result['results']], [0, 1])
+        self.assertEqual(self.page.evaluate('() => [window.writes, window.saves, window.formulaReads]'), [1, 1, ['A3']])
+        self.page.reload()
+        self.assertEqual(self.page.evaluate('() => window.cells'), {'A3': .125, 'A6': 55})
+
+    def test_full_regions_read_values_in_batches_and_never_query_cell_formulas(self):
+        self.page.evaluate("""() => {
+          window.valueReads = 0;
+          window.formulaReads = 0;
+          window.testApp.Worksheets = name => ({Range: address => ({
+            MergeCells: false,
+            get Value() {
+              window.valueReads++;
+              if (!address.includes(':')) throw new Error('unexpected individual cell read');
+              return Array.from({length: 96}, (_, i) => [i % 2 ? false : 0]);
+            },
+            get Value2() { return this.Value; }, get Text() { return this.Value; },
+            get Formula() { window.formulaReads++; return new Promise(() => {}); },
+            set Value(value) { window.writes++; }
+          })});
+        }""")
+        items = [self.module.PreparedMapping(
+            index=i + 1, kdocs_url=self.page.url, workbook_path='fixture.xlsx',
+            source_sheet='来源', source_range='A1:A96', target_sheet='目标',
+            target_start=f'A{i * 96 + 1}', target_range=f'A{i * 96 + 1}:A{(i + 1) * 96}',
+            rows=96, cols=1, values=[[7] for _ in range(96)],
+        ) for i in range(14)]
+        result = self.module.write_to_wps(self.page.url, items, lambda _: None, overwrite=False)
+        self.assertEqual([entry['skipped'] for entry in result['results']], [96] * 14)
+        self.assertEqual(self.page.evaluate('() => [window.valueReads, window.formulaReads, window.writes, window.saves]'),
+                         [56, 0, 0, 1])
+        for entry in result['results']:
+            self.assertEqual(entry['expected'], entry['value'])
+
+    def test_formula_timeout_preflights_region_and_late_result_cannot_resume_writes(self):
+        self.page.evaluate("""() => {
+          const original = window.testApp.Worksheets;
+          window.testApp.Worksheets = name => ({Range: address => {
+            const range = original(name).Range(address);
+            if (address === 'A18:B19') {
+              Object.defineProperty(range, 'Value', {get: () => [[null, null], [null, null]]});
+            }
+            range.Formula = address === 'B18' ?
+              new Promise(resolve => { window.finishFormula = resolve; }) : '';
+            return range;
+          }});
+        }""")
+        with mock.patch.multiple(self.module, WPS_INTERFACE_TIMEOUT_SECONDS=.1, WPS_OPERATION_TIMEOUT_SECONDS=3):
+            with self.assertRaisesRegex(RuntimeError, 'B18.*公式.*结果待核对'):
+                self.module.write_to_wps(self.page.url, [self.mappings()[0], self.mappings()[-1]],
+                                         lambda _: None, overwrite=False)
+        # An earlier region was written, but this failing region was not.
+        self.assertEqual(self.page.evaluate('() => [window.writes, window.saves, window.cells]'),
+                         [1, 0, {'A3': .125}])
+        self.page.evaluate("() => window.finishFormula('')")
+        self.page.wait_for_timeout(150)
+        self.assertEqual(self.page.evaluate('() => [window.writes, window.saves]'), [1, 0])
+
+    def test_incomplete_batch_values_fall_back_without_treating_missing_cells_as_empty(self):
+        self.page.evaluate("""() => {
+          window.cells = {A18: 77, B18: '', A19: null, B19: false};
+          window.batchReads = 0;
+          const original = window.testApp.Worksheets;
+          window.testApp.Worksheets = name => ({Range: address => {
+            if (address !== 'A18:B19') return original(name).Range(address);
+            return {MergeCells: false,
+              get Value() {
+                if (window.batchReads++ === 0) return [[null]];
+                return [[window.cells.A18, window.cells.B18], [window.cells.A19, window.cells.B19]];
+              },
+              get Value2() { return this.Value; }, get Text() { return this.Value; }
+            };
+          }});
+        }""")
+        result = self.module.write_to_wps(self.page.url, [self.mappings()[-1]], lambda _: None, overwrite=False)
+        entry = result['results'][0]
+        self.assertEqual(entry['skipped'], 2)
+        self.assertEqual(entry['expected'], [[77, '文本'], [2, False]])
+        self.assertEqual(entry['value'], entry['expected'])
 
     def test_skip_existing_fills_only_empty_cells_in_mixed_rectangle(self) -> None:
         self.page.evaluate("""() => {

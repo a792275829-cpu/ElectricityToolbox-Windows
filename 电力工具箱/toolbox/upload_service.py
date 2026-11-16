@@ -1,40 +1,16 @@
-"""Shared macOS upload staging, independent of Tk."""
+"""Windows upload staging and generated workbook copy-back, independent of Tk."""
 from __future__ import annotations
 import shutil
-import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
-def copy_file_with_finder_fallback(source: Path, destination_dir: Path) -> Path:
-    """Copy a selected file even when macOS TCC blocks Python from Desktop/Documents."""
-    source = Path(source)
-    destination_dir = Path(destination_dir)
-    destination = destination_dir / source.name
-    try:
-        shutil.copy2(source, destination)
-        return destination
-    except PermissionError:
-        if sys.platform != "darwin":
-            raise
 
-    script = (
-        "on run argv\n"
-        "set sourceFile to POSIX file (item 1 of argv) as alias\n"
-        "set destinationFolder to POSIX file (item 2 of argv) as alias\n"
-        'tell application "Finder" to duplicate sourceFile to destinationFolder with replacing\n'
-        "end run"
-    )
-    result = subprocess.run(
-        ["/usr/bin/osascript", "-e", script, str(source), str(destination_dir)],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    if result.returncode != 0 or not destination.is_file():
-        detail = (result.stderr or result.stdout or "Finder 未返回详细信息").strip()
-        raise PermissionError(f"无法通过 Finder 复制文件：{source.name}。{detail[:300]}")
+def copy_upload_file(source: Path, destination_dir: Path) -> Path:
+    source = Path(source)
+    destination = Path(destination_dir) / source.name
+    shutil.copy2(source, destination)
     return destination
+
 
 def run_group_upload_with_staging(module, paths: list[Path], *, force: bool, on_log) -> None:
     target_date, original_uploads = module.prepare_upload_files(paths)
@@ -43,12 +19,9 @@ def run_group_upload_with_staging(module, paths: list[Path], *, force: bool, on_
 
     with tempfile.TemporaryDirectory(prefix="electricity-group-upload-") as directory:
         staging_dir = Path(directory)
-        if sys.platform == "darwin":
-            on_log("正在通过 Finder 暂存所选 Excel，以获得 macOS 文件访问权限...")
-        else:
-            on_log("正在暂存所选 Excel 到临时目录...")
+        on_log("正在暂存所选 Excel 到临时目录...")
         staged_paths = [
-            item.path if item.builtin_template else copy_file_with_finder_fallback(item.path, staging_dir)
+            item.path if item.builtin_template else copy_upload_file(item.path, staging_dir)
             for item in original_uploads
         ]
         _, staged_uploads = module.prepare_upload_files(staged_paths)
@@ -63,7 +36,7 @@ def run_group_upload_with_staging(module, paths: list[Path], *, force: bool, on_
         if original_province is None or staged_output is None:
             return
 
-        copied_output = copy_file_with_finder_fallback(
+        copied_output = copy_upload_file(
             staged_output,
             original_energy.path.parent if original_province.builtin_template else original_province.path.parent,
         )

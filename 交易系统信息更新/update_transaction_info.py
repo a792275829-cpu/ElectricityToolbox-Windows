@@ -101,6 +101,8 @@ class PreparedWorkbook:
     cell_expectations: tuple[tuple[str, int | float, str], ...] = ()
     preserved_cells: dict[str, tuple[Any, str]] = field(default_factory=dict)
     categories: tuple[str, ...] = CATEGORY_ORDER
+    date_encodings: tuple[str, str] = ("serial", "serial")
+    date_number_formats: tuple[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -572,6 +574,25 @@ def _replace_numeric_cell(row_xml: str, cell_ref: str, value: int | float) -> st
     return row_xml[: match.start()] + replacement + row_xml[match.end() :]
 
 
+def _date_encoding(cell) -> str:
+    if openpyxl.styles.numbers.is_date_format(cell.number_format):
+        return "serial"
+    value = cell.value
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and 101 <= value <= 1231:
+        return "md"
+    # General-formatted dates must remain human-readable, including date
+    # formulas or text dates in old templates, rather than bare Excel serials.
+    return "ymd"
+
+
+def _encoded_date(day: date, epoch, encoding: str) -> int | float:
+    if encoding == "md":
+        return day.month * 100 + day.day
+    if encoding == "ymd":
+        return day.year * 10000 + day.month * 100 + day.day
+    return to_excel(day, epoch)
+
+
 def _build_group_rows(
     xml_text: str,
     *,
@@ -581,6 +602,7 @@ def _build_group_rows(
     epoch,
     row_index: dict[str, str] | None = None,
     categories: tuple[str, ...] = CATEGORY_ORDER,
+    date_encodings: tuple[str, str] = ("serial", "serial"),
 ) -> str:
     rows: list[str] = []
     for offset, category in enumerate(categories):
@@ -589,10 +611,10 @@ def _build_group_rows(
         row_xml = _renumber_row(_row_xml(xml_text, source_row, row_index=row_index), source_row, target_row)
         if offset == 0:
             row_xml = _replace_numeric_cell(
-                row_xml, f"C{target_row}", to_excel(pair.day_ahead_date, epoch)
+                row_xml, f"C{target_row}", _encoded_date(pair.day_ahead_date, epoch, date_encodings[0])
             )
             row_xml = _replace_numeric_cell(
-                row_xml, f"J{target_row}", to_excel(pair.actual_date, epoch)
+                row_xml, f"J{target_row}", _encoded_date(pair.actual_date, epoch, date_encodings[1])
             )
         if category != "西电":
             for column, value in zip(("E", "F", "G", "H"), pair.day_ahead[category]):
@@ -603,7 +625,8 @@ def _build_group_rows(
     return "".join(rows)
 
 
-def _native_append_rows(template_start, pairs, epoch, categories=CATEGORY_ORDER):
+def _native_append_rows(template_start, pairs, epoch, categories=CATEGORY_ORDER,
+                        date_encodings=("serial", "serial")):
     first_row = template_start + GROUP_HEIGHT
     native_rows = []
     for index, pair in enumerate(pairs):
@@ -611,8 +634,8 @@ def _native_append_rows(template_start, pairs, epoch, categories=CATEGORY_ORDER)
             target_row = first_row + index * GROUP_HEIGHT + offset
             changes = {}
             if offset == 0:
-                changes[f"C{target_row}"] = to_excel(pair.day_ahead_date, epoch)
-                changes[f"J{target_row}"] = to_excel(pair.actual_date, epoch)
+                changes[f"C{target_row}"] = _encoded_date(pair.day_ahead_date, epoch, date_encodings[0])
+                changes[f"J{target_row}"] = _encoded_date(pair.actual_date, epoch, date_encodings[1])
             if category != "西电":
                 changes.update((f"{column}{target_row}", value) for column, value in zip(("E", "F", "G", "H"), pair.day_ahead[category]))
             changes.update((f"{column}{target_row}", value) for column, value in zip(("L", "M", "N", "O"), pair.actual[category]))
@@ -627,9 +650,10 @@ def patch_sheet_xml(
     pairs: tuple[DailyLoadPair, ...],
     epoch,
     categories: tuple[str, ...] = CATEGORY_ORDER,
+    date_encodings: tuple[str, str] = ("serial", "serial"),
 ) -> tuple[bytes, int, int]:
     first_row = template_start + GROUP_HEIGHT
-    native = native_workbook.append_rows_xml(xml_bytes, _native_append_rows(template_start, pairs, epoch, categories))
+    native = native_workbook.append_rows_xml(xml_bytes, _native_append_rows(template_start, pairs, epoch, categories, date_encodings))
     if native is not None:
         return native, first_row, first_row + (len(pairs) - 1) * GROUP_HEIGHT + 5
     xml_text = xml_bytes.decode("utf-8")
@@ -647,6 +671,7 @@ def patch_sheet_xml(
                 epoch=epoch,
                 row_index=row_index,
                 categories=categories,
+                date_encodings=date_encodings,
             )
         )
     if "</sheetData>" not in xml_text:
@@ -683,7 +708,8 @@ def _write_patched_workbook(
     pairs: tuple[DailyLoadPair, ...],
     changes: dict[str, int | float] | None = None,
     categories: tuple[str, ...] = CATEGORY_ORDER,
-) -> tuple[int, int]:
+    include_date_layout: bool = False,
+) -> tuple:
     changes = changes or {}
     sheet_part = xlsx_sheet_paths(original).get(SHEET_NAME)
     if not sheet_part:
@@ -691,13 +717,17 @@ def _write_patched_workbook(
     workbook = openpyxl.load_workbook(original, data_only=False, read_only=True)
     try:
         epoch = workbook.epoch
+        date_cells = (workbook[SHEET_NAME][f"C{template_start}"], workbook[SHEET_NAME][f"J{template_start}"])
+        date_encodings = tuple(_date_encoding(cell) for cell in date_cells)
+        date_formats = tuple(cell.number_format for cell in date_cells)
     finally:
         workbook.close()
     if native_workbook.patch_package(original, temporary, {SHEET_NAME: changes},
-            append={SHEET_NAME: _native_append_rows(template_start, pairs, epoch, categories)} if pairs else {}) is not None:
+            append={SHEET_NAME: _native_append_rows(template_start, pairs, epoch, categories, date_encodings)} if pairs else {}) is not None:
         verify_package_preservation(original, temporary, sheet_part)
         first_row = template_start + GROUP_HEIGHT if pairs else template_start
-        return first_row, first_row + (len(pairs) - 1) * GROUP_HEIGHT + 5 if pairs else first_row + 5
+        bounds = (first_row, first_row + (len(pairs) - 1) * GROUP_HEIGHT + 5 if pairs else first_row + 5)
+        return (*bounds, date_encodings, date_formats) if include_date_layout else bounds
     bounds: tuple[int, int] | None = None
     with zipfile.ZipFile(original, "r") as source, zipfile.ZipFile(temporary, "w") as output:
         output.comment = source.comment
@@ -725,6 +755,7 @@ def _write_patched_workbook(
                     data, first_row, last_row = patch_sheet_xml(
                         data, template_start=template_start, pairs=pairs, epoch=epoch,
                         categories=categories,
+                        date_encodings=date_encodings,
                     )
                 else:
                     first_row, last_row = template_start, template_start + 5
@@ -733,7 +764,7 @@ def _write_patched_workbook(
     if bounds is None:
         raise RuntimeError(f"未改动目标工作表：{SHEET_NAME}")
     verify_package_preservation(original, temporary, sheet_part)
-    return bounds
+    return (*bounds, date_encodings, date_formats) if include_date_layout else bounds
 
 
 def _values_equal(actual: Any, expected: int | float) -> bool:
@@ -764,13 +795,21 @@ def verify_workbook(path: Path, prepared: PreparedWorkbook) -> None:
 
         for index, pair in enumerate(prepared.pairs):
             start = prepared.first_row + index * GROUP_HEIGHT
-            day_date = _as_date(value(start, 3), epoch=workbook.epoch)
-            actual_date = _as_date(value(start, 10), epoch=workbook.epoch)
+            day_date = _as_date(value(start, 3), epoch=workbook.epoch, reference=pair.day_ahead_date)
+            actual_date = _as_date(value(start, 10), epoch=workbook.epoch, reference=pair.actual_date)
             if day_date != pair.day_ahead_date or actual_date != pair.actual_date:
                 raise RuntimeError(
                     f"日期回读失败：第 {start} 行，"
                     f"日前 {day_date} / 实际 {actual_date}"
                 )
+            if prepared.date_number_formats is not None:
+                for column, encoding, expected_format, day in zip(
+                        ("C", "J"), prepared.date_encodings, prepared.date_number_formats,
+                        (pair.day_ahead_date, pair.actual_date)):
+                    actual, number_format = snapshots[(SHEET_NAME, f"{column}{start}")]
+                    if number_format != expected_format or (encoding != "serial" and
+                            actual != _encoded_date(day, workbook.epoch, encoding)):
+                        raise RuntimeError(f"日期显示格式或编码回读失败：{column}{start}")
             for offset, category in enumerate(prepared.categories):
                 row = start + offset
                 if value(row, 4) != category or value(row, 11) != category:
@@ -853,14 +892,15 @@ def prepare_workbook(path: Path, pairs: Iterable[DailyLoadPair], *, overwrite: b
                     expectations.append((reference, value, number_format))
     temporary = original.with_name(f".{original.stem}.{uuid.uuid4().hex}.tmp.xlsx")
     try:
-        first_row, last_row = _write_patched_workbook(
+        first_row, last_row, date_encodings, date_formats = _write_patched_workbook(
             original, temporary, template_start=tail.start_row, pairs=appended, changes=changes,
-            categories=groups[tail.day_ahead_date].categories,
+            categories=groups[tail.day_ahead_date].categories, include_date_layout=True,
         )
         prepared = PreparedWorkbook(
             original, temporary, source_fingerprint, first_row, last_row, appended, tuple(expectations),
             preserved_cells=dict(preserved_cells),
             categories=groups[tail.day_ahead_date].categories,
+            date_encodings=date_encodings, date_number_formats=date_formats,
         )
         verify_workbook(temporary, prepared)
         assert_workbook_unchanged(original, source_fingerprint)

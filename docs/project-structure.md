@@ -23,7 +23,7 @@ Excel 重活走 Rust 原生后端。仓库里同时存在「应用外壳」「Tk
 | `native/price-xlsx/` | Rust Excel 后端，编译成 `toolbox-price-xlsx.exe` 与 `toolbox-service.exe` | 调整须同步消费者与打包规则 |
 | `电力工具箱/` | Tk 界面框架：`toolbox/` 页面、命令、服务、任务、UI 组件；`tests/` 回归 | 调整须同步页面 import 根 |
 | `packaging/` | `windows/` Windows 打包；`tauri/` 版本号与通用构建脚本 | 调整须同步消费者与打包规则 |
-| `00_启动/` | 双击入口。`.cmd` 只是转调根目录 `*.ps1`；`.command` 是 macOS 历史入口（保留不维护） | 可以增删，但要同步 README |
+| `00_启动/` | Windows 双击入口，`.cmd` 转调根目录 `*.ps1` | 可以增删，但要同步 README |
 | `docs/` | 文档，索引见 `docs/README.md` | 可以，注意 CHANGELOG 里的历史链接 |
 | `说明文档/` | 一页纯文本入口说明，与 README 重复度高 | 可以改内容，改入口时同步它 |
 | `.github/workflows/` | CI：`windows-desktop.yml`（构建+测试）、`desktop-ci.yml`、`desktop-release.yml` | 谨慎，`main` 上的 `maintain-*.yml` 会引用它 |
@@ -44,7 +44,6 @@ Excel 重活走 Rust 原生后端。仓库里同时存在「应用外壳」「Tk
 | `start_source_test.ps1` | 源码调试版启动，`-Smoke` 自检，数据隔离在 `.toolbox/source-test` |
 | `.python-version` | 解释器版本的唯一来源：`.venv`、内置运行时与 CI 都按它对齐，`build.ps1`／`verify_payload.py` 会校验 |
 | `tools/run_tests.py` | 统一测试入口（fast／full／分组／指定模块），CI 与文档都调它，不再手抄模块清单 |
-| `setup_macos.command`、`package_macos.command` | macOS 历史入口，保留不维护，不参与 Windows 构建 |
 | `requirements.txt` | 转引 `packaging/windows/requirements.txt`；依赖版本只在后者维护 |
 
 ## 根目录 `toolbox_*.py`（37 个扁平模块）

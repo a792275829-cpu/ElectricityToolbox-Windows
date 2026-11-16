@@ -81,7 +81,6 @@ $env:TOOLBOX_XLSX_BACKEND = "rust"
 
 `TOOLBOX_BENEFIT_INSPECT_BACKEND=auto|full|stream` 控制检查实现：默认 auto；full 保留优化前流程；stream 用于严格验证，不隐藏不支持模板的异常。此开关不改变写入／登录／覆盖规则。写后校验现在也默认采用局部读取（见下文），复杂模板自动回退完整工作簿；检查阶段的指标仍不能直接等同于整次联网更新的峰值。
 
-`benchmark_inspection.py` 用交替顺序、每次独立进程对比快照和当前实现，记录检查耗时、Python 主进程与子进程各自的 RSS 高水位，并比较包含格式／样式 ID 的完整待填计划。RSS 包括工作进程导入及检查，测量在结果序列化前完成；两种进程的高水位不相加，不冒充整个应用的同时峰值。提供 `--baseline-dir`、`--inputs`、`--output`，可设置 `--end-date` 和 `--repeats`。
 
 
 ## 四项性能试验（2026-10-21）
@@ -92,5 +91,3 @@ $env:TOOLBOX_XLSX_BACKEND = "rust"
 - 交易报告批次包含重复来源时，默认在批次作用域内复用原生进程和只读 JSON 缓存；不同来源批次仍用原路径。`TOOLBOX_EXCEL_SESSION=auto|oneshot|session` 可选择策略。缓存最多 4 项／16 MiB，按文件身份、大小、mtime／ctime 与请求参数失效；每次命中重新解析对象，退出批次清空并回收进程。read_frame 不缓存。
 
 历史测量及当时的验证限制见 [性能记录](../../docs/reviews/native-performance-2026-10-21.md)。
-
-`benchmark_all_trials.py` 使用 `--baseline-dir` 快照（包含 bin/toolbox-price-xlsx）、`--forecast`、`--benefit`、`--batch-inputs`、`--output`。全部业务输出在临时目录；核对全部 XLSX 包成员、DataFrame 数据／dtype 及 HTML 字节，确认原输入摘要不变。RSS 包含进程导入和输入准备，分别记录 Python／子进程各自高水位，不相加，也不代表完整 GUI／联网任务峰值。无需新增依赖或二进制传输协议。

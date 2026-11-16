@@ -7,11 +7,29 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
+
+TOOLBOX_TEST_TAGS = ()
 
 from toolbox_workbook_commit import commit_workbooks, workbook_commit_lock, workbook_fingerprint
 
 
 class WorkbookCommitTests(unittest.TestCase):
+    def test_python_commit_rehashes_same_length_external_edit_with_restored_mtime(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, TOOLBOX_DOMAIN_BACKEND="python"):
+            root = Path(directory)
+            items = (self.prepare(root, "a"), self.prepare(root, "b"))
+            previous = items[1].original.stat()
+            def verify(path, item):
+                if item is items[0]:
+                    items[1].original.write_bytes(b"external")
+                    os.utime(items[1].original, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+            with self.assertRaisesRegex(RuntimeError, "工作簿被修改"):
+                commit_workbooks(items, verify, create_backup=False)
+            self.assertEqual(items[0].original.read_bytes(), b"original")
+            self.assertEqual(items[1].original.read_bytes(), b"external")
+            self.assertEqual(set(root.iterdir()), {item.original for item in items})
+
     def prepare(self, root, name):
         original, temporary = root / f"{name}.xlsx", root / f".{name}.tmp.xlsx"
         original.write_bytes(b"original")

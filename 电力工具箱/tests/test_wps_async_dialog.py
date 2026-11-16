@@ -166,94 +166,8 @@ class WpsDialogAsyncTests(unittest.TestCase):
             "await window.WPSOpenApi.documentReadyPromise", readiness_script
         )
 
-    def test_macos_dedicated_chrome_uses_isolated_profile_and_local_cdp(self) -> None:
-        from toolbox.runtime import ToolPaths, load_module
 
-        paths = ToolPaths(Path(__file__).resolve().parents[2])
-        module = load_module("wps_chrome_command_test", paths.wps_writer)
-        chrome_path = Path(
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-        )
 
-        command = module.build_wps_chrome_command(
-            chrome_path, "http://127.0.0.1:9222"
-        )
-
-        if module.sys.platform == "darwin" and module.os.uname().machine == "arm64":
-            self.assertEqual(
-                command[:3], ["/usr/bin/arch", "-arm64", str(chrome_path)]
-            )
-        else:
-            self.assertEqual(command[0], str(chrome_path))
-        self.assertIn("--remote-debugging-address=127.0.0.1", command)
-        self.assertIn("--remote-debugging-port=9222", command)
-        self.assertIn(f"--user-data-dir={module.PROFILE_DIR}", command)
-        self.assertIn("--disable-background-mode", command)
-        self.assertIn("--disable-background-timer-throttling", command)
-        self.assertIn("--disable-backgrounding-occluded-windows", command)
-        self.assertIn("--disable-renderer-backgrounding", command)
-        self.assertNotIn("--headless=new", command)
-        self.assertEqual(command[-1], "https://www.kdocs.cn/")
-
-        background_command = module.build_wps_chrome_command(
-            chrome_path,
-            "http://127.0.0.1:9222",
-            headless=True,
-        )
-        self.assertIn("--headless=new", background_command)
-        self.assertIn("--window-size=1400,900", background_command)
-
-    def test_managed_chrome_prefers_separate_testing_bundle(self) -> None:
-        from toolbox.runtime import ToolPaths, load_module
-
-        paths = ToolPaths(Path(__file__).resolve().parents[2])
-        module = load_module("wps_chrome_preference_test", paths.wps_writer)
-        with mock.patch.object(module.Path, "is_file", return_value=True):
-            selected = module.find_macos_chrome()
-
-        self.assertEqual(
-            selected,
-            Path(
-                "/Applications/Google Chrome for Testing.app/Contents/MacOS/"
-                "Google Chrome for Testing"
-            ),
-        )
-
-    def test_managed_chrome_recovers_changed_pid_from_its_profile(self) -> None:
-        from toolbox.runtime import ToolPaths, load_module
-
-        paths = ToolPaths(Path(__file__).resolve().parents[2])
-        module = load_module("wps_chrome_pid_recovery_test", paths.wps_writer)
-        chrome_command = (
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome "
-            "--remote-debugging-port=9222 "
-            f"--user-data-dir={module.PROFILE_DIR}"
-        )
-
-        with TemporaryDirectory() as temp_dir:
-            pid_path = Path(temp_dir) / "wps-chrome.pid"
-            state_path = Path(temp_dir) / "wps-chrome-state.json"
-            pid_path.write_text("111", encoding="utf-8")
-            state_path.write_text(
-                '{"pid": 111, "version": 3}', encoding="utf-8"
-            )
-            ps_result = mock.Mock(stdout=f"  222 {chrome_command}\n")
-            with (
-                mock.patch.object(module.sys, "platform", "darwin"),
-                mock.patch.object(module, "WPS_CHROME_PID_PATH", pid_path),
-                mock.patch.object(module, "WPS_CHROME_STATE_PATH", state_path),
-                mock.patch.object(module.os, "kill", side_effect=ProcessLookupError),
-                mock.patch.object(module.subprocess, "run", return_value=ps_result),
-            ):
-                recovered_pid = module.managed_chrome_pid()
-
-            self.assertEqual(recovered_pid, 222)
-            self.assertEqual(pid_path.read_text(encoding="utf-8"), "222")
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-            self.assertEqual(
-                state,
-                {"pid": 222, "version": 3, "headless": False},
-            )
 
     def test_stopping_managed_chrome_clears_its_pid_state(self) -> None:
         from toolbox.runtime import ToolPaths, load_module
@@ -354,7 +268,7 @@ class WpsDialogAsyncTests(unittest.TestCase):
             ),
             mock.patch.object(module, "managed_chrome_pid", return_value=123),
             mock.patch.object(module, "stop_managed_chrome") as stop_browser,
-            mock.patch.object(module, "find_macos_chrome", return_value=Path("/Chrome")),
+            mock.patch.object(module, "find_windows_browser", return_value=Path("C:/Chrome/chrome.exe")),
             mock.patch.object(module.subprocess, "Popen", return_value=process),
             mock.patch.object(module, "ensure_wps_cdp_page"),
             mock.patch.object(

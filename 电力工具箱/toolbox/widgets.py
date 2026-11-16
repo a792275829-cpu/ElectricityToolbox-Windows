@@ -336,7 +336,7 @@ class ToolPage(ttk.Frame):
         self.cancel_button.configure(state="normal" if busy and self._current_cancellable else "disabled")
 
     def _sync_progress_animation(self, _event=None) -> None:
-        # A 10 ms timer can redraw faster than macOS can paint the page, keeping
+        # A 10 ms timer can redraw faster than Tk can paint the page, keeping
         # the shared event loop busy. Hidden tasks need no animation at all.
         if self.busy and self.progress.winfo_ismapped():
             self.progress.start(80)

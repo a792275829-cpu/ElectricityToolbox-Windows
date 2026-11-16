@@ -217,7 +217,7 @@ class ProcessRunner:
                 except ProcessLookupError:
                     break
                 except PermissionError:
-                    # The existence probe is advisory. macOS can deny it as
+                    # The existence probe is advisory. Access can be denied as
                     # the group exits; still attempt SIGKILL and reap below.
                     break
                 time.sleep(0.01)

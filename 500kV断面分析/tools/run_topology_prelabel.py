@@ -27,7 +27,7 @@ def main():
     p.add_argument('--prices', type=Path, required=True)
     p.add_argument('--image', type=Path, required=True)
     p.add_argument('--output-dir', type=Path, required=True)
-    p.add_argument('--ocr-engine', choices=('macos-vision', 'ppocrv6'), default=('ppocrv6' if os.name == 'nt' else 'macos-vision'))
+    p.add_argument('--ocr-engine', choices=('ppocrv6',), default='ppocrv6')
     p.add_argument('--vision', choices=('none', 'qwen', 'gemini'), default='none')
     p.add_argument('--ocr-cache', type=Path, help='Reuse only OCR with the same image digest and engine')
     p.add_argument('--baseline', action='store_true', help='Disable OCR retries and circle refinement for comparison')

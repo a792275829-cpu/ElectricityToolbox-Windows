@@ -13,15 +13,11 @@ sys.path[:0] = [str(ROOT), str(ROOT / "电力工具箱")]
 from toolbox.service import ToolboxService
 from toolbox.tasks import TaskEvent, TaskEventKind
 from toolbox_redaction import redact
-from github_update import GitHubUpdater
 
 
 def default_updater(version):
-    """The service must poll the same release channel as the running platform."""
-    if sys.platform == "win32":
-        from windows_update import WindowsUpdater
-        return WindowsUpdater(version)
-    return GitHubUpdater(version)
+    from windows_update import WindowsUpdater
+    return WindowsUpdater(version)
 
 
 class DesktopService(ToolboxService):

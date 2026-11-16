@@ -1,19 +1,19 @@
 use std::process::Command;
 
 pub fn bundled_python() -> &'static str {
-    if cfg!(windows) { "python/python.exe" } else { "python/bin/python3" }
+    "python/python.exe"
 }
 
 pub fn venv_python() -> &'static str {
-    if cfg!(windows) { ".venv/Scripts/python.exe" } else { ".venv/bin/python" }
+    ".venv/Scripts/python.exe"
 }
 
 pub fn bundled_node() -> &'static str {
-    if cfg!(windows) { "node/node.exe" } else { "node/bin/node" }
+    "node/node.exe"
 }
 
 pub fn setup_script() -> &'static str {
-    if cfg!(windows) { "setup_windows.ps1" } else { "setup_macos.command" }
+    "setup_windows.ps1"
 }
 
 pub fn hide_console(command: &mut Command) {

@@ -1,4 +1,4 @@
-"""Measure sidebar dispatch plus Tk/macOS drawing with real, idle tool pages.
+"""Measure sidebar dispatch plus Tk drawing with real, idle tool pages.
 
 Use the installed app's Python/Tcl/Tk to compare packaged rendering. Run source
 revisions separately. These timings include update(), not a guarantee
@@ -22,10 +22,6 @@ sys.path[:0] = [str(ROOT), str(ROOT / "电力工具箱")]
 
 
 def peak_memory_mib():
-    if sys.platform != "win32":
-        import resource
-        return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss /
-                     (1024 ** 2 if sys.platform == "darwin" else 1024), 2)
     import ctypes
     from ctypes import wintypes
     class Counters(ctypes.Structure):
@@ -135,7 +131,7 @@ def main() -> None:
                     if sequence == number and loading(name):
                         finish_after_id = app.after(5, finish)
                         return
-                    # Include pending layout, map events and Aqua drawing, not
+                    # Include pending layout, map events and Tk drawing, not
                     # only the Python page-dispatch function's return time.
                     try:
                         app.update()

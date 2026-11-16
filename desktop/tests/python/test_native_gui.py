@@ -185,7 +185,7 @@ class NativeLifecycleTests(unittest.TestCase):
                 load.assert_not_called()
                 self.assertIsNone(page._writer_load_after_id)
                 self.service.call("abort_update", {})
-                # Import completion and macOS window mapping are asynchronous.
+                # Import completion and window mapping are asynchronous.
                 # A fixed quit timer may fire before Tk's geometry/redraw idle
                 # handlers, even when the writer was constructed successfully.
                 deadline = time.monotonic() + 5

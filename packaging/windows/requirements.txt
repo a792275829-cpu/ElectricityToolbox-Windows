@@ -1,4 +1,4 @@
-# Windows wheels; align business libraries with the existing macOS release.
+# Pinned Windows runtime wheels for the toolbox and its business tools.
 openpyxl==3.1.5
 Jinja2==3.1.6
 pypdf==6.20.0

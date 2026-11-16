@@ -6,6 +6,9 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
+
+TOOLBOX_TEST_TAGS = ()
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path[:0] = [str(ROOT), str(ROOT / "电力工具箱"), str(ROOT / "desktop/python")]
@@ -17,29 +20,10 @@ spec.loader.exec_module(workspace)
 
 
 class DesktopTests(unittest.TestCase):
-    def test_release_requires_signed_mac_target(self):
-        spec = importlib.util.spec_from_file_location(
-            "release_index", ROOT / "packaging/tauri/release_index.py"
-        )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        assets = [
-            {
-                "name": "tool.app.tar.gz",
-                "browser_download_url": "https://example.com/mac",
-            },
-        ]
-        signatures = {a["name"] + ".sig": "signature" for a in assets}
-        index = module.build_index("v0.1.0", assets, signatures)
-        self.assertEqual(set(index["platforms"]), {"darwin-aarch64"})
-        with self.assertRaises(ValueError):
-            module.build_index("v0.1.0", [], signatures)
-        with self.assertRaises(ValueError):
-            module.build_index("v0.1.0", assets, {})
 
 
-    def test_mac_payload_export_keeps_required_sources_and_excludes_private_data(self):
-        spec = importlib.util.spec_from_file_location("mac_payload_tests", ROOT / "packaging/tauri/prepare_payload.py")
+    def test_payload_export_keeps_required_sources_and_excludes_private_data(self):
+        spec = importlib.util.spec_from_file_location("payload_tests", ROOT / "packaging/tauri/prepare_payload.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         for name in ("上网电量抓取/auth_state.json", "x/config.json", "x/.browser-profile/Default/Cookies",
@@ -48,29 +32,12 @@ class DesktopTests(unittest.TestCase):
                      "测试样例/市场表更新/业务副本.xlsx"):
             with self.subTest(name=name):
                 self.assertFalse(module.build_support.exportable(Path(name)))
-        self.assertTrue(module.build_support.exportable(Path("packaging/tauri/requirements-macos.lock")))
         for name in ("native_bridge.py", "github_update.py", "update_ui.py"):
             self.assertTrue(module.runtime_source(Path("desktop/python") / name))
         self.assertTrue(module.runtime_source(Path("500kV断面分析/data/500kv_node_positions.json")))
         self.assertFalse(module.runtime_source(Path("电力工具箱/tests/test_toolbox.py")))
         self.assertFalse(module.runtime_source(Path("packaging/tauri/build_support.py")))
-        with self.assertRaisesRegex(ValueError, "仅支持 Apple 芯片 Mac"):
-            module.prepare("unsupported-target")
 
-    def test_draft_asset_urls_use_the_final_release_tag(self):
-        spec = importlib.util.spec_from_file_location(
-            "release_index", ROOT / "packaging/tauri/release_index.py"
-        )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        prefix = "https://github.com/owner/repo/releases/download/"
-        names = ["工具_aarch64.app.tar.gz"]
-        assets = [{"name": name, "browser_download_url": prefix + "untagged-temporary/" + name}
-                  for name in names]
-        index = module.build_index("v0.1.2", assets, {name + ".sig": "signed" for name in names})
-        from urllib.parse import unquote
-        self.assertEqual({unquote(v["url"]) for v in index["platforms"].values()},
-                         {prefix + "v0.1.2/" + name for name in names})
 
 
 class UpdateWorkspaceTests(unittest.TestCase):
@@ -115,6 +82,63 @@ class UpdateWorkspaceTests(unittest.TestCase):
             workspace.install(self.payload, self.root)
         self.assertEqual((self.root / "tool.py").read_text(), "local edit")
         self.assertEqual((self.root / "second.py").read_text(), "v1")
+
+    def test_managed_recovery_backs_up_edits_and_preserves_data(self):
+        self.release({"tool.py": "v1", "second.py": "v1"})
+        workspace.install(self.payload, self.root)
+        (self.root / "tool.py").write_text("local edit")
+        (self.root / "config.json").write_text("private")
+        self.release({"tool.py": "v2", "second.py": "v2"})
+        backups = self.base / "backups"
+        workspace.install(self.payload, self.root, backup_root=backups, recover_local_edits=True)
+        self.assertEqual((self.root / "tool.py").read_text(), "v2")
+        self.assertEqual((self.root / "second.py").read_text(), "v2")
+        self.assertEqual((self.root / "config.json").read_text(), "private")
+        snapshot = next(backups.iterdir())
+        self.assertEqual((snapshot / "tool.py").read_text(), "local edit")
+        # A retry after a failed state write must not reuse the first snapshot.
+        (self.root / "tool.py").write_text("second edit")
+        (self.root / ".toolbox/desktop/installed.json").unlink()
+        workspace.install(self.payload, self.root, backup_root=backups, recover_local_edits=True)
+        self.assertEqual(len(list(backups.iterdir())), 2)
+        self.assertEqual((snapshot / "tool.py").read_text(), "local edit")
+
+    def test_recovery_backup_failure_does_not_replace_any_source(self):
+        self.release({"tool.py": "v1", "second.py": "v1"})
+        workspace.install(self.payload, self.root)
+        (self.root / "tool.py").write_text("local edit")
+        self.release({"tool.py": "v2", "second.py": "v2"})
+        copy = workspace.shutil.copy2
+        def fail_on_edit(source, target):
+            if Path(source).name == "tool.py":
+                raise OSError("backup failed")
+            return copy(source, target)
+        with mock.patch.object(workspace.shutil, "copy2", side_effect=fail_on_edit):
+            with self.assertRaisesRegex(OSError, "backup failed"):
+                workspace.install(self.payload, self.root, recover_local_edits=True)
+        self.assertEqual((self.root / "tool.py").read_text(), "local edit")
+        self.assertEqual((self.root / "second.py").read_text(), "v1")
+
+    def test_recovery_state_failure_rolls_back_sources_and_keeps_backup(self):
+        self.release({"tool.py": "v1", "second.py": "v1"})
+        workspace.install(self.payload, self.root)
+        state = self.root / ".toolbox/desktop/installed.json"
+        original_state = state.read_bytes()
+        (self.root / "tool.py").write_text("local edit")
+        self.release({"tool.py": "v2", "second.py": "v2"})
+        backups = self.base / "backups"
+        replace = workspace.os.replace
+        def fail_on_state(source, target):
+            if Path(target) == state:
+                raise OSError("state failed")
+            return replace(source, target)
+        with mock.patch.object(workspace.os, "replace", side_effect=fail_on_state):
+            with self.assertRaisesRegex(OSError, "state failed"):
+                workspace.install(self.payload, self.root, backup_root=backups, recover_local_edits=True)
+        self.assertEqual((self.root / "tool.py").read_text(), "local edit")
+        self.assertEqual((self.root / "second.py").read_text(), "v1")
+        self.assertEqual(state.read_bytes(), original_state)
+        self.assertEqual((next(backups.iterdir()) / "tool.py").read_text(), "local edit")
 
     def test_bad_hash_and_escape(self):
         self.release({"tool.py": "v1"})

@@ -305,6 +305,7 @@ def validate_catalog(data: dict) -> None:
         candidate = n.get('map_candidate')
         if candidate is not None:
             if (not isinstance(candidate, dict) or not isinstance(candidate.get('text'), str)
+                    # Accept legacy provenance so existing Windows annotation files remain readable.
                     or candidate.get('ocr_engine') not in ('macos-vision', 'ppocrv6')
                     or candidate.get('vision_status') not in ('未配置', '已复核', '不一致')):
                 raise ValueError('待核对初标信息无效')

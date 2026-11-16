@@ -1,4 +1,4 @@
-"""Tk update UI for digest-verified DMG downloads."""
+"""Tk update UI for verified Windows installers and file deltas."""
 from __future__ import annotations
 
 import os
@@ -11,7 +11,8 @@ import tkinter.font as tkfont
 import webbrowser
 from tkinter import messagebox, ttk
 
-from github_update import Cancelled, GitHubUpdater
+from github_update import Cancelled
+from windows_update import WindowsUpdater
 from toolbox_platform import window_scale, windows_frame_metrics, windows_work_area
 
 
@@ -21,7 +22,7 @@ class UpdateController:
 
     def __init__(self, app, service, updater=None):
         self.app, self.service = app, service
-        self.updater = updater or GitHubUpdater(os.environ.get("TOOLBOX_APP_VERSION", "0.1.3"))
+        self.updater = updater or WindowsUpdater(os.environ.get("TOOLBOX_APP_VERSION", "0.1.3"))
         self.release = None
         self.checking = False
         self.manual = False
@@ -163,8 +164,7 @@ class UpdateWindow(tk.Toplevel):
         body.columnconfigure(0, weight=1)
         body.rowconfigure(3, weight=1)
         ttk.Label(body, text=f"发现新版本 {release.version}", font=("Helvetica", 20, "bold")).grid(sticky="w")
-        self.is_windows = bool(release.asset and release.asset.get('name', '').endswith('.exe'))
-        self.platform_text = f"当前 v{controller.updater.current}  →  {release.version}  ·  " + ('Windows x64' if self.is_windows else 'Apple 芯片')
+        self.platform_text = f"当前 v{controller.updater.current}  →  {release.version}  ·  Windows x64"
         ttk.Label(body, text=self.platform_text).grid(sticky="w", pady=(8, 16))
         ttk.Separator(body).grid(sticky="ew", pady=(0, 12))
         notes_frame = ttk.Frame(body)
@@ -194,7 +194,7 @@ class UpdateWindow(tk.Toplevel):
         self.progress = ttk.Progressbar(body, maximum=100)
         self.progress.grid(sticky="ew", pady=(12, 8))
         self.status = tk.StringVar(self, "开始更新后将自动下载、校验、退出并安装，再重新启动工具箱；配置和数据保留。" +
-                                  ('Windows 优先下载小补丁；补丁不适用时使用完整安装包，安装失败自动恢复旧程序。' if self.is_windows else '日常优先使用增量补丁。'))
+                                  'Windows 优先下载小补丁；补丁不适用时使用完整安装包，安装失败自动恢复旧程序。')
         self.status_label = ttk.Label(body, textvariable=self.status, wraplength=490)
         self.status_label.grid(sticky="w", pady=(0, 16))
         actions = ttk.Frame(body)
@@ -207,7 +207,7 @@ class UpdateWindow(tk.Toplevel):
         self.primary.grid(row=0, column=3)
         if not release.asset:
             self.primary.state(["disabled"])
-            self.status.set("此版本尚未提供 Apple 芯片安装包，请查看发布页面。")
+            self.status.set("此版本尚未提供 Windows x64 安装包，请查看发布页面。")
         self._fit_to_content()
         self.bind("<Configure>", self._on_resize, add="+")
 
@@ -411,8 +411,7 @@ class UpdateWindow(tk.Toplevel):
         self.installing = True
         self.primary.configure(text="安装准备中…", state='disabled')
         self.cancel_button.configure(state='disabled')
-        status = ('正在校验 Windows 安装包并准备退出交接…' if self.is_windows
-                  else '正在校验镜像和应用，准备自动安装…')
+        status = '正在校验 Windows 安装包并准备退出交接…'
         fallback = self._fallback_reason(self.controller.updater)
         if fallback:
             status += f"\n增量补丁不适用（{self._short_reason(fallback)}），已改用完整安装包。"

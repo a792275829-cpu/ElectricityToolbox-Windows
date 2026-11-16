@@ -1,6 +1,6 @@
 # electricity-toolbox 工作约定
 
-平台范围：只保证 **Windows 10 / 11 x64** 可安装、可运行。macOS 专用代码与 `*.command` 原位保留，不构建、不维护、不作为设计约束；`packaging/tauri` 中的共享版本、源码导出及迁移逻辑仍供 Windows 复用。新增功能不写双平台文案，也不新增 `sys.platform == "darwin"` 分支。
+平台范围：仅维护 **Windows 10 / 11 x64**。源码只保留 Windows 软件运行、构建、测试和维护所需的代码；删除 macOS 专用实现、平台分支、依赖、资源与 `*.command` 入口。共享模块须先核对 Windows 调用方，仅移除不再使用的实现，不因目录名称含 `tauri` 而整目录删除。新增功能只面向 Windows，不新增其他平台的兼容分支。历史发布记录、来源说明及依赖锁文件中的上游可选平台元数据不作代码清理。
 
 ## 默认执行方式
 
@@ -25,7 +25,7 @@
 ## 启动与依赖
 
 - Python 版本只有一处事实源：根目录 `.python-version`。本地 `.venv`、内置运行时和 CI 都按它安装，`build.ps1` 与 `verify_payload.py` 会校验，不一致直接报错；改动版本必须同时重建 payload。Windows 解释器是 `.venv\Scripts\python.exe`，不要把个人机器上的绝对解释器路径写入代码。
-- 依赖版本只在 `packaging/windows/requirements.txt` 维护（内置运行时用的同一套 pin）；根 `requirements.txt` 只转引它，不要另写版本号。macOS 侧仍用 `packaging/tauri/requirements-macos.lock`。
+- 依赖版本只在 `packaging/windows/requirements.txt` 维护（内置运行时用的同一套 pin）；根 `requirements.txt` 只转引它，不要另写版本号。
 - 入口：初始化 `setup_windows.ps1`，正式启动 `start_windows.ps1`，源码调试 `start_source_test.ps1`（`-Smoke` 自检输出 `TOOLBOX_SMOKE=OK`），安装包构建 `packaging/windows/build.ps1`。使用原版 Tk 页面，不另写一套外观近似的 UI。
 - 生成目录采用归档后重建；回收统一走 `packaging/windows/prune_build_archive.py`，默认预览、显式 `--apply` 执行，只允许仓库 `dist/build-archive/` 内的快照，拒绝链接／重解析点。成功构建可用 `-PruneArchive` 保留最近一份；失败现场保留至诊断结束。清理失败必须报告，不绕过会话守卫。不得删除源码、运行中目录、用户数据或虚拟环境的基础解释器。
 - 构建保留调用环境及安全守卫，不自动移除会话注入；`-KeepGuard` 仅作旧参数兼容。环境阻塞时保留第一条异常，修复环境后重试；不确定归档目标时用 `-DryRun` 自检。
@@ -93,4 +93,4 @@
 - 发布补丁前必须用旧应用副本实际还原，核对全部文件、应用签名，并校验索引及 GitHub 附件摘要；禁止把测试补丁直接当发行包。
 - 增量更新只在临时副本还原完整应用，校验后退出旧程序再运行安装程序，继续复用安装回滚逻辑，保留原配置、用户数据和样例。
 - `main` 上的 `maintain-*.yml` 只是转发壳，调用同仓库 reusable workflow，只跑检查和构建，不创建 Release；在本仓库打 tag 不触发发布，附件由手动上传。
-- macOS DMG 通道已停止：相关脚本与历史发行附件保持原状，不再构建、不再验证。
+- 本仓库不保留 macOS 构建与 DMG 发布实现；历史发行附件和验证记录保持原状。

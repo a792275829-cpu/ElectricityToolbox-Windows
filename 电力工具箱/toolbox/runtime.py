@@ -350,7 +350,7 @@ def python_executable() -> str:
 
 
 def pythonw_executable() -> str:
-    # Retain the existing helper API for GUI callers on macOS.
+    # Retain the helper API used by GUI callers.
     return python_executable()
 
 
@@ -391,23 +391,11 @@ def _windows_node_candidates() -> list[Path]:
     return candidates
 
 
-def _macos_node_candidates() -> list[Path]:
-    home = Path.home()
-    candidates = [
-        home / ".local" / "bin" / "node",
-        home / ".volta" / "bin" / "node",
-        Path("/opt/homebrew/bin/node"),
-        Path("/usr/local/bin/node"),
-    ]
-    candidates.extend(sorted((home / ".nvm" / "versions" / "node").glob("*/bin/node"), reverse=True))
-    return candidates
-
-
 def node_executable() -> str:
     configured = os.environ.get("TOOLBOX_NODE")
     if configured and Path(configured).is_file():
         return configured
-    bundled = portable_runtime_root() / ("node/node.exe" if os.name == "nt" else "node/bin/node")
+    bundled = portable_runtime_root() / "node/node.exe"
     if bundled.is_file():
         return str(bundled)
 
@@ -417,8 +405,6 @@ def node_executable() -> str:
 
     if sys.platform.startswith("win"):
         candidates = _windows_node_candidates()
-    elif sys.platform == "darwin":
-        candidates = _macos_node_candidates()
     else:
         candidates = []
     for candidate in candidates:

@@ -450,7 +450,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(updated_sheet["B2"].value, 20)
         self.assertEqual(updated_sheet["C2"].value, 108314.96)
 
-    def test_group_upload_accepts_numeric_c2_from_nearest_template(self) -> None:
+    def test_group_upload_rejects_untraceable_numeric_c2_from_nearest_template(self) -> None:
         from openpyxl import Workbook, load_workbook
         from toolbox.runtime import ToolPaths, load_module
 
@@ -469,29 +469,25 @@ class RuntimeTests(unittest.TestCase):
             sheet["B2"] = 18
             sheet["C2"] = 108314.96
             workbook.save(province_path)
+            workbook.close()
+            original = province_path.read_bytes()
 
             uploads = [
                 module.UploadFile(path=province_path, kind="省内", date="2026-07-04", auto_template=True),
                 module.UploadFile(path=energy_path, kind="能销", date="2026-07-05"),
             ]
             with (
-                mock.patch.object(module, "fetch_startup_max", return_value=20),
-                mock.patch.object(module, "fetch_capacity_average", return_value=50000.0),
+                mock.patch.object(module, "fetch_startup_max", return_value=20) as fetch_startup,
+                mock.patch.object(module, "fetch_capacity_average", return_value=50000.0) as fetch_capacity,
             ):
-                updated_uploads = module.update_province_excel_for_upload(
-                    object(),
-                    "2026-07-05",
-                    uploads,
-                )
+                with self.assertRaisesRegex(module.ProvinceTemplateError, "不能自动或跨日复用"):
+                    module.update_province_excel_for_upload(object(), "2026-07-05", uploads)
+                fetch_startup.assert_not_called()
+                fetch_capacity.assert_not_called()
 
             target_path = folder / "广东-省内数据-20260705.xlsx"
-            updated = load_workbook(target_path, data_only=True)
-            updated_sheet = updated["省内数据"]
-
-        self.assertEqual(updated_uploads[0].path, target_path.resolve())
-        self.assertEqual(updated_sheet["A2"].value.date(), date(2026, 7, 5))
-        self.assertEqual(updated_sheet["B2"].value, 20)
-        self.assertEqual(updated_sheet["C2"].value, 108314.96)
+            self.assertFalse(target_path.exists())
+            self.assertEqual(province_path.read_bytes(), original)
 
     def test_group_upload_prefers_guangdong_branch_tenant(self) -> None:
         from toolbox.runtime import ToolPaths, load_module
@@ -797,30 +793,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(environment["PYTHONUTF8"], "1")
         self.assertEqual(environment["PYTHONIOENCODING"], "utf-8")
 
-    def test_python_executable_uses_current_interpreter_on_macos(self) -> None:
-        if sys.platform != "darwin":
-            self.skipTest("macOS-specific runtime expectation")
 
-        from toolbox.runtime import python_executable, pythonw_executable
-
-        self.assertEqual(Path(python_executable()).resolve(), Path(sys.executable).resolve())
-        self.assertEqual(Path(pythonw_executable()).resolve(), Path(sys.executable).resolve())
-
-    def test_node_executable_finds_local_node_on_macos(self) -> None:
-        from toolbox.runtime import node_executable
-
-        with tempfile.TemporaryDirectory() as folder:
-            local_node = Path(folder) / ".local" / "bin" / "node"
-            local_node.parent.mkdir(parents=True)
-            local_node.touch(mode=0o755)
-            with (
-                mock.patch("toolbox.runtime.sys.platform", "darwin"),
-                mock.patch("toolbox.runtime.shutil.which", return_value=None),
-                mock.patch("toolbox.runtime.portable_runtime_root", return_value=Path(folder) / "runtime"),
-                mock.patch("toolbox.runtime.Path.home", return_value=Path(folder)),
-                mock.patch.dict(os.environ, {"HOME": folder}),
-            ):
-                self.assertEqual(node_executable(), str(local_node))
 
     def test_node_executable_finds_windows_install_outside_path(self) -> None:
         from toolbox.runtime import node_executable
@@ -1148,7 +1121,7 @@ class PageAdapterTests(unittest.TestCase):
             ["--forecast-days", "1", "--training-months", "3"],
         )
 
-    def test_group_upload_runs_in_toolbox_process_to_keep_macos_file_access(self) -> None:
+    def test_group_upload_runs_in_toolbox_process_and_restores_log_sink(self) -> None:
         from toolbox.pages import GroupUploadPage
 
         page = GroupUploadPage(
@@ -1336,51 +1309,8 @@ class PageAdapterTests(unittest.TestCase):
         exported_disabled = module.build_config_export(disabled, exported_at="2026-06-29T16:45:11")
         self.assertFalse(module.runtime_config_from_export_payload(exported_disabled)["overwrite"])
 
-    def test_open_directory_uses_macos_open_command(self) -> None:
-        if sys.platform != "darwin":
-            self.skipTest("macOS-specific directory opener")
 
-        from toolbox.pages import _open_directory
 
-        with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / "output"
-            with mock.patch("subprocess.run") as run:
-                _open_directory(target)
-
-            self.assertTrue(target.is_dir())
-            run.assert_called_once_with(["open", str(target)], check=False)
-
-    def test_report_gui_open_directory_uses_macos_open_command(self) -> None:
-        if sys.platform != "darwin":
-            self.skipTest("macOS-specific directory opener")
-
-        from toolbox.runtime import load_module
-
-        module = load_module("report_gui_open_directory_test", self.paths.report_gui)
-
-        with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / "output"
-            with mock.patch("subprocess.run") as run:
-                module.open_directory(target)
-
-            self.assertTrue(target.is_dir())
-            run.assert_called_once_with(["open", str(target)], check=False)
-
-    def test_trade_analysis_open_directory_uses_macos_open_command(self) -> None:
-        if sys.platform != "darwin":
-            self.skipTest("macOS-specific directory opener")
-
-        from toolbox.runtime import load_module
-
-        module = load_module("trade_analysis_open_directory_test", self.paths.trade_analysis)
-
-        with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / "output"
-            with mock.patch("subprocess.run") as run:
-                module.open_directory(target)
-
-            self.assertTrue(target.is_dir())
-            run.assert_called_once_with(["open", str(target)], check=False)
 
     def test_group_upload_auto_selects_latest_d_minus_two_energy_file(self) -> None:
         from toolbox.pages import GroupUploadPage
@@ -2854,42 +2784,15 @@ class LauncherTests(unittest.TestCase):
         self.assertTrue((self.workspace / "toolbox_launcher.pyw").is_file())
         self.assertTrue((self.workspace / "toolbox" / "app.py").is_file())
 
-    def test_macos_command_launcher_finds_python_entrypoint(self) -> None:
-        if sys.platform != "darwin":
-            self.skipTest("macOS launcher smoke test")
-
-        source = self.script_root / "00_启动" / "电力工具箱.command"
-        self.assertTrue(source.is_file())
-        content = source.read_text(encoding="utf-8")
-        self.assertIn("TOOLBOX_SMOKE", content)
-        self.assertNotIn("C:\\Users\\lllg", content)
-
-        result = subprocess.run(
-            [str(source)],
-            cwd=self.script_root,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env={**os.environ, "TOOLBOX_SMOKE": "1"},
-            timeout=30,
-        )
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn("TOOLBOX_SCRIPT=", result.stdout)
-        self.assertIn("toolbox_launcher.pyw", result.stdout)
 
     def test_readme_documents_unified_and_legacy_launchers(self) -> None:
         readme = next(self.script_root.glob("*/README_*.txt"))
         content = readme.read_text(encoding="utf-8")
 
-        # 目录说明已收敛为 Windows 版：重点是当前入口（.cmd）写清楚，
-        # 同时保留“macOS 的 .command 只是历史入口、不再维护”的说明。
+        # Directory guidance must name the current Windows entry point.
         self.assertIn("00_启动", content)
         self.assertIn("Windows启动.cmd", content)
-        self.assertIn(".command", content)
-        self.assertIn("保留", content)
+        self.assertNotIn(".command", content)
 
 
 if __name__ == "__main__":

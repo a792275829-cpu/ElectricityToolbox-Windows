@@ -43,7 +43,8 @@ def safe(root: Path, relative: str) -> Path:
 
 
 def install(payload: Path, root: Path, *, data_root: Path | None = None,
-            state_root: Path | None = None, backup_root: Path | None = None):
+            state_root: Path | None = None, backup_root: Path | None = None,
+            recover_local_edits: bool = False):
     manifest = json.loads((payload / "manifest.json").read_text(encoding="utf-8"))
     state = (state_root / "installed.json") if state_root else root / ".toolbox/desktop/installed.json"
     sources = payload / ("app" if (payload / "app").is_dir() else "workspace")
@@ -75,15 +76,22 @@ def install(payload: Path, root: Path, *, data_root: Path | None = None,
             continue
         if current is not None and current != old.get(name):
             conflicts.append(name)
+            if recover_local_edits:
+                changes.append(name)
         else:
             changes.append(name)
-    if conflicts:
+    if conflicts and not recover_local_edits:
         raise RuntimeError(
             "检测到本地源码修改，已保留原文件。请备份并移走以下文件后重启：\n"
             + "\n".join(conflicts[:20])
         )
     root.mkdir(parents=True, exist_ok=True)
     backup = (backup_root or root / ".toolbox/desktop/backups") / manifest["build"][:16]
+    if conflicts:
+        # Never overwrite an earlier recovery snapshot on a retry. All changed
+        # originals must be saved before replacing any managed source below.
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        backup = Path(tempfile.mkdtemp(prefix=backup.name + "-local-edits-", dir=backup.parent))
     originals = []
     completed = []
     try:
@@ -94,6 +102,8 @@ def install(payload: Path, root: Path, *, data_root: Path | None = None,
                 copy.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(target, copy)
                 originals.append(name)
+        for name in changes:
+            target = safe(root, name)
             if name in files:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 handle, temporary = tempfile.mkstemp(
@@ -137,6 +147,6 @@ if __name__ == "__main__":
         from workspace_layout import initialize
         initialize(root)
         install(payload, root / "app", data_root=root / "data", state_root=root / "state",
-                backup_root=root / "backups/source-updates")
+                backup_root=root / "backups/source-updates", recover_local_edits=True)
     else:
         install(payload, root)

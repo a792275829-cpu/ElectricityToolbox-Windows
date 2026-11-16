@@ -80,7 +80,7 @@ impl Backend {
             let mut setup = Command::new(&python);
             platform::hide_console(&mut setup);
             setup
-                .args(["-I", "-B"])
+                .args(["-I", "-B", "-X", "utf8"])
                 .arg(resources.join("bootstrap/prepare_workspace.py"))
                 .arg(&resources)
                 .arg(&app_home)
@@ -93,7 +93,7 @@ impl Backend {
             let mut setup = Command::new(&python);
             platform::hide_console(&mut setup);
             setup
-                .args(["-B"])
+                .args(["-B", "-X", "utf8"])
                 .arg(root.join("packaging/tauri/workspace_layout.py"))
                 .arg(&app_home);
             let output = setup.output().map_err(|e| e.to_string())?;
@@ -101,14 +101,12 @@ impl Backend {
                 return Err(String::from_utf8_lossy(&output.stderr).to_string());
             }
         }
-        let gui_python = runtime.join("python/电力工具箱.app/Contents/MacOS/电力工具箱");
-        let native_bundle = ui && cfg!(target_os = "macos") && gui_python.is_file();
         let service_path = root.join("电力工具箱/bin/toolbox-service.exe");
         let native_service = cfg!(windows) && !ui && service_path.is_file();
         if cfg!(windows) && !ui && !cfg!(debug_assertions) && !native_service {
             return Err("内置 Rust 任务服务不完整，请重新安装完整发行版。".into());
         }
-        let mut command = Command::new(if native_service { &service_path } else if native_bundle { &gui_python } else { &python });
+        let mut command = Command::new(if native_service { &service_path } else { &python });
         platform::hide_console(&mut command);
         let entry = root.join(if ui { "desktop/python/native_bridge.py" } else { "desktop/python/service_bridge.py" });
         #[cfg(debug_assertions)]
@@ -136,9 +134,6 @@ impl Backend {
                         .env("TOOLBOX_INSTALLED", if managed { "1" } else { "0" });
                 }
             }
-            if let Some(bundle) = executable.ancestors().find(|p| p.extension().is_some_and(|x| x == "app")) {
-                command.env("TOOLBOX_APP_BUNDLE", bundle);
-            }
         }
         if ui { command.arg("--remote-business"); }
         command
@@ -149,10 +144,6 @@ impl Backend {
             .stderr(Stdio::piped());
         if use_data_home {
             command.env("TOOLBOX_DATA_ROOT", app_home.join("data"));
-        }
-        if native_bundle {
-            command.env("PYTHONHOME", runtime.join("python"))
-                .env("__CFBundleIdentifier", "com.electricity.toolbox.native");
         }
         if runtime.is_dir() {
             command
@@ -266,6 +257,15 @@ struct State {
     native_closed: AtomicBool,
 }
 
+impl State {
+    fn ensure_ui_open(&self) -> Result<(), String> {
+        if self.native_closed.load(Ordering::Acquire) {
+            return Err("上次工具箱界面已关闭，后台正在结束任务并清理。请稍后重新打开；写入结果待核对，不要重复写入。".into());
+        }
+        Ok(())
+    }
+}
+
 fn show_updater(app: &tauri::AppHandle) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
@@ -305,7 +305,9 @@ fn request_native(app: &tauri::AppHandle, method: &'static str) {
     let handle = app.clone();
     std::thread::spawn(move || {
         if let Some(state) = handle.try_state::<State>() {
-            let result = state.ui.clone().and_then(|ui| ui.request(method, json!({})));
+            let result = state.ensure_ui_open()
+                .and_then(|_| state.ui.clone())
+                .and_then(|ui| ui.request(method, json!({})));
             if let Err(error) = result {
                 let ui_stopped = state.ui.as_ref().map(|ui|
                     ui.child.lock().unwrap().try_wait().ok().flatten().is_some()
@@ -323,6 +325,7 @@ fn request_native(app: &tauri::AppHandle, method: &'static str) {
 
 #[tauri::command]
 async fn native_activate(app: tauri::AppHandle) -> Result<(), String> {
+    app.state::<State>().ensure_ui_open()?;
     let ui = app.state::<State>().ui.clone()?;
     tauri::async_runtime::spawn_blocking(move || ui.request("activate", json!({})))
         .await.map_err(|e| e.to_string())??;
@@ -336,6 +339,7 @@ async fn backend_call(
     params: Value,
     state: tauri::State<'_, State>,
 ) -> Result<Value, String> {
+    if method == "ping" { state.ensure_ui_open()?; }
     let backend = state.backend.clone()?;
     tauri::async_runtime::spawn_blocking(move || backend.request(&method, params))
         .await
@@ -349,7 +353,7 @@ fn open_path(path: String, app: tauri::AppHandle) -> Result<(), String> {
         return Err("文件或目录不存在".into());
     }
     if !path.is_dir()
-        && !["xlsx", "pdf", "png", "docx", "html", "txt", "md", "json", "dmg"].contains(
+        && !["xlsx", "pdf", "png", "docx", "html", "txt", "md", "json"].contains(
             &path
                 .extension()
                 .and_then(|x| x.to_str())
@@ -390,8 +394,6 @@ fn main() {
                 ui,
                 native_closed: AtomicBool::new(false),
             });
-            #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let open = MenuItem::with_id(app, "open", "打开工具箱", true, None::<&str>)?;
             let update = MenuItem::with_id(app, "update", "检查更新", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出工具箱", true, None::<&str>)?;
@@ -429,15 +431,9 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("无法启动电力工具箱")
         .run(|app, event| {
-            #[cfg(target_os = "macos")]
-            if matches!(&event, tauri::RunEvent::Ready) {
-                let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-            }
             if let Some(state) = app.try_state::<State>() {
                 if let Ok(backend) = &state.backend {
                     match event {
-                        #[cfg(target_os = "macos")]
-                        tauri::RunEvent::Reopen { .. } => request_native(app, "activate"),
                         tauri::RunEvent::ExitRequested { api, .. } => {
                             if !state.native_closed.load(Ordering::Acquire) {
                                 api.prevent_exit();

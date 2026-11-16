@@ -55,7 +55,7 @@ class NativeService:
         app = self.app
         if method in ("begin_update", "cancel_update"):
             if self.emit is None:
-                raise ValueError("源码启动模式不自动更新，请使用 DMG 安装的桌面版")
+                raise ValueError("源码启动模式不自动更新，请使用安装后的 Windows 桌面版")
             self.emit({"event": {"kind": method, "version": params.get("version")}})
             return True
         if method in ("update_progress", "update_failed", "update_cancelled"):
@@ -128,14 +128,9 @@ class NativeService:
 
 
 def create_updater(client):
-    if sys.platform == 'win32':
-        from windows_update import WindowsUpdater
-        from toolbox_version import application_version
-        return WindowsUpdater(application_version(), client)
-    if client is not None:
-        from remote_updater import RemoteUpdater
-        return RemoteUpdater(client)
-    return None
+    from windows_update import WindowsUpdater
+    from toolbox_version import application_version
+    return WindowsUpdater(application_version(), client)
 
 
 def serve(root: Path = ROOT, *, remote_business: bool = False):
@@ -167,8 +162,6 @@ def serve(root: Path = ROOT, *, remote_business: bool = False):
         threading.Thread(target=updater.cleanup_completed_download, daemon=True).start()
     close = lambda: service.call("request_close", {})
     app.protocol("WM_DELETE_WINDOW", close)
-    if sys.platform == "darwin":
-        app.createcommand("::tk::mac::Quit", close)
     requests = queue.Queue()
 
     def read():

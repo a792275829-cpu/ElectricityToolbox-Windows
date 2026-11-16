@@ -15,7 +15,7 @@ for candidate in (ROOT, ROOT / "电力工具箱"):
 
 from toolbox_platform import relaunch_source_app, source_restart_available
 
-HOST_VARIABLES = ("TOOLBOX_HOST_PID", "TOOLBOX_APP_BUNDLE", "TOOLBOX_INSTALLED")
+HOST_VARIABLES = ("TOOLBOX_HOST_PID", "TOOLBOX_INSTALLED")
 LAUNCHER = ROOT / "电力工具箱" / "toolbox_launcher.pyw"
 
 try:

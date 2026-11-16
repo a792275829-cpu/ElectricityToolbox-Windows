@@ -174,7 +174,6 @@ class WpsLoginStatusTests(unittest.TestCase):
             mock.patch.object(self.module, "managed_chrome_is_headless", return_value=False),
             mock.patch.object(self.module, "stop_managed_chrome") as stop,
             mock.patch.object(self.module, "find_windows_browser", return_value=None),
-            mock.patch.object(self.module, "find_macos_chrome", return_value=None),
             mock.patch.object(self.module.time_module, "monotonic", side_effect=[0, 4]),
             mock.patch.object(self.module.subprocess, "Popen") as launch,
         ):

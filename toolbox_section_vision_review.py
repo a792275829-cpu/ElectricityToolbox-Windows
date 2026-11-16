@@ -85,7 +85,7 @@ def configured_reviewer(provider):
     if parsed.username or parsed.password or parsed.query or parsed.fragment or not (parsed.scheme == 'https' or parsed.scheme == 'http' and parsed.hostname in ('localhost', '127.0.0.1', '::1')):
         raise ValueError('模型地址须为 HTTPS 或本机 HTTP，不能包含凭据、查询或片段')
     local = parsed.hostname in ('localhost', '127.0.0.1', '::1')
-    # macOS system proxy settings need not exclude loopback. Keep local model
+    # System proxy settings need not exclude loopback. Keep local model
     # images on the loopback connection without changing process-wide proxies.
     open_request = build_opener(ProxyHandler({})).open if local else urlopen
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import shutil
+import re
+from zipfile import ZipFile, ZIP_DEFLATED
 import tempfile
 import unittest
 from pathlib import Path
@@ -131,6 +133,35 @@ def _build_workbook(path: Path) -> None:
 
 
 class DailyClearingFillTests(unittest.TestCase):
+    def test_snapshot_refuses_nonempty_data_beyond_its_supported_width(self):
+        book = load_workbook(self.workbook_path)
+        book.active.cell(1, 257, "unhandled data")
+        book.save(self.workbook_path)
+        book.close()
+        original = self.workbook_path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "超出第 256 列"):
+            load_daily_clearing_inputs("2026-11-02", self.workbook_path)
+        self.assertEqual(self.workbook_path.read_bytes(), original)
+
+    def test_snapshot_uses_xml_extent_and_keeps_capacity_and_renewables(self):
+        for dimension in (b'A1:A1', b'A1:XFD1048576', None):
+            with self.subTest(dimension=dimension):
+                target = self.workbook_path.with_name("dimension.xlsx")
+                with ZipFile(self.workbook_path) as original, ZipFile(target, "w", ZIP_DEFLATED) as output:
+                    for info in original.infolist():
+                        data = original.read(info.filename)
+                        if info.filename.startswith("xl/worksheets/"):
+                            replacement = b'' if dimension is None else b'<dimension ref="' + dimension + b'"/>'
+                            data = re.sub(rb'<dimension\b[^>]*/>', replacement, data)
+                        output.writestr(info, data)
+                before = target.read_bytes()
+                data = load_daily_clearing_inputs("2026-11-02", target)
+                self.assertEqual(data["rows"], self.data["rows"])
+                self.assertEqual(data["spot"], self.data["spot"])
+                self.assertEqual(len(data["rows"]), 11)
+                self.assertEqual(dict(((name, unit), values) for name, unit, values in data["rows"])[("分公司火电", None)][23], "559")
+                self.assertEqual(target.read_bytes(), before)
+
     def test_excel_errors_do_not_become_zero_anywhere_in_table(self) -> None:
         for error in ("#DIV/0!", "#VALUE!", "#N/A", None):
             with self.subTest(error=error):

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import os
 import queue
 import re
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -55,6 +57,7 @@ AUTH_LOCK_PATH = Path(str(AUTH_STATE_PATH) + ".lock")
 CONFIG_PATH = data_path(SCRIPT_DIR / "config.json")
 FALLBACK_CONFIG_PATH = data_path(LOGIN_SOURCE_DIR / "config.json")
 BUILTIN_PROVINCE_TEMPLATE = SCRIPT_DIR / "templates" / "省内数据模板.xlsx"
+PROVINCE_FORMULA_NAME = "_ToolboxProvinceCapacityFormula"
 
 UPLOAD_TYPES = {
     "省内": {
@@ -77,6 +80,10 @@ class Config:
     username: str = ""
     password: str = ""
     headless: bool = False
+
+
+class ProvinceTemplateError(RuntimeError):
+    """Invalid local inputs must never trigger a login/replay attempt."""
 
 
 @dataclass
@@ -1139,6 +1146,8 @@ def parse_api_payload(response, label: str) -> dict[str, Any]:
         raise RuntimeError(f"{label} 返回的不是 JSON：HTTP {response.status}，{text[:300]}") from exc
     if response.status >= 400:
         raise RuntimeError(f"{label} HTTP {response.status}: {json.dumps(payload, ensure_ascii=False)[:500]}")
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{label} 返回的 JSON 不是对象。")
     ret_code = payload.get("retCode")
     if ret_code and ret_code != "T200":
         raise RuntimeError(f"{label} 失败：{payload.get('retMsg') or payload}")
@@ -1316,6 +1325,7 @@ def update_province_excel_for_upload(
 ) -> list[UploadFile]:
     try:
         from openpyxl import load_workbook
+        from openpyxl.workbook.defined_name import DefinedName
     except Exception as exc:
         raise RuntimeError("当前 Python 环境缺少 openpyxl，无法自动更新省内数据 Excel。") from exc
 
@@ -1328,28 +1338,49 @@ def update_province_excel_for_upload(
     if province_upload.date != run_date:
         log(f"省内文件日期 {province_upload.date} 与能销日期 {run_date} 不一致，将按能销日期另存。")
 
-    startup_max = fetch_startup_max(context, run_date, province_area_id)
-    capacity_average = fetch_capacity_average(context, run_date, province_area_id)
-    log(f"市场化运行容量公式替换值：{format_formula_number(capacity_average)}")
-
     target_path = province_output_path(
         province_upload.path, run_date,
         output_dir=energy_upload.path.parent if province_upload.builtin_template else None,
     )
+    from toolbox_workbook_commit import workbook_fingerprint, assert_workbook_unchanged, workbook_commit_lock
+    source_fingerprint = workbook_fingerprint(province_upload.path)
+    same_target = target_path.resolve() == province_upload.path.resolve()
+    target_fingerprint = (source_fingerprint if same_target else workbook_fingerprint(target_path)) if target_path.exists() else None
     workbook = load_workbook(province_upload.path, data_only=False)
+    temporary = None
     try:
         worksheet = workbook["省内数据"] if "省内数据" in workbook.sheetnames else workbook.active
+        current_formula = worksheet["C2"].value
+        formula = current_formula if isinstance(current_formula, str) and current_formula.startswith("=") else None
+        if formula is None and PROVINCE_FORMULA_NAME in workbook.defined_names:
+            try:
+                formula = json.loads(workbook.defined_names[PROVINCE_FORMULA_NAME].attr_text)
+                if not isinstance(formula, str) or not formula.startswith("="):
+                    raise ValueError("invalid formula")
+                evaluate_simple_excel_formula(formula)
+            except (ValueError, TypeError, RuntimeError) as exc:
+                raise ProvinceTemplateError("省内数据保存的 C2 公式来源无效，请重新选择原始公式模板。") from exc
+        if formula is None and not province_upload.builtin_template and (
+                province_upload.auto_template or province_upload.date != run_date):
+            raise ProvinceTemplateError("省内数据 C2 已是数值且没有可重算的公式来源，不能自动或跨日复用。请重新选择原始公式模板。")
+        startup_max = fetch_startup_max(context, run_date, province_area_id)
+        capacity_average = fetch_capacity_average(context, run_date, province_area_id)
+        log(f"市场化运行容量公式替换值：{format_formula_number(capacity_average)}")
         worksheet["A2"].value = datetime.strptime(run_date, "%Y-%m-%d")
         worksheet["B2"].value = startup_max
-        current_formula = worksheet["C2"].value
-        if not isinstance(current_formula, str) or not current_formula.startswith("="):
+        if formula is None:
             formula_result = number_or_none(current_formula)
             if formula_result is None:
                 raise RuntimeError(f"C2 不是公式，无法按模板更新：{current_formula!r}")
             log(f"C2 已是数值，保留现有结果：{current_formula}")
         else:
-            updated_formula = replace_capacity_in_formula(current_formula, capacity_average)
+            updated_formula = replace_capacity_in_formula(formula, capacity_average)
             formula_result = evaluate_simple_excel_formula(updated_formula)
+            # Keep C2 numeric for the import protocol, but retain its formula
+            # inside the XLSX so staging/copying and later days can recompute it.
+            workbook.defined_names.add(DefinedName(
+                PROVINCE_FORMULA_NAME, attr_text=json.dumps(updated_formula), hidden=True,
+            ))
             worksheet["C2"].value = (
                 int(round(formula_result))
                 if abs(formula_result - round(formula_result)) < 0.000001
@@ -1358,9 +1389,39 @@ def update_province_excel_for_upload(
             if hasattr(workbook, "calculation"):
                 workbook.calculation.fullCalcOnLoad = True
                 workbook.calculation.forceFullCalc = True
-        workbook.save(target_path)
+        expected = {cell: (worksheet[cell].value, worksheet[cell].number_format)
+                    for cell in ("A2", "B2", "C2")}
+        sheet_name = worksheet.title
+        with tempfile.NamedTemporaryFile(prefix=".province-", suffix=".xlsx", dir=target_path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+        workbook.save(temporary)
+        check = load_workbook(temporary, data_only=True)
+        try:
+            for cell, snapshot in expected.items():
+                saved = check[sheet_name][cell]
+                value = snapshot[0]
+                equal = (isinstance(saved.value, (int, float)) and
+                         math.isclose(saved.value, value, rel_tol=1e-12, abs_tol=1e-8)
+                         if isinstance(value, (int, float)) else saved.value == value)
+                if not equal or saved.number_format != snapshot[1]:
+                    raise RuntimeError(f"省内数据保存后数值或格式回读不一致：{cell}")
+            if formula is not None and (
+                    PROVINCE_FORMULA_NAME not in check.defined_names or
+                    json.loads(check.defined_names[PROVINCE_FORMULA_NAME].attr_text) != updated_formula):
+                raise RuntimeError("省内数据保存后公式来源回读不一致。")
+        finally:
+            check.close()
+        with workbook_commit_lock((target_path,)):
+            assert_workbook_unchanged(province_upload.path, source_fingerprint)
+            if target_fingerprint is not None:
+                assert_workbook_unchanged(target_path, target_fingerprint)
+            elif target_path.exists():
+                raise RuntimeError("省内数据输出位置出现了其他文件，停止覆盖，请重新选择输出位置。")
+            os.replace(temporary, target_path)
     finally:
         workbook.close()
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
     log(f"省内数据已更新：{target_path}")
     return [
@@ -1376,9 +1437,16 @@ def get_daily_status(context, run_date: str, data_type: str, province_id: str) -
         timeout=30000,
     )
     payload = parse_api_payload(response, "查询日报上传状态")
-    rows = payload.get("data") or []
+    if not isinstance(payload, dict) or payload.get("retCode") != "T200":
+        raise RuntimeError("查询日报上传状态返回协议无效。")
+    rows = payload.get("data")
     if not isinstance(rows, list):
         raise RuntimeError("查询日报上传状态返回格式不正确。")
+    if rows and (len(rows) != 1 or not isinstance(rows[0], dict) or
+                 str(rows[0].get("date", ""))[:10] != run_date or
+                 str(rows[0].get("groupDataType", data_type)) != data_type or
+                 str(rows[0].get("provinceId", province_id)) != province_id):
+        raise RuntimeError("网站未返回唯一且日期、类型、省份一致的日报上传状态。")
     return rows[0] if rows else None
 
 
@@ -1407,6 +1475,26 @@ def import_daily_file(context, upload: UploadFile, run_date: str, province_id: s
     return parse_api_payload(response, f"导入{spec['name']}")
 
 
+def confirm_daily_import(context, payload, run_date: str, data_type: str, province_id: str) -> dict:
+    uncertain = "上传请求可能已提交，结果待核对；未自动重传，请先核对网站状态。"
+    if (not isinstance(payload, dict) or payload.get("retCode") != "T200" or
+            not isinstance(payload.get("data"), list)):
+        raise RuntimeError(f"导入响应协议异常。{uncertain}")
+    if payload["data"]:
+        raise RuntimeError(f"导入返回校验信息：{json.dumps(payload['data'], ensure_ascii=False)[:1000]}。{uncertain}")
+    try:
+        # Only repeat the read, never a possibly completed import request.
+        for attempt in range(3):
+            status = get_daily_status(context, run_date, data_type, province_id)
+            if status and status.get("dataStatus") in (1, "1") and status.get("updateTime"):
+                return status
+            if attempt < 2:
+                time.sleep(.5)
+    except Exception as exc:
+        raise RuntimeError(f"导入后的状态回读失败。{uncertain}") from exc
+    raise RuntimeError(f"网站尚未确认本次日报导入完成。{uncertain}")
+
+
 def run_api_upload(
     paths: list[Path],
     *,
@@ -1428,6 +1516,8 @@ def run_api_upload(
                 login_refreshed = False
                 try:
                     uploads = update_province_excel_for_upload(context, target_date, uploads)
+                except ProvinceTemplateError:
+                    raise
                 except PermissionError as exc:
                     raise PermissionError(
                         "无法读取或写入所选 Excel：文件可能正被 Excel/WPS 独占打开，"
@@ -1457,7 +1547,7 @@ def run_api_upload(
                         ensure_login(context, config)
                         login_refreshed = True
                         status = get_daily_status(context, target_date, data_type, province_id)
-                    uploaded = bool(status and status.get("dataStatus") == 1)
+                    uploaded = bool(status and status.get("dataStatus") in (1, "1"))
                     if uploaded and not force:
                         update_time = status.get("updateTime") or "未知时间"
                         log(f"{spec['name']} 已上传，跳过。更新时间：{update_time}")
@@ -1468,10 +1558,14 @@ def run_api_upload(
                     else:
                         log(f"{spec['name']} 未上传，开始导入。")
 
-                    payload = import_daily_file(context, upload, target_date, province_id)
-                    errors = payload.get("data") or []
-                    if errors:
-                        raise RuntimeError(f"{spec['name']} 导入返回校验信息：{json.dumps(errors, ensure_ascii=False)[:1000]}")
+                    try:
+                        payload = import_daily_file(context, upload, target_date, province_id)
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"{spec['name']} 导入未获得有效响应：{short_error(exc)}。"
+                            "上传请求可能已提交，结果待核对；未自动重传，请先核对网站状态。"
+                        ) from exc
+                    confirm_daily_import(context, payload, target_date, data_type, province_id)
                     log(f"{spec['name']} 导入成功。")
                 if create_report:
                     create_daily_report(context, target_date, headless=config.headless)

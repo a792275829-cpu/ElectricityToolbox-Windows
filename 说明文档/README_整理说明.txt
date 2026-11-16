@@ -22,6 +22,6 @@ a792275829-cpu/electricity-toolbox-scripts，本仓库只按功能逐项对齐�
 - 业务模块、模板和已有数据维持各自目录，不随意搬迁
 - 账号配置、独立登录态、浏览器 profile、缓存和输出不进入版本控制
 - 根目录 toolbox_*.py 是打包时平铺到载荷根的共享模块，不要移动、合并或改名
-- 00_启动 下的 .command 是 macOS 历史入口，保留但不维护
+- 00_启动 下只保留 Windows .cmd 入口，转调根目录 PowerShell 脚本
 
 改代码前先读 AGENTS.md。

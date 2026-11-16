@@ -76,7 +76,7 @@ class BrowserEditor:
         if name == 'auto-label':
             from toolbox_section_prelabel import prelabel
             from toolbox_section_vision_review import configured_reviewer
-            return prelabel(data, limit=30, engine=body.get('engine', 'ppocrv6' if os.name == 'nt' else 'macos-vision'),
+            return prelabel(data, limit=30, engine=body.get('engine', 'ppocrv6'),
                             reviewer=configured_reviewer(body.get('provider', 'none')))
         if name == 'backup':
             return dict(data=basemap.export_backup(data))

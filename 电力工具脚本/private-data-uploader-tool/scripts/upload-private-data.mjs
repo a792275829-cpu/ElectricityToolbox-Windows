@@ -155,17 +155,6 @@ async function defaultChromeExecutablePath() {
   if (process.env.TOOLBOX_PORTABLE === '1' && await pathExists(chromium.executablePath())) {
     return chromium.executablePath();
   }
-  const candidates = [];
-  if (process.platform === 'darwin') {
-    candidates.push(
-      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      path.join(process.env.HOME ?? '', 'Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
-    );
-  }
-
-  for (const candidate of candidates) {
-    if (candidate && await pathExists(candidate)) return candidate;
-  }
   return undefined;
 }
 

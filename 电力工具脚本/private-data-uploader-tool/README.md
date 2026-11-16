@@ -1,8 +1,8 @@
 # 私有数据上传工具
 
-从 macOS 工具箱的“出清结果汇总上传”页面选择复盘目录，预览后执行上传；或从“私有数据批量上传”页面按单元直连网站批量上传接口。
+从 Windows 工具箱的“出清结果汇总上传”页面选择复盘目录，预览后执行上传；或从“私有数据批量上传”页面按单元直连网站批量上传接口。
 
-实际上传逻辑为 `scripts/upload-private-data.mjs`，纯逻辑（单元清单、分片、multipart 组装、响应归纳）在 `scripts/batch-plan.mjs`。Node 依赖仅作用于本子工具。首次依赖安装由根目录初始化脚本完成（Windows：`setup_windows.ps1`；macOS：`setup_macos.command`）；也可以在本目录运行 `npm install`。
+实际上传逻辑为 `scripts/upload-private-data.mjs`，纯逻辑（单元清单、分片、multipart 组装、响应归纳）在 `scripts/batch-plan.mjs`。Node 依赖仅作用于本子工具。首次依赖安装由根目录初始化脚本完成（`setup_windows.ps1`）；也可以在本目录运行 `npm install`。
 
 需要命令行预览时，在本目录执行：
 

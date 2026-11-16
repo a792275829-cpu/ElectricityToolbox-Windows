@@ -433,7 +433,7 @@ class DateRangeInput(ttk.Frame):
 
     @staticmethod
     def _day_style(day: date, start: date | None, end: date | None) -> str:
-        # 起止日加粗；macOS 的原生按钮不吃背景色，区间底色画不出来，所以用提示行
+        # 起止日加粗；日期范围使用提示行展示，避免依赖按钮背景色
         # 报告“已选 A 至 B，共 N 天”，不依赖颜色表达区间。
         if day == start or day == end:
             return "CalendarRangeDaySelected.Primary.TButton"

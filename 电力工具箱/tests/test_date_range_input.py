@@ -1,5 +1,6 @@
 """Upstream range-picker behavior, using real Tk widgets and existing page variables."""
 import gc
+import time
 import tkinter as tk
 from tkinter import ttk
 import unittest
@@ -12,6 +13,7 @@ import toolbox_date_input as dates
 from toolbox.runtime import TaskRegistry, ToolPaths
 
 ROOT = Path(__file__).resolve().parents[2]
+TOOLBOX_TEST_TAGS = ("gui",)
 
 
 class DateRangeInputTests(unittest.TestCase):
@@ -42,6 +44,18 @@ class DateRangeInputTests(unittest.TestCase):
         self.root.update()
         self.addCleanup(widget.destroy)
         return widget, first, last
+
+    def focus_ready(self, widget):
+        # Win32 applies focus asynchronously; synthetic key events sent before
+        # this point can be dropped even though all Tk bindings are correct.
+        deadline = time.monotonic() + 2
+        widget.focus_force()
+        while time.monotonic() < deadline:
+            self.root.update()
+            if widget.focus_get() is widget:
+                return
+            self.root.after(10)
+        self.assertIs(widget.focus_get(), widget, "键盘事件测试未取得 Windows 焦点")
 
     def test_same_month_two_real_button_commands_complete_and_close(self):
         widget, first, last = self.make_range()
@@ -147,7 +161,7 @@ class DateRangeInputTests(unittest.TestCase):
     def test_keyboard_escape_closes_the_windows_popup(self):
         widget, _, _ = self.make_range()
         widget._open_from_key('start')
-        self.root.update()
+        self.focus_ready(widget.popup)
         widget.popup.event_generate('<Escape>')
         self.root.update()
         self.assertIsNone(widget.popup)
@@ -155,8 +169,7 @@ class DateRangeInputTests(unittest.TestCase):
     def test_return_normalizes_dates_and_closes_popup(self):
         widget, first, last = self.make_range('2026-11-4', '2026/11/5')
         widget.open_calendar('start')
-        widget.end_entry.focus_force()
-        self.root.update()
+        self.focus_ready(widget.end_entry)
         widget.end_entry.event_generate('<Return>')
         self.root.update()
         self.assertEqual((first.get(), last.get()), ('2026-11-04', '2026-11-05'))

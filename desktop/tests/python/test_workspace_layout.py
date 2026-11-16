@@ -177,6 +177,17 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual((self.home / "app/模块/tool.py").read_text(), "v2")
         self.assertEqual((self.home / "data/模块/.browser-profile/Default/Cookies").read_text(), "session")
         self.assertEqual(json.loads((self.home / "state/installed.json").read_text())["build"], "v2")
+        (self.home / "app/模块/tool.py").write_text("local edit")
+        (payload / "app/模块/tool.py").write_text("v3")
+        layout.write_json(payload / "manifest.json", {"build": "v3", "files": {
+            "模块/tool.py": installer.digest(payload / "app/模块/tool.py")}, "defaults": []})
+        result = subprocess.run(command, cwd=self.temp.name, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.home / "app/模块/tool.py").read_text(), "v3")
+        copies = list((self.home / "backups/source-updates").glob("v3-local-edits-*/模块/tool.py"))
+        self.assertEqual(len(copies), 1)
+        self.assertEqual(copies[0].read_text(), "local edit")
+        self.assertEqual((self.home / "data/模块/.browser-profile/Default/Cookies").read_text(), "session")
 
 
 class StoragePathTests(unittest.TestCase):

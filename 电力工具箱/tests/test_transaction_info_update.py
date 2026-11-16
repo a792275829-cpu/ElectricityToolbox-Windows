@@ -98,8 +98,36 @@ class TransactionInfoUpdateTests(unittest.TestCase):
                         self.assertEqual(sheet.cell(start + 3, 12).value, 3000)
                     self.assertEqual(sheet["C1"].value, 20241231)
                     self.assertEqual(sheet["C8"].value, 101)
-                    self.assertEqual(self.module._as_date(sheet["C15"].value, epoch=book.epoch), days[-1])
-                    self.assertEqual(self.module._as_date(sheet["J15"].value, epoch=book.epoch), date(2024, 12, 30))
+                    self.assertEqual((sheet["C15"].value, sheet["C15"].number_format), (102, "General"))
+                    self.assertEqual((sheet["J15"].value, sheet["J15"].number_format), (1230, "General"))
+                    self.assertEqual(self.module._as_date(sheet["C15"].value, epoch=book.epoch, reference=days[-1]), days[-1])
+                    self.assertEqual(self.module._as_date(sheet["J15"].value, epoch=book.epoch, reference=date(2024, 12, 30)), date(2024, 12, 30))
+                finally:
+                    book.close()
+
+    def test_yyyymmdd_append_preserves_readable_encoding_in_both_backends(self):
+        for backend in ("python", "rust"):
+            with self.subTest(backend=backend), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "legacy.xlsx"
+                self._build_fixture(path)
+                book = openpyxl.load_workbook(path)
+                book["Sheet1"]["C1"] = 20260910
+                book["Sheet1"]["J1"] = 20260907
+                for cell in ("C1", "J1"):
+                    book["Sheet1"][cell].number_format = "General"
+                book.save(path)
+                book.close()
+                day = date(2026, 9, 11)
+                pair = self.module.build_daily_load_pair(day, self._payload(day), self._payload(day - timedelta(days=3)))
+                with mock.patch.dict("os.environ", TOOLBOX_DOMAIN_BACKEND=backend):
+                    prepared = self.module.prepare_workbook(path, (pair,))
+                    self.module.commit_prepared_workbook(prepared, create_backup=False)
+                book = openpyxl.load_workbook(path)
+                try:
+                    self.assertEqual((book["Sheet1"]["C8"].value, book["Sheet1"]["C8"].number_format), (20260911, "General"))
+                    self.assertEqual((book["Sheet1"]["J8"].value, book["Sheet1"]["J8"].number_format), (20260908, "General"))
+                    self.assertEqual(book["Sheet1"]["C1"].value, 20260910)
+                    self.assertEqual(self.module.inspect_workbook_tail(path).day_ahead_date, day)
                 finally:
                     book.close()
 

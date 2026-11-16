@@ -76,6 +76,61 @@ LOGIN_STATUS_POLL_MS = 15000
 CONFIG_EXPORT_SCHEMA = "wps_excel_to_kdocs_config_export"
 CONFIG_EXPORT_VERSION = 1
 _REMOTE_BUSINESS = None
+WPS_OPERATION_TIMEOUT_SECONDS = 180
+WPS_INTERFACE_TIMEOUT_SECONDS = 20
+
+
+def bounded_wps_script(script: str, timeout_seconds: float) -> str:
+    # WPS SDK promises (MergeCells/save/Value) may never settle. A timeout
+    # rejects the caller, while checks after every SDK await prevent the
+    # suspended writer from resuming mutations if the SDK later recovers.
+    return """async (payload) => {
+      const deadline = Date.now() + __TIMEOUT_MS__;
+      let expired = false;
+      let stage = '连接表格接口';
+      const timeoutError = (reason = '整批操作超过总时限') => new Error('WPS_OPERATION_TIMEOUT: ' + reason + '：' + stage);
+      const checkActive = () => {
+        if (expired || Date.now() >= deadline) {
+          expired = true;
+          throw timeoutError();
+        }
+      };
+      const progress = (message) => {
+        checkActive();
+        if (stage === message) return;
+        stage = message;
+        console.info('TOOLBOX_WPS_PROGRESS=' + message);
+      };
+      const waitFor = async (value, message) => {
+        progress(message);
+        let interfaceTimer;
+        try {
+          const result = await Promise.race([
+            Promise.resolve(value),
+            new Promise((_, reject) => {
+              interfaceTimer = setTimeout(() => {
+                expired = true;
+                reject(timeoutError('单次接口连续无响应超过 __INTERFACE_TIMEOUT_SECONDS__ 秒'));
+              }, __INTERFACE_TIMEOUT_MS__);
+            })
+          ]);
+          checkActive();
+          return result;
+        } finally { clearTimeout(interfaceTimer); }
+      };
+      const operation = (__OPERATION__);
+      let timer;
+      try {
+        return await Promise.race([
+          Promise.resolve().then(() => operation(payload)),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => { expired = true; reject(timeoutError()); }, __TIMEOUT_MS__);
+          })
+        ]);
+      } finally { clearTimeout(timer); }
+    }""".replace("__TIMEOUT_MS__", str(max(1, round(timeout_seconds * 1000)))).replace(
+        "__INTERFACE_TIMEOUT_MS__", str(max(1, round(WPS_INTERFACE_TIMEOUT_SECONDS * 1000)))
+    ).replace("__INTERFACE_TIMEOUT_SECONDS__", str(WPS_INTERFACE_TIMEOUT_SECONDS)).replace("__OPERATION__", script)
 
 
 def configure_wps_tree_style(widget: tk.Misc) -> str:
@@ -463,22 +518,6 @@ def load_config() -> dict[str, Any]:
 
 def save_config(data: dict[str, Any]) -> None:
     CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def update_recent_urls(urls: list[str], url: str) -> list[str]:
@@ -875,7 +914,7 @@ WPS_APPLICATION_GUARD = """
 """
 
 
-def evaluate_wps_operation(page, script: str, payload: Any, log, timeout_seconds: int):
+def evaluate_wps_operation(page, script: str, payload: Any, log, timeout_seconds: int, *, may_write: bool = False):
     """Recheck readiness after navigation, including the gap before evaluate."""
     first_error: Exception | None = None
     for attempt in range(1, 4):
@@ -892,8 +931,19 @@ def evaluate_wps_operation(page, script: str, payload: Any, log, timeout_seconds
                 message += f" 首次操作失败原因：{first_error}"
             raise RuntimeError(message) from first_error
         try:
-            return page.evaluate(script, payload)
+            return page.evaluate(bounded_wps_script(script, timeout_seconds), payload)
         except Exception as exc:
+            if "WPS_OPERATION_TIMEOUT:" in str(exc):
+                if may_write:
+                    raise RuntimeError(
+                        f"WPS 写入、保存或回读超时：{str(exc).splitlines()[0]}。"
+                        "部分数据可能已经写入，结果待核对；未自动重试。请先打开目标表格核对后再操作。"
+                    ) from exc
+                raise RuntimeError(f"WPS 读取超时：{str(exc).splitlines()[0]}。请检查网络及表格状态后重试。") from exc
+            if may_write and "WPS_API_NOT_READY:" not in str(exc):
+                raise RuntimeError(
+                    f"WPS 写入中断：{exc}。部分数据可能已经写入，结果待核对；未自动重试。"
+                ) from exc
             # The guard runs before any cell assignment. Do not retry arbitrary
             # TypeErrors or API errors that may have occurred during a write.
             if not any(marker in str(exc) for marker in (
@@ -994,26 +1044,6 @@ def resolve_cdp_endpoint(cdp_url: str) -> str:
     raise RuntimeError("无法获取浏览器连接地址。" + " | ".join(errors))
 
 
-def find_macos_chrome() -> Path | None:
-    # Keep the automation browser on a distinct application bundle. If the
-    # regular Chrome binary is used for a long-lived headless CDP process,
-    # LaunchServices may route links from WeChat and other apps into that
-    # invisible instance because both share com.google.Chrome.
-    candidates = [
-        Path("/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"),
-        Path.home() / "Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-        Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
-        Path.home() / "Applications/Chromium.app/Contents/MacOS/Chromium",
-        Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-        Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    ]
-    return next((candidate for candidate in candidates if candidate.is_file()), None)
-
-
-
-
-
-
 def managed_cdp_host_port(cdp_url: str) -> tuple[str, int]:
     parsed = urllib.parse.urlparse(cdp_url.strip() or "http://127.0.0.1:9222")
     host = parsed.hostname or "127.0.0.1"
@@ -1031,12 +1061,6 @@ def build_wps_chrome_command(
 ) -> list[str]:
     host, port = managed_cdp_host_port(cdp_url)
     executable = [str(chrome_path)]
-    # A macOS application can retain an "Open using Rosetta" preference even
-    # when Chrome and Python are both universal/native. KDocs is CPU-heavy and
-    # becomes dramatically slower when its renderer is translated. Force the
-    # dedicated instance to use Chrome's native Apple Silicon slice.
-    if sys.platform == "darwin" and os.uname().machine == "arm64":
-        executable = ["/usr/bin/arch", "-arm64", str(chrome_path)]
     command = executable + [
         f"--remote-debugging-address={host}",
         f"--remote-debugging-port={port}",
@@ -1046,7 +1070,7 @@ def build_wps_chrome_command(
         # Do not let Chrome keep a hidden app/background-mode process after
         # the last dedicated WPS window is closed.
         "--disable-background-mode",
-        # The Tk config dialog normally covers Chrome on macOS. Keep the WPS
+        # The Tk config dialog can cover the dedicated browser. Keep the WPS
         # renderer at foreground speed while that dedicated window is occluded.
         "--disable-background-timer-throttling",
         "--disable-backgrounding-occluded-windows",
@@ -1129,70 +1153,51 @@ def managed_chrome_state_version() -> int:
 
 
 def managed_chrome_command(pid: int) -> str:
-    if sys.platform == "win32":
-        rows = windows_browser_processes(pid)
-        return (rows[0].get("CommandLine") or "") if rows else ""
-    if sys.platform != "darwin":
-        return ""
-    try:
-        result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-    except subprocess.SubprocessError:
-        return ""
-    return result.stdout.strip()
-
-
-def is_managed_chrome_command(command: str) -> bool:
-    profile_argument = f"--user-data-dir={PROFILE_DIR}"
-    is_browser_main_process = (
-        "/Contents/MacOS/Google Chrome" in command
-        or "/Contents/MacOS/Chromium" in command
-        or (sys.platform == "win32" and any(name in command.lower() for name in ("chrome.exe", "msedge.exe")))
-    )
-    return (
-        profile_argument in command
-        and is_browser_main_process
-        and "Google Chrome Helper" not in command
-        and "--type=" not in command
-    )
+    rows = windows_browser_processes(pid)
+    return (rows[0].get("CommandLine") or "") if rows else ""
 
 
 def discover_managed_chrome_pid() -> int | None:
-    """Find a dedicated Chrome whose PID changed without updating our PID file."""
-    if sys.platform == "win32":
-        rows = windows_browser_processes()
-        return next((int(row["ProcessId"]) for row in rows
-                     if is_managed_chrome_command(row.get("CommandLine") or "")), None)
-    if sys.platform != "darwin":
-        return None
-    try:
-        result = subprocess.run(
-            ["ps", "-axo", "pid=,command="],
-            capture_output=True,
-            text=True,
-            timeout=3,
-            check=False,
-        )
-    except subprocess.SubprocessError:
-        return None
+    rows = windows_browser_processes()
+    return next((int(row["ProcessId"]) for row in rows
+                 if is_managed_chrome_command(row.get("CommandLine") or "")), None)
 
-    candidates: list[tuple[bool, int]] = []
-    for line in result.stdout.splitlines():
-        fields = line.strip().split(None, 1)
-        if len(fields) != 2 or not fields[0].isdigit():
-            continue
-        pid = int(fields[0])
-        command = fields[1]
-        if is_managed_chrome_command(command):
-            candidates.append(("--remote-debugging-port=" in command, pid))
-    if not candidates:
-        return None
-    return max(candidates)[1]
+
+def managed_chrome_owner_pid(fallback: int) -> int:
+    """Best-effort adoption of the process that actually owns the profile."""
+    try:
+        return discover_managed_chrome_pid() or fallback
+    except (OSError, TypeError, ValueError, subprocess.SubprocessError):
+        return fallback
+
+
+def managed_chrome_process_exists() -> bool:
+    """Inconclusive enumeration keeps the caller waiting instead of failing."""
+    try:
+        return discover_managed_chrome_pid() is not None
+    except (OSError, TypeError, ValueError, subprocess.SubprocessError):
+        return True
+
+
+def managed_chrome_is_running(pid: int) -> bool:
+    return process_is_alive(pid)
+
+
+def is_managed_chrome_command(command: str) -> bool:
+    profile = str(PROFILE_DIR)
+    # Chrome may quote the profile argument when it normalizes the command line.
+    has_profile = (
+        f"--user-data-dir={profile}" in command
+        or f'--user-data-dir="{profile}"' in command
+    )
+    is_browser_main_process = (
+        any(name in command.lower() for name in ("chrome.exe", "msedge.exe"))
+    )
+    return (
+        has_profile
+        and is_browser_main_process
+        and "--type=" not in command
+    )
 
 
 def remember_managed_chrome(pid: int, version: int, *, headless: bool = False) -> None:
@@ -1226,9 +1231,8 @@ def managed_chrome_pid() -> int | None:
         recorded_pid = int(WPS_CHROME_PID_PATH.read_text(encoding="utf-8").strip())
         if not process_is_alive(recorded_pid):
             raise ProcessLookupError
-        if sys.platform in {"darwin", "win32"}:
-            if not is_managed_chrome_command(managed_chrome_command(recorded_pid)):
-                raise ProcessLookupError
+        if not is_managed_chrome_command(managed_chrome_command(recorded_pid)):
+            raise ProcessLookupError
         return recorded_pid
     except (
         FileNotFoundError,
@@ -1259,29 +1263,6 @@ def managed_chrome_launch_version(pid: int) -> int:
         return int(state.get("version") or 0)
     except (FileNotFoundError, ValueError, TypeError, json.JSONDecodeError):
         return 0
-
-
-def managed_chrome_is_running(pid: int) -> bool:
-    if sys.platform == "win32":
-        return process_is_alive(pid)
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
-        return False
-    if sys.platform != "darwin":
-        return True
-    try:
-        result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "stat="],
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-    except subprocess.SubprocessError:
-        return True
-    state = result.stdout.strip()
-    return bool(state) and not state.startswith("Z")
 
 
 def close_managed_chrome_window(pid: int, timeout_seconds: float) -> bool:
@@ -1450,10 +1431,7 @@ def _ensure_wps_dedicated_chrome(
             log,
             "浏览器仍在运行，但连接无响应",
         )
-    if sys.platform not in {"darwin", "win32"}:
-        raise RuntimeError("当前系统不支持自动启动专用浏览器，请手动打开后连接。")
-
-    chrome_path = find_windows_browser() if sys.platform == "win32" else find_macos_chrome()
+    chrome_path = find_windows_browser()
     if chrome_path is None:
         raise RuntimeError("未找到可用浏览器，请先安装谷歌浏览器。")
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1490,6 +1468,19 @@ def _ensure_wps_dedicated_chrome(
                 initial_url,
                 require_initial_url=preload_url,
             )
+            # Chrome may hand the browser over to a new main process and let
+            # the launcher exit with code 0. Record the process that actually
+            # owns the profile, otherwise liveness checks report a dead window.
+            launched_pid = managed_chrome_owner_pid(process.pid)
+            if launched_pid != process.pid:
+                try:
+                    remember_managed_chrome(
+                        launched_pid,
+                        WPS_CHROME_LAUNCH_VERSION,
+                        headless=headless,
+                    )
+                except OSError:
+                    pass
             if headless:
                 log("专用浏览器已在后台就绪。")
             else:
@@ -1497,10 +1488,10 @@ def _ensure_wps_dedicated_chrome(
             return {
                 "started": True,
                 "endpoint": endpoint,
-                "pid": process.pid,
+                "pid": launched_pid,
                 "headless": headless,
             }
-        if process.poll() is not None:
+        if process.poll() is not None and not managed_chrome_process_exists():
             break
         time_module.sleep(0.2)
     raise RuntimeError(
@@ -1661,19 +1652,27 @@ def write_to_wps(
             page = find_or_open_page(context, url)
 
             log("正在等待表格加载；如出现登录页面，请先在专用浏览器中完成登录。")
+            def report_progress(message):
+                prefix = "TOOLBOX_WPS_PROGRESS="
+                if message.type == "info" and message.text.startswith(prefix):
+                    log(message.text[len(prefix):])
+
+            page.on("console", report_progress)
             writer_script = "async (payload) => {" + WPS_APPLICATION_GUARD + """
               if (typeof api.save !== "function") {
                 throw new Error("WPS_API_NOT_READY: 表格保存功能尚未就绪");
               }
               const results = [];
               for (const item of payload) {
+                progress('正在处理第 ' + item.index + ' 个区域：' + item.targetSheet + '!' + item.targetRange);
                 const sheet = app.Worksheets(item.targetSheet);
                 const range = sheet.Range(item.targetRange);
                 const assignment = item.rows === 1 && item.cols === 1 ? item.values[0][0] : item.values;
-                const mergeCells = await range.MergeCells;
+                const mergeCells = await waitFor(range.MergeCells, '读取第 ' + item.index + ' 个区域的合并状态');
                 let expected = item.values;
                 let skipped = 0;
                 if (item.overwrite) {
+                  checkActive();
                   range.Value = assignment;
                 } else {
                   expected = item.values.map(row => row.slice());
@@ -1690,19 +1689,49 @@ def write_to_wps(
                     }
                     return name;
                   };
+                  // Read values once for the whole region when the SDK returns
+                  // a complete matrix. Never infer missing cells to be empty.
+                  const existing = await waitFor(range.Value, '读取第 ' + item.index + ' 个区域的已有值：' + item.targetRange);
+                  let existingValues = null;
+                  if (Array.isArray(existing) && existing.length === item.rows &&
+                      existing.every(row => Array.isArray(row) && row.length === item.cols)) {
+                    existingValues = existing;
+                  } else if (Array.isArray(existing) && existing.every(value => !Array.isArray(value))) {
+                    if (item.rows === 1 && existing.length === item.cols) existingValues = [existing];
+                    else if (item.cols === 1 && existing.length === item.rows) existingValues = existing.map(value => [value]);
+                  } else if (item.rows === 1 && item.cols === 1 && !Array.isArray(existing)) {
+                    existingValues = [[existing]];
+                  }
+                  const pendingWrites = [];
                   for (let r = 0; r < item.rows; r++) {
                     for (let c = 0; c < item.cols; c++) {
-                      const cell = sheet.Range(columnName(startCol + c) + (Number(rowNumber) + r));
-                      const current = await cell.Value;
-                      const formula = await cell.Formula;
-                      if ((current !== null && current !== undefined && current !== "") ||
-                          (typeof formula === "string" && formula.startsWith("="))) {
+                      const address = columnName(startCol + c) + (Number(rowNumber) + r);
+                      const cell = sheet.Range(address);
+                      const cellLabel = '第 ' + item.index + ' 个区域 ' + item.targetSheet + '!' + address;
+                      const current = existingValues ? existingValues[r][c] :
+                        await waitFor(cell.Value, '读取' + cellLabel + '的已有值');
+                      // A non-empty value already proves this cell must be
+                      // preserved. Some SDK Formula getters stall even here.
+                      if (current !== null && current !== undefined && current !== "") {
+                        expected[r][c] = current;
+                        skipped++;
+                        continue;
+                      }
+                      const formula = await waitFor(cell.Formula, '读取' + cellLabel + '的公式');
+                      if (typeof formula === "string" && formula.startsWith("=")) {
                         expected[r][c] = current;
                         skipped++;
                       } else {
-                        cell.Value = item.values[r][c];
+                        pendingWrites.push({cell, value: item.values[r][c]});
                       }
                     }
+                  }
+                  // Finish checking this region before changing its cells, so
+                  // a later Formula read cannot leave half the region written.
+                  progress('第 ' + item.index + ' 个区域检查完成：跳过 ' + skipped + ' 格，写入 ' + pendingWrites.length + ' 格');
+                  for (const {cell, value} of pendingWrites) {
+                    checkActive();
+                    cell.Value = value;
                   }
                 }
                 results.push({
@@ -1714,19 +1743,25 @@ def write_to_wps(
                   mergeCells, expected, skipped
                 });
               }
-              await api.save();
+              checkActive();
+              await waitFor(api.save(), '正在等待 WPS 保存完成');
               for (const result of results) {
                 const sheet = app.Worksheets(result.targetSheet);
                 const range = sheet.Range(result.targetRange);
-                result.value = await range.Value;
-                result.value2 = await range.Value2;
-                result.text = await range.Text;
+                result.value = await waitFor(range.Value, '正在回读第 ' + result.index + ' 个区域的值');
+                result.value2 = await waitFor(range.Value2, '正在回读第 ' + result.index + ' 个区域的原始值');
+                result.text = await waitFor(range.Text, '正在回读第 ' + result.index + ' 个区域的显示文本');
               }
               return { saved: true, results };
             }
             """
             log(f"正在写入 {len(payload)} 个区域…")
-            return evaluate_wps_operation(page, writer_script, payload, log, 180)
+            try:
+                return evaluate_wps_operation(
+                    page, writer_script, payload, log, WPS_OPERATION_TIMEOUT_SECONDS, may_write=True
+                )
+            finally:
+                page.remove_listener("console", report_progress)
         finally:
             if close_context:
                 context.close()
@@ -1751,11 +1786,11 @@ def read_online_document_info(url: str, browser_mode: str, cdp_url: str, log) ->
                 "正在等待表格就绪…"
             )
             script = "async () => {" + WPS_APPLICATION_GUARD + """
-              const count = await app.Worksheets.Count;
+              const count = await waitFor(app.Worksheets.Count, '读取工作表数量');
               const sheets = [];
               for (let i = 1; i <= Number(count); i++) {
                 const ws = app.Worksheets(i);
-                sheets.push(await ws.Name);
+                sheets.push(await waitFor(ws.Name, '读取第 ' + i + ' 个工作表名称'));
               }
               return {title: document.title, sheets};
             }
@@ -1813,9 +1848,9 @@ def read_online_ranges(
         try:
             script = "async (payload) => {" + WPS_APPLICATION_GUARD + """
               const {sheetName, rangeText} = payload;
-              const sheet = await app.Worksheets(sheetName);
-              const range = await sheet.Range(rangeText);
-              return await range.Value;
+              const sheet = await waitFor(app.Worksheets(sheetName), '读取来源工作表');
+              const range = await waitFor(sheet.Range(rangeText), '读取来源区域');
+              return await waitFor(range.Value, '读取来源区域的值');
             }
             """
             results = []

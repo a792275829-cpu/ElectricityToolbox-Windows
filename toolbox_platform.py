@@ -36,7 +36,7 @@ def detached_browser_process_options():
 def source_restart_available() -> bool:
     """Only source runs own their GUI process; desktop builds are managed by the host."""
     return not any(os.environ.get(name) for name in (
-        "TOOLBOX_HOST_PID", "TOOLBOX_APP_BUNDLE", "TOOLBOX_INSTALLED",
+        "TOOLBOX_HOST_PID", "TOOLBOX_INSTALLED",
     ))
 
 
@@ -79,8 +79,7 @@ def window_scale(root) -> float:
 
     After configure_dpi() Windows Tk reports geometry in physical pixels,
     while the window constants are designed at 96 DPI.  Without this factor
-    a 1480x900 window looks like 987x600 on a 150% display.  macOS keeps
-    logical points, so it must stay 1.0 there.
+    a 1480x900 window looks like 987x600 on a 150% display.
     """
     if os.name != "nt":
         return 1.0
@@ -236,10 +235,7 @@ def find_windows_browser() -> Path | None:
 
 
 def open_path(path: Path):
-    if sys.platform == "win32":
-        os.startfile(str(path.resolve()))
-    else:
-        subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", str(path)], check=False)
+    os.startfile(str(path.resolve()))
 
 
 @contextmanager

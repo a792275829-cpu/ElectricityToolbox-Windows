@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path[:0] = [str(ROOT), str(ROOT / '电力工具箱')]
+TOOLBOX_TEST_TAGS = ()
 
 
 @unittest.skipUnless(sys.platform == 'win32', 'Windows process query')
@@ -57,6 +58,35 @@ class BrowserDiscoveryTests(unittest.TestCase):
 
 
 class WpsOperationSerializationTests(unittest.TestCase):
+    def test_stuck_operation_does_not_keep_queued_threads_alive_forever(self):
+        from toolbox.ui_tasks import RemoteTaskRegistry
+        registry = RemoteTaskRegistry(None)
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+
+        def execute(tool, action, values, token, log):
+            calls.append(action)
+            if action == 'status':
+                entered.set()
+                release.wait(3)
+            return {'ok': True}
+
+        with (patch.object(registry, 'execute_remote', side_effect=execute),
+              patch('toolbox.ui_tasks.WPS_QUEUE_WAIT_SECONDS', .03)):
+            first = threading.Thread(target=lambda: registry.wps_action('status', {}, [], lambda _: None), daemon=True)
+            first.start()
+            self.assertTrue(entered.wait(2))
+            try:
+                with self.assertRaisesRegex(RuntimeError, '本次操作尚未提交'):
+                    registry.wps_action('run', {}, [], lambda _: None)
+                self.assertEqual(calls, ['status'])
+                self.assertTrue(registry._wps_operation_lock.locked())
+            finally:
+                release.set()
+                first.join(3)
+            self.assertEqual(registry.wps_action('preview', {}, [], lambda _: None), {'ok': True})
+        self.assertEqual(calls, ['status', 'preview'])
+
     def test_preview_write_and_inspect_wait_for_the_active_login_check(self):
         from toolbox.ui_tasks import RemoteTaskRegistry
         for action in ('preview', 'run', 'inspect'):

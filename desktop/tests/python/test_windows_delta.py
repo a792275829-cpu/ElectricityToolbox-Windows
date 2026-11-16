@@ -33,8 +33,8 @@ class RouteTests(unittest.TestCase):
         with self.assertRaises(UpdateError):
             select_route(index, '1.0.1', '1.0.3', 100, 'owner/repo', 'windows-x64')
 
-    def test_existing_mac_route_contract_is_preserved(self):
-        name = 'ElectricityToolbox-1.0.1-to-1.0.2-apple-silicon.patch.tar.xz'
+    def test_shared_route_defaults_to_windows(self):
+        name = 'ElectricityToolbox-1.0.1-to-1.0.2-windows-x64.patch.tar.xz'
         edge = dict(base='1.0.1', target='1.0.2', name=name, size=10, digest='sha256:'+'a'*64,
             browser_download_url=f'https://github.com/owner/repo/releases/download/v1.0.2/{name}')
         self.assertEqual(select_route(dict(format=1, version='1.0.2', patches=[edge]),

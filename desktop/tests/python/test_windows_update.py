@@ -303,14 +303,11 @@ class SharedVersionTests(unittest.TestCase):
                 state.write_text('{"version":false}')
                 self.assertEqual(toolbox_version.application_version(),'未知')
 
-    def test_native_bridge_selects_windows_updater_and_preserves_mac_remote(self):
+    def test_native_bridge_selects_windows_updater(self):
         from unittest.mock import Mock
         import native_bridge
-        from remote_updater import RemoteUpdater
         with patch('native_bridge.sys.platform','win32'):
             self.assertIsInstance(native_bridge.create_updater(Mock()),WindowsUpdater)
-        with patch('native_bridge.sys.platform','darwin'):
-            self.assertIsInstance(native_bridge.create_updater(Mock()),RemoteUpdater)
 
     def test_installed_log_and_status_bar_use_host_version(self):
         import tkinter as tk

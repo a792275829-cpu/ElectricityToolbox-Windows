@@ -86,7 +86,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\start_source_test.ps1 -Smo
 正式源码入口和源码调试入口分别说明见 [Windows 使用说明](desktop/WINDOWS.md)。
 
 上游仓库为 [electricity-toolbox-scripts](https://github.com/a792275829-cpu/electricity-toolbox-scripts)，仅按功能逐项对齐。
-历史 `.command` 和 macOS 打包脚本保留原位；本仓库不运行 macOS 构建或自动发布。
+本仓库仅保留 Windows 版所需的源码、入口和构建工具。
 
 ## 首次登录和本地配置
 

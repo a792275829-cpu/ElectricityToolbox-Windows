@@ -40,7 +40,7 @@ def compose_surface(source: Image.Image, width: int, height: int, border: int) -
 
 def _cached_bitmap(source: Image.Image, width: int, height: int, border: int) -> Image.Image:
     # ttk 8.6's tile loop includes y == bottom. A source exactly as high as its
-    # parcel causes an extra zero-height image draw on macOS. An invisible guard
+    # parcel can cause an extra zero-height image draw. An invisible guard
     # row/column keeps the full-size background on the single clipped-copy path.
     result = Image.new(source.mode, (width + 1, height + 1))
     result.paste(compose_surface(source, width, height, border), (0, 0))

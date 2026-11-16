@@ -692,13 +692,18 @@ class _ClearingWorkbookSnapshot:
             # 宽度按各表真实列数取，不人为截断列范围。
             for name in self.sheetnames:
                 sheet = workbook[name]
-                try:
-                    width = max(self._WIDTH, min(int(sheet.max_column or 0), self._MAX_WIDTH))
-                except (TypeError, ValueError):
-                    width = self._WIDTH
-                self._sheets[name] = list(
-                    sheet.iter_rows(min_col=1, max_col=width, values_only=True)
-                )
+                # Exported dimensions may be stale in either direction. Read
+                # the actual XML rows, including capacity in column 31.
+                sheet.reset_dimensions()
+                rows = []
+                width = self._WIDTH
+                for row in sheet.iter_rows(values_only=True):
+                    if any(value is not None for value in row[self._MAX_WIDTH:]):
+                        raise ValueError(f"{name} 的有效数据超出第 {self._MAX_WIDTH} 列，停止读取以免截断。")
+                    values = tuple(row[:self._MAX_WIDTH])
+                    rows.append(values)
+                    width = max(width, len(values))
+                self._sheets[name] = rows
                 self._widths[name] = width
         finally:
             workbook.close()

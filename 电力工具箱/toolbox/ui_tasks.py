@@ -15,6 +15,8 @@ from .runtime import TaskRegistry
 from .tasks import TaskCancelled
 from .tasks.errors import RemoteTaskError
 
+WPS_QUEUE_WAIT_SECONDS = 30
+
 
 class BusinessClient:
     def __init__(self, send):
@@ -179,7 +181,11 @@ class RemoteTaskRegistry(TaskRegistry):
         # Queue them before submission; the service's exclusion remains intact.
         if not self._wps_operation_lock.acquire(blocking=False):
             log("正在等待其他 WPS 操作完成…")
-            self._wps_operation_lock.acquire()
+            if not self._wps_operation_lock.acquire(timeout=WPS_QUEUE_WAIT_SECONDS):
+                raise RuntimeError(
+                    f"等待其他 WPS 操作超过 {WPS_QUEUE_WAIT_SECONDS:g} 秒，原任务仍在运行，本次操作尚未提交。"
+                    "请等待原任务结束并核对表格结果，不要重复点击写入。"
+                )
         try:
             return self.execute_remote("wps-writer", action, values, CancellationToken(), log)
         finally:

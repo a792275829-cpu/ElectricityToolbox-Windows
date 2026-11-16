@@ -27,7 +27,7 @@ class UpdateUiTests(unittest.TestCase):
         self.updater.check.return_value = None
         self.controller = UpdateController(self.app, self.service, self.updater)
         self.service.updater = self.controller
-        self.release = Release("v0.2.0", "测试更新说明", "https://github.com/test/repo/releases/tag/v0.2.0", {"name": "test.dmg"})
+        self.release = Release("v0.2.0", "测试更新说明", "https://github.com/test/repo/releases/tag/v0.2.0", {"name": "test.exe"})
 
     def tearDown(self):
         self.app.destroy()
@@ -58,6 +58,14 @@ class UpdateUiTests(unittest.TestCase):
         self.assertIn('Windows',window.platform_text)
         self.assertNotIn('增量',window.status.get())
         self.assertNotIn('Apple',window.platform_text)
+
+    def test_missing_installer_keeps_windows_identity_and_disables_install(self):
+        self.controller.release = Release('v0.2.0', '更新', self.release.page, None)
+        self.controller.show()
+        window = self.controller.window
+        self.assertIn('Windows x64', window.platform_text)
+        self.assertIn('Windows x64 安装包', window.status.get())
+        self.assertIn('disabled', window.primary.state())
 
     def test_windows_progress_shows_delta_size_and_preparation_phase(self):
         self.controller.release = Release('v0.1.28','更新','https://github.com/test/repo/releases/tag/v0.1.28',
@@ -149,7 +157,7 @@ class UpdateUiTests(unittest.TestCase):
         self.controller.release = self.release
         self.controller.show()
         window = self.controller.window
-        self.updater.download.return_value = Path(self.temp.name) / "test.dmg"
+        self.updater.download.return_value = Path(self.temp.name) / "test.exe"
         calls = []
         original = self.service.call
         def call(method, params):
@@ -185,7 +193,7 @@ class UpdateUiTests(unittest.TestCase):
         self.controller.release = self.release
         self.controller.show()
         window = self.controller.window
-        self.updater.download.return_value = Path(self.temp.name) / 'test.dmg'
+        self.updater.download.return_value = Path(self.temp.name) / 'test.exe'
         self.updater.prepare_install.side_effect = ValueError('镜像签名错误')
         window.perform()
         self.pump(lambda: '镜像签名错误' in window.status.get())
@@ -210,7 +218,7 @@ class UpdateUiTests(unittest.TestCase):
         with patch.object(self.controller, 'worker') as worker:
             window.perform()
             window.dismiss()
-            window.download_finished(Path(self.temp.name) / 'verified.dmg', None)
+            window.download_finished(Path(self.temp.name) / 'verified.exe', None)
             worker.call_args.args[1](True, None)
         self.updater.prepare_install.assert_not_called()
         self.assertFalse(self.service.maintenance)

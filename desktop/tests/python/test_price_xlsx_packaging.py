@@ -12,12 +12,6 @@ import prepare_workspace
 
 
 class PriceXlsxPackagingTests(unittest.TestCase):
-    def test_build_is_required_before_packaging(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(prepare_payload, "run") as run:
-            with self.assertRaises(FileNotFoundError):
-                prepare_payload.prepare_price_xlsx(Path(tmp), "aarch64-apple-darwin")
-            self.assertIn("--target", run.call_args.args[0])
-            self.assertIn("--output", run.call_args.args[0])
 
     def test_managed_install_preserves_executable_mode(self):
         binary = ROOT / "500kV断面分析/bin" / ("toolbox-price-xlsx.exe" if os.name == "nt" else "toolbox-price-xlsx")

@@ -16,6 +16,8 @@ from openpyxl import load_workbook
 from toolbox.runtime import load_module
 from toolbox.upload_service import run_group_upload_with_staging
 
+TOOLBOX_TEST_TAGS = ()
+
 
 class GroupUploadTemplateTests(unittest.TestCase):
     def setUp(self):
@@ -108,7 +110,7 @@ class GroupUploadTemplateTests(unittest.TestCase):
         self.assert_output(self.folder / "广东-省内数据-20261023.xlsx")
         self.assertFalse(observed[1].parent.exists())
 
-    def test_same_directory_template_is_staged_even_when_only_energy_is_selected(self):
+    def test_cross_day_numeric_template_without_formula_is_rejected(self):
         from shutil import copy2
         province = self.folder / "广东-省内数据-20261022.xlsx"
         copy2(self.template, province)
@@ -118,8 +120,9 @@ class GroupUploadTemplateTests(unittest.TestCase):
             self.assertFalse(self.module.prepare_upload_files(paths)[1][0].builtin_template)
             self.update(paths)
         with mock.patch.object(self.module, "run_api_upload", side_effect=upload):
-            run_group_upload_with_staging(self.module, [self.energy], force=False, on_log=lambda _: None)
-        self.assert_output(self.folder / "广东-省内数据-20261023.xlsx")
+            with self.assertRaisesRegex(RuntimeError, "不能自动或跨日复用"):
+                run_group_upload_with_staging(self.module, [self.energy], force=False, on_log=lambda _: None)
+        self.assertFalse((self.folder / "广东-省内数据-20261023.xlsx").exists())
         self.assertEqual(province.read_bytes(), self.original_template)
 
     def test_locked_generated_file_is_rejected_without_touching_template(self):

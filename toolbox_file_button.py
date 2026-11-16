@@ -11,12 +11,6 @@ class FileSelectButton(ttk.Button):
         # tooltip: it popped up under the button right after picking a file.
         style = ttk.Style(parent)
         style.configure("FileSelect.TButton", padding=5, width=0, anchor="center")
-        if style.theme_use() == "aqua":
-            # Aqua's native push-button bezel enforces a 70 px minimum even
-            # for an image-only button. Use the same compact icon in dialogs.
-            style.layout("FileSelect.TButton", [("Button.padding", {
-                "sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})],
-            })])
         self._icons = []
         for ink in ("#333333", "#b5b5b0"):
             icon = tk.PhotoImage(master=parent, width=20, height=20)

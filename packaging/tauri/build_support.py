@@ -44,7 +44,7 @@ def sha256(path: Path) -> str:
 
 
 def exportable(relative: Path) -> bool:
-    if relative in {Path("packaging/tauri/requirements-macos.lock"), Path("native/price-xlsx/Cargo.lock")}:
+    if relative == Path("native/price-xlsx/Cargo.lock"):
         return True
     return (not EXCLUDED_PARTS.intersection(relative.parts)
             and relative.name not in EXCLUDED_NAMES

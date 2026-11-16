@@ -41,12 +41,12 @@ def _rounded_element(style: ttk.Style, name: str, fill: str, *, outline: str | N
 
     def surface(color: str, edge: str | None):
         # ttk tiles the image center rather than stretching it. A 28 px image
-        # leaves only a 4 px center on cards, producing thousands of CoreGraphics
-        # image draws per panel on macOS. Keep a large tile and declare the small
+        # leaves only a 4 px center on cards, producing thousands of repeated
+        # image draws per panel. Keep a large tile and declare the small
         # minimum size separately so controls retain their compact geometry.
         size, scale = (512 if name == "Card" else 128), 3
         # All surfaces have a known solid parent color. Precompose the corners
-        # instead of making macOS alpha-blend every tiled image on each hover.
+        # instead of alpha-blending every tiled image on each hover.
         backdrop = SIDEBAR if name.startswith("Nav") else BACKGROUND
         bitmap = Image.new("RGB", (size * scale, size * scale), backdrop)
         ImageDraw.Draw(bitmap).rounded_rectangle(

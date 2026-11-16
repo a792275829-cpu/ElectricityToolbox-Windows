@@ -420,7 +420,7 @@ def draw_contact_sheet(payload: dict[str, object], image_path: Path, output_path
     cell_width, cell_height, columns = 360, 250, 4
     rows = max(1, math.ceil(len(nodes) / columns))
     sheet = Image.new("RGB", (columns * cell_width, rows * cell_height), "#0b1420")
-    font_path = Path("/System/Library/Fonts/PingFang.ttc")
+    font_path = ROOT.parent / "风力预测截图/fonts/NotoSerifSC.ttf"
     font = ImageFont.truetype(str(font_path), 17) if font_path.exists() else ImageFont.load_default()
     small_font = ImageFont.truetype(str(font_path), 13) if font_path.exists() else ImageFont.load_default()
 

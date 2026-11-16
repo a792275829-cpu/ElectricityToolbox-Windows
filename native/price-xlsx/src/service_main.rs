@@ -306,7 +306,7 @@ fn call(config: &Config, shared: &Shared, closed: &AtomicBool, method: &str, par
             Ok(json!(true))
         },
         "check_updates" | "updates.check" => Ok(json!(true)),
-        "updates.status" => Ok(json!({"checking":false,"error":"Windows 版请退出工具箱后运行新版安装程序；当前自动更新通道仅适用于 macOS。","release":null})),
+        "updates.status" => Ok(json!({"checking":false,"error":"请通过工具箱界面检查并安装 Windows 更新。","release":null})),
         value if value.starts_with("updates.") => Err("Windows 版请运行新版安装程序进行更新".into()),
         _ => compatibility(config, method, params),
     }

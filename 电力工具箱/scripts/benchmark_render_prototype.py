@@ -2,7 +2,7 @@
 
 Run baseline/prototype in separate processes and compare matching screenshots.
 Measurements include Tk event processing and drawing submission, not the time
-at which the macOS compositor presents the final pixels on the screen.
+at which the compositor presents the final pixels on the screen.
 """
 from __future__ import annotations
 
@@ -11,32 +11,12 @@ import json
 import os
 from pathlib import Path
 import statistics
-import subprocess
 import sys
 import time
-from collections import deque
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from toolbox.app import ToolboxApp
-
-
-def mac_window_id() -> str:
-    # Query only this process's windows; capture by window ID so another app
-    # moving in front cannot appear in the screenshots.
-    source = '''import AppKit; import CoreGraphics
-let pid = Int32(CommandLine.arguments[1])!
-NSRunningApplication(processIdentifier: pid)?.activate(options: [])
-let windows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as! [[String: Any]]
-for w in windows where (w[kCGWindowOwnerPID as String] as? Int32) == pid {
-    if let b = w[kCGWindowBounds as String] as? [String: Double], (b["Width"] ?? 0) >= 500, (b["Height"] ?? 0) >= 400 {
-        print(w[kCGWindowNumber as String]!)
-    }
-}
-'''
-    result = subprocess.run(["/usr/bin/swift", "-e", source, str(os.getpid())],
-                            check=True, capture_output=True, text=True)
-    return result.stdout.strip().splitlines()[0]
 
 
 def distribution(values):
@@ -49,7 +29,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("baseline", "prototype"), required=True)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--screenshots", action="store_true")
     parser.add_argument("--hover-interval-ms", type=int, default=35)
     args = parser.parse_args()
     with patch("toolbox.ui.credentials_panel.CredentialStore.load", return_value={}):
@@ -58,7 +37,6 @@ def main() -> None:
     app.attributes("-topmost", True)
     app.lift()
     app.update()
-    window_id = mac_window_id() if sys.platform == "darwin" else None
     app.update()
     start = time.perf_counter()
     app.show_page("出清结果汇总上传")
@@ -128,43 +106,6 @@ def main() -> None:
 
     if args.output:
         args.output.mkdir(parents=True, exist_ok=True)
-    if args.screenshots:
-        if sys.platform != "darwin" or args.output is None:
-            parser.error("--screenshots requires macOS and --output")
-        pending = deque((size, state) for size in ("1440x820", "1100x680")
-                        for state in ("normal", "hover", "focus", "pressed", "disabled"))
-
-        def next_capture():
-            if not pending:
-                app.quit()
-                return
-            size, state = pending.popleft()
-            app.geometry(size + "+0+40")
-            for button in (*buttons, page.run_button):
-                button.state(("!active", "!focus", "!pressed", "!disabled"))
-            if state != "normal":
-                flag = "active" if state == "hover" else state
-                app.nav_buttons["风力预测截图"].state((flag,))
-                page.run_button.state((flag,))
-
-            def capture():
-                process = subprocess.Popen(["/usr/sbin/screencapture", "-x", "-o", "-l", window_id,
-                                            str(args.output / f"{args.mode}-{size}-{state}.png")])
-
-                def poll_capture():
-                    if process.poll() is None:
-                        app.after(15, poll_capture)
-                    elif process.returncode:
-                        raise RuntimeError(f"Screenshot failed: {process.returncode}")
-                    else:
-                        app.after(80, next_capture)
-
-                poll_capture()
-
-            app.after(200, capture)
-
-        app.after(200, next_capture)
-        app.mainloop()
     if args.output:
         (args.output / f"{args.mode}.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False), flush=True)

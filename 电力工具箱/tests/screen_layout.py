@@ -1,9 +1,7 @@
-"""Skip fixed-size GUI assertions on displays that cannot show the window.
+"""Skip fixed-size GUI assertions when the display cannot show the window.
 
-GitHub's macOS runners ship with different virtual screen sizes (macos-15
-uses 1024x768).  Tk clamps the window to the screen there, so assertions
-about the minimum window layout would fail for an environment reason
-rather than a layout regression.
+Tk can clamp windows to smaller displays. Skip fixed-size layout assertions
+when that screen cannot fit the requested dimensions.
 """
 from __future__ import annotations
 

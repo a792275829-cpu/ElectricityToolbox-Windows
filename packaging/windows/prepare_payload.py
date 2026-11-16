@@ -127,7 +127,7 @@ def prepare(python_root: Path, forecast_workbook: Path | None = None,
     build_support.extract(archive, unpack)
     shutil.copytree(unpack / name, runtime / 'node', dirs_exist_ok=True)
     uploader = source / '电力工具脚本/private-data-uploader-tool'
-    # Match the Python browser revision, as in the macOS payload builder.
+    # Match the Python browser revision, for the packaged browser runtime.
     package = json.loads((uploader / 'package.json').read_text(encoding='utf-8'))
     package['dependencies']['playwright'] = build_support.PLAYWRIGHT_VERSION
     (uploader / 'package.json').write_text(json.dumps(package, indent=2), encoding='utf-8')

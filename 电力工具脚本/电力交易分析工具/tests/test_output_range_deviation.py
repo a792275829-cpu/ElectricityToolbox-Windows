@@ -1,6 +1,9 @@
 import importlib.util
 import sys
+import unittest
 from pathlib import Path
+
+TOOLBOX_TEST_TAGS = ()
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "find_output_range_deviation_days.py"
@@ -86,3 +89,11 @@ def test_top_per_market_keeps_each_market_separate():
         ("日前", "2026-06-01"),
         ("实时", "2026-06-01"),
     ]
+
+
+def load_tests(loader, standard_tests, pattern):
+    # These legacy function-style assertions were invisible to unittest.
+    standard_tests.addTests(unittest.FunctionTestCase(value)
+                            for name, value in sorted(globals().items())
+                            if name.startswith("test_") and callable(value))
+    return standard_tests

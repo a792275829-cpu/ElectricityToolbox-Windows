@@ -207,22 +207,7 @@ def fetch_forecast_rows(context, run_date: str, config: Config, auth) -> list[Fo
 
 @lru_cache(maxsize=None)
 def _font(size: int, *, bold: bool = False):
-    # 缓存键为 (size, bold)。macOS 分支首个候选 Songti.ttc 的 index 由 bold
-    # 决定（0/6），随 bold 一起进入键，故 index 差异不会串；非 macOS 分支的
-    # set_variation_by_axes(700/400) 也按 bold 分开。字体选择顺序与异常回退不变。
-    if sys.platform == "darwin":
-        candidates = (
-            ("/System/Library/Fonts/Supplemental/Songti.ttc", 0 if bold else 6),
-            ("/System/Library/Fonts/PingFang.ttc", 0),
-            ("/System/Library/Fonts/STHeiti Medium.ttc" if bold else
-             "/System/Library/Fonts/STHeiti Light.ttc", 0),
-            ("/System/Library/Fonts/Supplemental/Arial Unicode.ttf", 0),
-        )
-        for path, index in candidates:
-            try:
-                return ImageFont.truetype(path, size=size, index=index)
-            except OSError:
-                continue
+    # Cache regular and bold variants separately.
     # Preserve Chinese glyphs and the requested size if system fonts are unavailable.
     path = SCRIPT_DIR / "fonts" / "NotoSerifSC.ttf"
     try:

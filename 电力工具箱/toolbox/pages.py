@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from . import commands, file_rules
-from .upload_service import copy_file_with_finder_fallback, run_group_upload_with_staging
+from .upload_service import copy_upload_file, run_group_upload_with_staging
 
 import queue
 import shutil

@@ -13,6 +13,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "电力工具箱")]
 from toolbox_platform import hidden_process_options, process_is_alive
 
 SERVICE = Path(os.environ.get("TOOLBOX_SERVICE_BINARY", str(ROOT / "电力工具箱/bin" / ("toolbox-service.exe" if os.name == "nt" else "toolbox-service"))))
+TOOLBOX_TEST_TAGS = ("gui",)
 
 
 @unittest.skipUnless(SERVICE.is_file(), "build native/price-xlsx first (Rust task service)")
@@ -76,6 +77,70 @@ class RustServiceTests(unittest.TestCase):
                 return task
             time.sleep(.02)
         self.fail(f"Task did not finish: {task}; events={self.call('events')}")
+
+    def test_wps_save_timeout_releases_operation_and_service_can_exit_and_restart(self):
+        from openpyxl import Workbook
+        from toolbox.ui_tasks import RemoteTaskRegistry
+        from types import SimpleNamespace
+
+        source_file = self.workspace / '来源.xlsx'
+        workbook = Workbook()
+        workbook.active.title = '来源'
+        workbook.active['A1'] = 42
+        workbook.save(source_file)
+        workbook.close()
+        target = self.workspace / 'wps自动/wps_excel_to_kdocs_gui.py'
+        target.parent.mkdir()
+        source = (ROOT / 'wps自动/wps_excel_to_kdocs_gui.py').read_text(encoding='utf-8')
+        # Use production writing/readback, registry and owned worker processes.
+        # Only browser connection and the WPS endpoint use isolated fixtures.
+        source += '''
+WPS_OPERATION_TIMEOUT_SECONDS = 3
+WPS_INTERFACE_TIMEOUT_SECONDS = .15
+def open_browser_context(playwright, *args, **kwargs):
+    browser = playwright.chromium.launch(headless=True)
+    context = browser.new_context()
+    html = """<script>
+      const cells = {};
+      window.WPSOpenApi = {
+        EtApplication: () => ({Ready: Promise.resolve(true), Worksheets: name => ({
+          Range: address => ({MergeCells: false,
+            get Value() { return cells[address]; },
+            set Value(value) { cells[address] = value; }
+          })
+        })}),
+        save: () => new Promise(() => {})
+      };
+    </script>"""
+    context.route('https://wps-test.invalid/**', lambda route: route.fulfill(content_type='text/html', body=html))
+    return browser, context, True
+'''
+        target.write_text(source, encoding='utf-8')
+        config = dict(browser_mode='cdp', overwrite=False, configs=[dict(name='隔离写入测试',
+            kdocs_url='https://wps-test.invalid/document', local_file=str(source_file),
+            regions=[dict(source_sheet='来源', source_start='A1', source_end='A1',
+                          target_sheet='目标', target_start='B2', target_end='B2')])])
+        registry = RemoteTaskRegistry(SimpleNamespace(call=self.call))
+        logs = []
+        with self.assertRaisesRegex(RuntimeError, '结果待核对'):
+            registry.wps_action('run', config, [0], logs.append)
+        self.assertFalse(registry._wps_operation_lock.locked())
+        task = self.call('tasks')[-1]
+        self.assertEqual(task['state'], 'failed', task)
+        self.assertFalse(task['cancellable'])
+        self.assertIn('WPS_OPERATION_TIMEOUT', task['error'])
+        self.assertTrue(any('正在等待 WPS 保存完成' in line for line in logs))
+        self.call('shutdown', {'cancel': True})
+        self.process.wait(timeout=8)
+        self.assertEqual(self.process.returncode, 0)
+        restarted = subprocess.run([str(SERVICE), '--workspace', str(self.workspace),
+            '--code-root', str(ROOT), '--python', sys.executable],
+            input='{"id":1,"method":"ping"}\n{"id":2,"method":"shutdown","params":{"cancel":true}}\n',
+            capture_output=True, text=True, encoding='utf-8', timeout=15, **hidden_process_options())
+        self.assertEqual(restarted.returncode, 0, restarted.stderr)
+        replies = [json.loads(line) for line in restarted.stdout.splitlines()]
+        self.assertEqual(next(row for row in replies if row.get('id') == 1)['result']['protocol'], 3)
+        self.assertTrue(next(row for row in replies if row.get('id') == 2)['result'])
 
     def test_protocol_and_streamed_worker_results_are_native(self):
         self.assertEqual(self.call("ping")["engine"], "rust")

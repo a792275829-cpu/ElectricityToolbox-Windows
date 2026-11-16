@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import os
 import re
 import shutil
@@ -65,14 +66,30 @@ class Case:
     kind: str            # GROUP_DIRECTORIES 中的组或 node
     module: str          # 模块文件名（Python 不含 .py，Node 保留 .mjs）
     tags: set[str] = field(default_factory=set)
+    platforms: tuple[str, ...] = ()
 
 
 @dataclass
 class Outcome:
     case: Case
-    status: str          # OK | FAIL | TIMEOUT | SKIP
+    status: str          # OK | FAIL | TIMEOUT | SKIP | N/A (declared platform)
     seconds: float
     detail: str = ""
+    tests: int | None = None
+    skips: list[dict[str, str]] = field(default_factory=list)
+
+
+def declared_platforms(path: Path) -> tuple[str, ...]:
+    for statement in ast.parse(path.read_text(encoding="utf-8")).body:
+        if isinstance(statement, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "TOOLBOX_TEST_PLATFORMS"
+                for target in statement.targets):
+            values = ast.literal_eval(statement.value)
+            if not isinstance(values, (tuple, list)) or any(
+                    value not in {"win32", "linux"} for value in values):
+                raise ValueError(f"{path.name}: TOOLBOX_TEST_PLATFORMS 必须是平台名称元组")
+            return tuple(values)
+    return ()
 
 
 def classify(path: Path, *, legacy_desktop: bool = False) -> set[str]:
@@ -103,7 +120,7 @@ def group_cases(group: str) -> list[Case]:
         return [Case(f"node:{path.name}", "node", path.name) for path in paths]
     _, directory = GROUP_DIRECTORIES[group]
     return [Case(f"{group}:{path.stem}", group, path.stem,
-                 classify(path, legacy_desktop=group == "desktop"))
+                 classify(path, legacy_desktop=group == "desktop"), declared_platforms(path))
             for path in sorted(directory.glob("test_*.py"))]
 
 
@@ -153,9 +170,10 @@ def command_for(case: Case) -> tuple[list[str], Path]:
             path = TOOLBOX_TESTS / case.module
         return [node, "--test", str(path)], ROOT
     cwd, directory = GROUP_DIRECTORIES[case.kind]
+    worker = str(ROOT / "tools/unittest_worker.py")
     if case.kind == "toolbox":
-        return [sys.executable, "-m", "unittest", "-v", f"tests.{case.module}"], cwd
-    return [sys.executable, "-m", "unittest", "discover", "-s", str(directory),
+        return [sys.executable, worker, "-v", f"tests.{case.module}"], cwd
+    return [sys.executable, worker, "discover", "-s", str(directory),
             "-p", f"{case.module}.py", "-v"], cwd
 
 
@@ -175,6 +193,7 @@ def environment_for(case: Case, scratch: Path) -> dict[str, str]:
     env["PYTHONPATH"] = os.pathsep.join(paths)
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
+    env["TOOLBOX_TEST_RESULT"] = str(scratch / "unittest-result.json")
     # tempfile 在没有这些变量时会退回当前目录，测试会把空目录留在仓库里。
     for name in ("TEMP", "TMP", "TMPDIR"):
         env[name] = str(scratch)
@@ -188,6 +207,8 @@ def tail(text: str, limit: int = 25) -> str:
 
 def run_case(case: Case, scratch: Path, timeout: int) -> Outcome:
     started = time.monotonic()
+    if case.platforms and sys.platform not in case.platforms:
+        return Outcome(case, "N/A", 0, f"声明的平台为 {','.join(case.platforms)}，当前 {sys.platform} 不适用。")
     try:
         command, cwd = command_for(case)
     except FileNotFoundError as exc:
@@ -202,9 +223,29 @@ def run_case(case: Case, scratch: Path, timeout: int) -> Outcome:
         return Outcome(case, "TIMEOUT", time.monotonic() - started,
                        f"超过 {timeout}s 未结束（GUI 或联网用例请加 --group/--module 单独跑）")
     elapsed = time.monotonic() - started
-    if result.returncode == 0:
-        return Outcome(case, "OK", elapsed)
-    return Outcome(case, "FAIL", elapsed, tail(result.stderr or result.stdout))
+    (scratch / "stdout.log").write_text(result.stdout, encoding="utf-8")
+    (scratch / "stderr.log").write_text(result.stderr, encoding="utf-8")
+    if case.kind == "node":
+        return Outcome(case, "OK" if result.returncode == 0 else "FAIL", elapsed,
+                       tail(result.stderr or result.stdout) if result.returncode else "")
+    try:
+        data = json.loads((scratch / "unittest-result.json").read_text(encoding="utf-8"))
+        tests, skips = data["tests"], data["skipped"]
+        if type(tests) is not int or tests < 0 or not isinstance(skips, list):
+            raise ValueError("invalid result")
+        if any(not isinstance(item, dict) or not isinstance(item.get("reason"), str) or
+               not isinstance(item.get("test"), str) for item in skips):
+            raise ValueError("invalid skipped tests")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return Outcome(case, "FAIL", elapsed, f"没有有效的 unittest 执行结果：{exc}\n{tail(result.stderr or result.stdout)}")
+    detail = f"用例 {tests}，执行 {max(0, tests - len(skips))}，跳过 {len(skips)}。"
+    if skips:
+        detail += "\n" + "\n".join(f"{item['test']}：{item['reason']}" for item in skips)
+    if result.returncode or data.get("errors") or data.get("failures"):
+        return Outcome(case, "FAIL", elapsed, detail + "\n" + tail(result.stderr or result.stdout), tests, skips)
+    if tests == 0 and not skips:
+        return Outcome(case, "FAIL", elapsed, "没有发现任何测试用例。", tests, skips)
+    return Outcome(case, "SKIP" if tests <= len(skips) else "OK", elapsed, detail, tests, skips)
 
 
 def print_list(cases: list[Case]) -> None:
@@ -226,6 +267,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--list", action="store_true", help="只打印本轮会跑哪些模块")
     parser.add_argument("--keep-temp", action="store_true", help="保留本轮临时目录便于排查")
     parser.add_argument("--strict", action="store_true", help="模块依赖缺失导致的跳过视为失败；发行验证必用")
+    parser.add_argument("--report", type=Path, help="保存逐模块执行计数与跳过原因 JSON")
     args = parser.parse_args(argv)
 
     if args.timeout <= 0:
@@ -269,8 +311,15 @@ def main(argv: list[str] | None = None) -> int:
     failed = [outcome for outcome in outcomes if outcome.status in {"FAIL", "TIMEOUT"}]
     passed = sum(outcome.status == "OK" for outcome in outcomes)
     skipped = sum(outcome.status == "SKIP" for outcome in outcomes)
+    not_applicable = sum(outcome.status == "N/A" for outcome in outcomes)
+    if args.report:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(json.dumps([{
+            "module": outcome.case.name, "status": outcome.status, "seconds": outcome.seconds,
+            "tests": outcome.tests, "skipped_tests": outcome.skips, "detail": outcome.detail,
+        } for outcome in outcomes], ensure_ascii=False, indent=2), encoding="utf-8")
     print("-" * 72)
-    print(f"通过 {passed} / {len(outcomes)}，跳过 {skipped}，用时 {elapsed:.1f}s")
+    print(f"通过 {passed} / {len(outcomes)}，跳过 {skipped}，平台不适用 {not_applicable}，用时 {elapsed:.1f}s")
     if failed or (args.strict and skipped):
         print("失败或超时的模块：")
         for outcome in failed:

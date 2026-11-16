@@ -1,5 +1,7 @@
 """Regression coverage for discovery, isolation and retained failure evidence."""
 import importlib.util
+import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -17,6 +19,51 @@ spec.loader.exec_module(runner)
 
 
 class TestRunnerTests(unittest.TestCase):
+    def test_actual_worker_reports_import_skip_partial_skip_and_empty_discovery(self):
+        for text, expected_status, count, skipped in (
+            ("import unittest\nraise unittest.SkipTest('required library missing')\n", "SKIP", 1, 1),
+            ("import unittest\nclass Tests(unittest.TestCase):\n def test_ok(self): pass\n @unittest.skip('optional capability missing')\n def test_skip(self): pass\n", "OK", 2, 1),
+            ("# empty test module\n", "FAIL", 0, 0),
+        ):
+            with self.subTest(status=expected_status), tempfile.TemporaryDirectory() as directory:
+                folder = Path(directory)
+                (folder / "test_fixture.py").write_text(text, encoding="utf-8")
+                case = runner.Case("desktop:fixture", "desktop", "fixture")
+                command = [sys.executable, str(ROOT / "tools/unittest_worker.py"),
+                           "discover", "-s", str(folder), "-p", "test_fixture.py", "-v"]
+                with patch.object(runner, "command_for", return_value=(command, ROOT)):
+                    outcome = runner.run_case(case, folder, 15)
+                self.assertEqual(outcome.status, expected_status, outcome.detail)
+                self.assertEqual(outcome.tests, count)
+                self.assertEqual(len(outcome.skips), skipped)
+                if skipped:
+                    self.assertIn("missing", outcome.detail)
+                self.assertTrue((folder / "stderr.log").is_file())
+
+    def test_actual_strict_entry_rejects_missing_rust_service_and_keeps_counts(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            report = folder / "results.json"
+            result = subprocess.run([sys.executable, str(ROOT / "tools/run_tests.py"),
+                "full", "--strict", "--module", "test_rust_service", "--report", str(report)],
+                cwd=ROOT, env={**os.environ, "TOOLBOX_SERVICE_BINARY": str(folder / "missing.exe")},
+                capture_output=True, text=True, encoding="utf-8", timeout=30)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            rows = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(rows[0]["status"], "SKIP")
+            self.assertGreater(rows[0]["tests"], 0)
+            self.assertEqual(rows[0]["tests"], len(rows[0]["skipped_tests"]))
+            self.assertIn("build native/price-xlsx", result.stdout)
+
+    def test_platform_exclusion_is_explicit_and_does_not_hide_dependency_skips(self):
+        platform = "linux" if sys.platform == "win32" else "win32"
+        case = runner.Case("desktop:fixture", "desktop", "fixture", platforms=(platform,))
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(runner.run_case(case, Path(directory), 5).status, "N/A")
+        with patch.object(runner, "select", return_value=[case]):
+            self.assertEqual(runner.main(["full", "--strict"]), 0)
+
     def test_explicit_tags_override_text_heuristics(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'test_fixture.py'
@@ -37,13 +84,14 @@ class TestRunnerTests(unittest.TestCase):
             self.assertEqual(runner.main(['full', '--strict']), 1)
             self.assertEqual(runner.main(['full']), 0)
 
-    def test_all_tracked_python_tests_are_reachable(self):
+    def test_all_workspace_python_tests_are_reachable(self):
         import subprocess
 
         tracked = subprocess.check_output(
-            ["git", "ls-files", "-z", "*test*.py"], cwd=ROOT,
+            ["git", "ls-files", "-co", "--exclude-standard", "-z", "*test*.py"], cwd=ROOT,
         ).decode("utf-8").split("\0")
-        expected = {ROOT / name for name in tracked if Path(name).name.startswith("test_")}
+        expected = {ROOT / name for name in tracked
+                    if Path(name).name.startswith("test_") and (ROOT / name).is_file()}
         actual = {
             directory / f"{case.module}.py"
             for group, (_, directory) in runner.GROUP_DIRECTORIES.items()

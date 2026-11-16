@@ -11,14 +11,13 @@ import re
 from pathlib import Path
 import subprocess
 import tempfile
-import warnings
 
 from PIL import Image, ImageOps
 import toolbox_section_basemap as maps, toolbox_section_topology as model
 from toolbox_section_annotation_geometry import match_text_candidates, detect_circle_candidates, name_variants, levenshtein, rectangle_distance
 from toolbox_storage import WORKSPACE_ROOT, data_path
 
-DEFAULT_OCR_ENGINE = 'ppocrv6' if os.name == 'nt' else 'macos-vision'
+DEFAULT_OCR_ENGINE = 'ppocrv6'
 
 
 def tiles(width, height, size=1500, overlap=300):
@@ -285,7 +284,7 @@ def retry_difficult(image, records, station_names, read_crop, limit=120):
     return records
 
 
-def recover_text_proposals(image, records, station_names, proposals, read_crop, limit=120, *, proposal_engine='macos-vision', min_proposal_confidence=.9):
+def recover_text_proposals(image, records, station_names, proposals, read_crop, limit=120, *, proposal_engine='ppocr-detection', min_proposal_confidence=.9):
     """Use secondary boxes only after PP-OCR independently reads the exact name twice."""
     names = sorted(set(station_names))
     found = set()
@@ -534,101 +533,69 @@ def redetect_facility_lines(image, records, read_detection, *, limit=16):
     return proposals
 
 
-def supplement_native_boxes(image, records, station_names, read_crop, read_detection=None):
-    try:
-        proposals = recognize(image, 'macos-vision', enhanced=False)
-    except ValueError:
-        warnings.warn('本机文字框补检不可用，保留PP-OCRv6原结果；需要macOS Command Line Tools', RuntimeWarning)
-        if read_detection is None:
-            return records
-        proposals = []
-    records = recover_text_proposals(image, records, station_names, proposals, read_crop)
-    auxiliary = [dict(p,id='native:'+p['id']) for p in proposals]
-    tokens = merged_label_proposals(auxiliary,station_names,min_confidence=.3)
-    records = recover_text_proposals(image,records,station_names,auxiliary+tokens,read_crop,limit=80,
-                                    proposal_engine='native-low-confidence-proposal',min_proposal_confidence=.3)
-    auxiliary += redetect_facility_lines(image,records,read_detection)
-    joins = joined_label_proposals(records+auxiliary,station_names)
-    return recover_joined_labels(image,records,station_names,joins,read_crop)
+
+
+
+
+def supplement_detected_boxes(image, records, station_names, read_crop, read_detection=None):
+    if read_detection is None:
+        return records
+    auxiliary = redetect_facility_lines(image, records, read_detection)
+    joins = joined_label_proposals(records + auxiliary, station_names)
+    return recover_joined_labels(image, records, station_names, joins, read_crop)
 
 
 def recognize(image: Image.Image, engine=DEFAULT_OCR_ENGINE, *, station_names=(), enhanced=True, base_records=None, edge_only=False):
-    """OCR original-resolution tiles. macOS Vision is an explicitly named baseline."""
+    """OCR original-resolution tiles with the optional PP-OCRv6 environment."""
+    if engine != 'ppocrv6':
+        raise ValueError('未知 OCR 引擎，仅支持 PP-OCRv6')
     records = [] if base_records is None else deepcopy(base_records)
-    paddle = None
-    if engine == 'ppocrv6':
-        try:
-            from paddleocr import PaddleOCR
-            paddle = PaddleOCR(text_detection_model_name='PP-OCRv6_medium_det',
-                               text_recognition_model_name='PP-OCRv6_medium_rec',
-                               use_doc_orientation_classify=False, use_doc_unwarping=False,
-                               use_textline_orientation=False,
-                               text_det_limit_type='max', text_det_limit_side_len=1500,
-                               cpu_threads=4)
-        except ImportError as exc:
-            if optional_runtime() is not None:
-                return external_recognize(image, station_names, enhanced, base_records, edge_only)
-            raise ValueError('未安装可选 PP-OCRv6；请在独立环境安装 PaddleOCR 与 PaddlePaddle，或选择本机 OCR 基线') from exc
-    elif engine != 'macos-vision':
-        raise ValueError('未知 OCR 引擎')
+    try:
+        from paddleocr import PaddleOCR
+        paddle = PaddleOCR(text_detection_model_name='PP-OCRv6_medium_det',
+                           text_recognition_model_name='PP-OCRv6_medium_rec',
+                           use_doc_orientation_classify=False, use_doc_unwarping=False,
+                           use_textline_orientation=False,
+                           text_det_limit_type='max', text_det_limit_side_len=1500,
+                           cpu_threads=4)
+    except ImportError as exc:
+        if optional_runtime() is not None:
+            return external_recognize(image, station_names, enhanced, base_records, edge_only)
+        raise ValueError('未安装可选 PP-OCRv6；请配置 TOPOLOGY_OCR_PYTHON 指向独立 PaddleOCR 与 PaddlePaddle 环境，或用 --ocr-cache 回放') from exc
     with tempfile.TemporaryDirectory(prefix='topology-ocr-') as tmp:
-        root = Path(tmp); binary = root/'vision'
-        if paddle is None:
-            if os.name == 'nt':
-                raise ValueError('Windows 不支持 macOS Vision OCR；请配置 TOPOLOGY_OCR_PYTHON 指向独立 PP-OCRv6 环境，或用 --ocr-cache 回放')
-            try:
-                subprocess.run(['xcrun', 'swiftc', str(WORKSPACE_ROOT/'500kV断面分析/tools/layer_review_vision.swift'), '-o', str(binary)], check=True, capture_output=True, timeout=120)
-            except (OSError, subprocess.SubprocessError) as exc:
-                raise ValueError('本机 OCR 编译失败，需要 macOS Command Line Tools；可改用独立 PP-OCRv6 环境') from exc
+        root = Path(tmp)
         for i, bounds in enumerate(tiles(*image.size) if base_records is None else []):
             tile = image.crop(bounds).convert('RGB'); path = root/'tile.png'; tile.save(path)
             left, top = bounds[:2]
             first_record = len(records)
-            if paddle is None:
-                try:
-                    output = subprocess.run([str(binary), str(path)], check=True, capture_output=True, timeout=90)
-                except (OSError, subprocess.SubprocessError) as exc:
-                    raise ValueError(f'本机 OCR 图块 {i+1} 识别失败') from exc
-                for item in json.loads(output.stdout):
-                    records.append(dict(text=item['text'], confidence=item['confidence'], category='node',
-                                        box=dict(x=left+item['x']*tile.width, y=top+(1-item['y']-item['h'])*tile.height,
-                                                 width=item['w']*tile.width, height=item['h']*tile.height)))
-            else:
-                for prediction in paddle.predict(str(path)):
-                    content = prediction.json['res']
-                    for text, score, box in zip(content['rec_texts'], content['rec_scores'], content['rec_boxes']):
-                        x0, y0, x1, y1 = map(float, box)
-                        records.append(dict(text=text, confidence=float(score), category='node', box=dict(x=left+x0, y=top+y0, width=x1-x0, height=y1-y0)))
+            for prediction in paddle.predict(str(path)):
+                content = prediction.json['res']
+                for text, score, box in zip(content['rec_texts'], content['rec_scores'], content['rec_boxes']):
+                    x0, y0, x1, y1 = map(float, box)
+                    records.append(dict(text=text, confidence=float(score), category='node', box=dict(x=left+x0, y=top+y0, width=x1-x0, height=y1-y0)))
             for record in records[first_record:]:
                 record['views']=[dict(id=f'tile:{i}',bounds=list(bounds),scale=1,provenance='actual-inference',text=record['text'],confidence=record['confidence'],box=deepcopy(record['box']))]
         if enhanced and station_names:
-            if paddle is not None:
-                from paddleocr import TextRecognition
-                recognizer = TextRecognition(model_name='PP-OCRv6_medium_rec', cpu_threads=4)
-                def read_crop(view):
-                    import numpy as np
-                    return [(p.json['res']['rec_text'], p.json['res']['rec_score'])
-                            for p in recognizer.predict(np.array(view))]
-            else:
-                def read_crop(view):
-                    path = root/'retry.png'; view.save(path)
-                    output = subprocess.run([str(binary), str(path)], check=True, capture_output=True, timeout=90)
-                    return [(r['text'], r['confidence']) for r in json.loads(output.stdout)]
+            from paddleocr import TextRecognition
+            recognizer = TextRecognition(model_name='PP-OCRv6_medium_rec', cpu_threads=4)
+            def read_crop(view):
+                import numpy as np
+                return [(p.json['res']['rec_text'], p.json['res']['rec_score'])
+                        for p in recognizer.predict(np.array(view))]
             records = deduplicate(records) if edge_only else retry_difficult(image, deduplicate(records), station_names, read_crop)
-            if paddle is not None:
-                def read_detection(view):
-                    path=root/'local-detection.png';view.save(path)
-                    found=[]
-                    for prediction in paddle.predict(str(path)):
-                        content=prediction.json['res']
-                        for value,score,box in zip(content['rec_texts'],content['rec_scores'],content['rec_boxes']):
-                            x0,y0,x1,y1=map(float,box)
-                            found.append(dict(text=value,confidence=float(score),box=dict(x=x0,y=y0,width=x1-x0,height=y1-y0)))
-                    return found
-                records = edge_supplement(image, records, read_detection, station_names=station_names)
-                if not edge_only:
-                    records = supplement_native_boxes(image, records, station_names, read_crop,read_detection)
-                    records = recover_merged_labels(image, records, station_names, read_crop)
+            def read_detection(view):
+                path=root/'local-detection.png';view.save(path)
+                found=[]
+                for prediction in paddle.predict(str(path)):
+                    content=prediction.json['res']
+                    for value,score,box in zip(content['rec_texts'],content['rec_scores'],content['rec_boxes']):
+                        x0,y0,x1,y1=map(float,box)
+                        found.append(dict(text=value,confidence=float(score),box=dict(x=x0,y=y0,width=x1-x0,height=y1-y0)))
+                return found
+            records = edge_supplement(image, records, read_detection, station_names=station_names)
+            if not edge_only:
+                records = supplement_detected_boxes(image, records, station_names, read_crop, read_detection)
+                records = recover_merged_labels(image, records, station_names, read_crop)
     for i, r in enumerate(records):
         r['id'] = str(i)
     return deduplicate(records)

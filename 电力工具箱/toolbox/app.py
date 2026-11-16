@@ -275,7 +275,7 @@ class ToolboxApp(tk.Tk):
 
     def _scroll_navigation(self, event) -> str:
         if self.navigation.winfo_reqheight() > self.nav_canvas.winfo_height():
-            # macOS trackpads emit small deltas; other platforms commonly use 120.
+            # Normalize small trackpad deltas and 120-unit mouse-wheel deltas.
             delta = int(event.delta)
             units = -int(delta / 120) if abs(delta) >= 120 else -delta
             self.nav_canvas.yview_scroll(units, "units")
@@ -480,7 +480,7 @@ class ToolboxApp(tk.Tk):
         if self.current_page == name and self._visible_page is page:
             return
         # Retain each page and its background task, but only map the visible
-        # page. Stacked mapped pages otherwise repaint together on macOS.
+        # page. Stacked mapped pages can otherwise repaint together.
         self._map_page(page)
         self.current_page = name
         self.status_var.set(f"当前功能：{name}")
