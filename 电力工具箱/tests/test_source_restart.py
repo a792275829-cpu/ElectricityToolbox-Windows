@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+TOOLBOX_TEST_TAGS = ("gui",)
+
 ROOT = Path(__file__).resolve().parents[2]
 for candidate in (ROOT, ROOT / "电力工具箱"):
     if str(candidate) not in sys.path:
@@ -109,6 +111,24 @@ class RestartButtonTests(unittest.TestCase):
         relaunch.assert_called_once()
         self.assertEqual(relaunch.call_args.args[0], LAUNCHER)
         self.assertEqual(relaunch.call_args.kwargs["cwd"], ROOT)
+        destroy.assert_called_once()
+
+    def test_idle_close_passes_real_shutdown_checks(self) -> None:
+        with mock.patch.object(self.app.credentials_panel, "flush_autosave", return_value=True), \
+                mock.patch("toolbox.app.messagebox.showwarning") as warning, \
+                mock.patch.object(self.app, "destroy") as destroy:
+            self.assertTrue(self.app._on_close())
+        warning.assert_not_called()
+        destroy.assert_called_once()
+
+    def test_idle_restart_passes_real_shutdown_checks(self) -> None:
+        with mock.patch.object(self.app.credentials_panel, "flush_autosave", return_value=True), \
+                mock.patch("toolbox.app.messagebox.showwarning") as warning, \
+                mock.patch("toolbox.app.relaunch_source_app") as relaunch, \
+                mock.patch.object(self.app, "destroy") as destroy:
+            self.app.restart_application()
+        warning.assert_not_called()
+        relaunch.assert_called_once()
         destroy.assert_called_once()
 
     def test_cancelled_confirmation_does_not_restart(self) -> None:

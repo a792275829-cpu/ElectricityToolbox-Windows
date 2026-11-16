@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -102,6 +102,18 @@ class WorkbookDateTests(unittest.TestCase):
         finder.assert_called_once_with("2026-11-06")
         self.assertEqual(check.call_args.kwargs["day_ahead_workbook"], source)
         self.assertTrue(any("实际运行日 2026-11-05" in call.args[0] for call in logger.call_args_list))
+
+    def test_wide_unused_sheet_does_not_hide_the_run_date(self) -> None:
+        # 现场工作簿带宽表时，运行日核对曾因整簿读取失败退化成「读不到运行日」，
+        # 与「日期口径不符」混在一起，掩盖了真正的失败原因。
+        path = _make_workbook(self.tmp / "wide.xlsx", datetime(2026, 11, 6))
+        book = load_workbook(path)
+        book.create_sheet("市场购电用户曲线比例").cell(1, 300, 0.42)
+        book.save(path)
+        book.close()
+        self.assertEqual(read_workbook_run_date(path), "2026-11-06")
+        warnings = check_workbook_dates(PLAN, day_ahead_workbook=path)
+        self.assertEqual(warnings, [])
 
     def test_text_date_and_missing_sheet(self) -> None:
         text_path = self.tmp / "text.xlsx"

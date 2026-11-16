@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 
 from openpyxl import Workbook
+TOOLBOX_TEST_TAGS = ()
+
 from docx.shared import RGBColor
 
 from generate_red_marked_report import (
@@ -110,7 +112,7 @@ class OnlineEnergyTests(unittest.TestCase):
         self.assertEqual([red for _, red in segments], [True, False])
         self.assertEqual(
             segments[0][0],
-            "11月9日分公司上网电量6228万千瓦时，其中，汕头1279万、海门3449万、东莞970万、"
+            "【上网电量未更新，旧数字需人工核对】11月9日分公司上网电量6228万千瓦时，其中，汕头1279万、海门3449万、东莞970万、"
             "海上风电207万、光伏95万千瓦时、清远230万千瓦时；",
         )
         self.assertEqual(
@@ -118,6 +120,7 @@ class OnlineEnergyTests(unittest.TestCase):
             "分公司日前均价300厘/千瓦时，其中汕头1629厘、海门3479厘、东莞847厘、"
             "海上风电676厘、鮀莲598厘、归湖576厘/千瓦时。",
         )
+        self.assertEqual(build_online_pending_segments("".join(t for t, _ in segments), "2026-11-09", prices), segments)
 
     def test_pending_energy_sentence_keeps_inner_separators(self) -> None:
         # 电量句内部若再出现分号，按「分公司日前均价」定位均价句，不能把电量句截断。
@@ -138,7 +141,7 @@ class OnlineEnergyTests(unittest.TestCase):
         self.assertEqual([red for _, red in segments], [True, False])
         self.assertEqual(
             segments[0][0],
-            "11月9日分公司上网电量6228万千瓦时；汕头1279万、海门3449万；东莞970万千瓦时；",
+            "【上网电量未更新，旧数字需人工核对】11月9日分公司上网电量6228万千瓦时；汕头1279万、海门3449万；东莞970万千瓦时；",
         )
         self.assertTrue(segments[1][0].startswith("分公司日前均价45厘/千瓦时"))
 
@@ -155,7 +158,7 @@ class OnlineEnergyTests(unittest.TestCase):
             "11月3日分公司上网电量6228万千瓦时", "2026-11-09", prices
         )
 
-        self.assertEqual(segments[0], ("11月9日分公司上网电量6228万千瓦时；", True))
+        self.assertEqual(segments[0], ("【上网电量未更新，旧数字需人工核对】11月9日分公司上网电量6228万千瓦时；", True))
         self.assertEqual(segments[1][1], False)
 
     def test_pending_paragraph_marks_only_energy_red(self) -> None:
@@ -181,7 +184,7 @@ class OnlineEnergyTests(unittest.TestCase):
         self.assertEqual(
             [(run.text, str(run.font.color.rgb)) for run in paragraph.runs],
             [
-                ("11月9日分公司上网电量6228万千瓦时；", "FF0000"),
+                ("【上网电量未更新，旧数字需人工核对】11月9日分公司上网电量6228万千瓦时；", "FF0000"),
                 (
                     "分公司日前均价45厘/千瓦时，其中汕头410厘、海门-50厘、东莞434厘、"
                     "海上风电407厘、鮀莲371厘、归湖372厘/千瓦时。",

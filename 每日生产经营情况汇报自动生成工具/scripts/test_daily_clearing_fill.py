@@ -18,6 +18,7 @@ from generate_red_marked_report import (
     fill_daily_clearing_table,
     fill_spot_deviation_analysis,
     load_daily_clearing_inputs,
+    _ClearingWorkbookSnapshot,
     _document_row_index,
     FIRE_COLUMNS, RENEWABLE_COLUMNS, _energy_price, _weighted_price,
 )
@@ -142,6 +143,27 @@ class DailyClearingFillTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "超出第 256 列"):
             load_daily_clearing_inputs("2026-11-02", self.workbook_path)
         self.assertEqual(self.workbook_path.read_bytes(), original)
+
+    def test_wide_unused_sheet_does_not_block_report_sheets(self):
+        # 现场工作簿常带「市场购电用户曲线比例」这类宽表；报告并不读它，
+        # 不能因为整簿物化时的宽度校验让整份早报失败（0.1.42 现场即因此中断）。
+        book = load_workbook(self.workbook_path)
+        curve = book.create_sheet("市场购电用户曲线比例")
+        curve.cell(1, 300, 0.42)
+        book.save(self.workbook_path)
+        book.close()
+        data = load_daily_clearing_inputs("2026-11-02", self.workbook_path)
+        self.assertEqual(data["rows"], self.data["rows"])
+        self.assertEqual(data["spot"], self.data["spot"])
+
+    def test_wide_sheet_is_still_refused_when_actually_read(self):
+        book = load_workbook(self.workbook_path)
+        curve = book.create_sheet("市场购电用户曲线比例")
+        curve.cell(1, 300, 0.42)
+        book.save(self.workbook_path)
+        book.close()
+        with self.assertRaisesRegex(ValueError, "超出第 256 列"):
+            _ClearingWorkbookSnapshot(self.workbook_path)["市场购电用户曲线比例"]
 
     def test_snapshot_uses_xml_extent_and_keeps_capacity_and_renewables(self):
         for dimension in (b'A1:A1', b'A1:XFD1048576', None):

@@ -9,6 +9,8 @@ from tempfile import TemporaryDirectory
 from pathlib import Path
 from unittest import mock
 
+TOOLBOX_TEST_TAGS = ("gui",)
+
 
 class WpsDialogAsyncTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -412,6 +414,37 @@ class WpsDialogAsyncTests(unittest.TestCase):
         tracked_target = thread_class.call_args.kwargs["target"]
         tracked_target()
         registry.unregister_thread.assert_called_once_with(fake_thread)
+
+    def test_login_status_poll_does_not_block_shutdown(self) -> None:
+        from toolbox.runtime import TaskRegistry, ToolPaths, load_module
+
+        paths = ToolPaths(Path(__file__).resolve().parents[2])
+        module = load_module("wps_status_shutdown_test", paths.wps_writer)
+        registry = TaskRegistry()
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_status(*_args):
+            started.set()
+            release.wait(timeout=5)
+            return module.WpsLoginStatus("unknown", "测试状态")
+
+        with (
+            mock.patch.object(module, "load_config", return_value={"configs": []}),
+            mock.patch.object(module, "select_managed_cdp_url", side_effect=lambda url: url),
+            mock.patch.object(module, "check_wps_login_status", side_effect=slow_status),
+        ):
+            frame = module.WpsWriterFrame(self.root, task_registry=registry)
+            try:
+                frame._run_browser_action(start=False, quiet=True)
+                self.assertTrue(started.wait(2))
+                self.assertTrue(frame.browser_worker.is_alive())
+                self.assertFalse(registry.has_running_tasks())
+                self.assertEqual((), registry.terminate_all())
+            finally:
+                release.set()
+                frame.browser_worker.join(timeout=2)
+                frame.destroy()
 
     def test_edit_config_opens_dialog_without_starting_chrome(self) -> None:
         from toolbox.runtime import ToolPaths, load_module

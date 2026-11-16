@@ -19,6 +19,52 @@ import generate_red_marked_report as report
 
 
 class ReportTextTests(unittest.TestCase):
+    def test_weather_unchanged_does_not_remove_manual_text(self):
+        from docx import Document
+        doc = Document()
+        text = "未来三天小雨，气温15℃-28℃，预计统调最高负荷将会在1.4-1.5亿千瓦之间。"
+        paragraph = doc.add_paragraph(text)
+        with patch.object(report, "fetch_guangdong_weather_text", return_value="未来三天小雨，气温15℃-28℃，"):
+            report.replace_weather_prefix(paragraph, "2026-11-17")
+        self.assertEqual(paragraph.text, text)
+    def test_daily_prices_follow_reference(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "D.xlsx"
+            wb = Workbook()
+            sheet = wb.active
+            sheet.title = "全省节点均价（日更）"
+            sheet.append(["全省日前"] + [383.8015625] * 96)
+            brief = wb.create_sheet("快报")
+            brief["A42"] = "日前均价422.64。实时简析：全天实时均价334.6元/兆瓦时。"
+            wb.save(path)
+            wb.close()
+            with clearing_input_cache():
+                prices = report.load_daily_prices(path)
+            self.assertAlmostEqual(prices["PRE"], 383.8015625)
+            self.assertEqual(prices["RT"], 334.6)
+            self.assertEqual(report.replace_price("全省日前均价", 1), "全省日前均价")
+            self.assertEqual(report.replace_price("全省日前出清均价389.3元/兆瓦时，环比下降97.77元/兆瓦时。", prices["PRE"]), "全省日前出清均价383.8元/兆瓦时，环比下降97.77元/兆瓦时。")
+            sheet["B1"] = None
+            wb.save(path)
+            with self.assertRaises(ValueError):
+                report.load_daily_prices(path)
+
+    def test_missing_price_source_degrades_instead_of_failing_report(self) -> None:
+        # 均价只占两个数字，缺表不能把整份早报打断；保留原文并记录原因。
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "D.xlsx"
+            wb = Workbook()
+            wb.active.title = "快报"
+            wb.save(path)
+            wb.close()
+            with clearing_input_cache():
+                prices, error = report.load_daily_prices_safely(path)
+            self.assertIsNone(prices)
+            self.assertIn("全省节点均价", error)
+            none_prices, none_error = report.load_daily_prices_safely(None)
+            self.assertIsNone(none_prices)
+            self.assertTrue(none_error)
+
     def test_generate_reads_market_summaries_from_two_different_dates(self) -> None:
         class StopBeforeNetwork(Exception):
             pass

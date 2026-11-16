@@ -366,7 +366,10 @@ def read_workbook_run_date(workbook_path: Path | None) -> str | None:
         return None
     try:
         workbook = _open_clearing_workbook(workbook_path)
-    except Exception:
+    except Exception as exc:
+        # 静默返回 None 会把「工作簿读不了」伪装成「日期与口径不符」，
+        # 排查时容易被误导成文件选错，这里保留首选异常原因。
+        log(f"运行日读取失败（{Path(workbook_path).name}）：{exc}")
         return None
     value: Any = None
     try:
@@ -553,11 +556,11 @@ def fetch_guangdong_weather_text(report_date: str) -> str:
 def replace_weather_prefix(paragraph, report_date: str) -> None:
     prefix = fetch_guangdong_weather_text(report_date)
     text = paragraph.text
-    updated = re.sub(r"^\u672a\u6765\u4e09\u5929.*?\uff0c\u6c14\u6e29\s*.*?\u2103\s*-\s*.*?\u2103\uff0c", prefix, text, count=1)
-    if updated == text:
+    updated, matched = re.subn(r"^\u672a\u6765\u4e09\u5929.*?\uff0c\u6c14\u6e29\s*.*?\u2103\s*-\s*.*?\u2103\uff0c", prefix, text, count=1)
+    if not matched:
         # 新模板写作「…，气温于23-30℃之间波动；」，只有一处 ℃，按分句截断。
-        updated = re.sub(r"^\u672a\u6765\u4e09\u5929.*?\uff0c\u6c14\u6e29[^\uff1b;\u3002]*[\uff1b;\u3002]", prefix, text, count=1)
-    if updated == text:
+        updated, matched = re.subn(r"^\u672a\u6765\u4e09\u5929.*?\uff0c\u6c14\u6e29[^\uff1b;\u3002]*[\uff1b;\u3002]", prefix, text, count=1)
+    if not matched:
         updated = prefix + text
     replace_paragraph(paragraph, updated)
 
@@ -688,6 +691,7 @@ class _ClearingWorkbookSnapshot:
             self.sheetnames = list(workbook.sheetnames)
             self._sheets = {}
             self._widths = {}
+            self._overflow = set()
             # 物化全部工作表，避免只缓存部分表时 __getitem__ 静默返回空数据；
             # 宽度按各表真实列数取，不人为截断列范围。
             for name in self.sheetnames:
@@ -697,12 +701,18 @@ class _ClearingWorkbookSnapshot:
                 sheet.reset_dimensions()
                 rows = []
                 width = self._WIDTH
+                overflow = False
                 for row in sheet.iter_rows(values_only=True):
-                    if any(value is not None for value in row[self._MAX_WIDTH:]):
-                        raise ValueError(f"{name} 的有效数据超出第 {self._MAX_WIDTH} 列，停止读取以免截断。")
+                    # 超出支持宽度的数据只做标记，不在读取整簿时抛错：
+                    # 报告只用快报/基础信息等少数表，工作簿里另有宽表（如市场购电用户曲线比例）
+                    # 时不能因此整份报告失败；真正取该表数据时才拒绝，见 __getitem__。
+                    if not overflow and any(value is not None for value in row[self._MAX_WIDTH:]):
+                        overflow = True
                     values = tuple(row[:self._MAX_WIDTH])
                     rows.append(values)
                     width = max(width, len(values))
+                if overflow:
+                    self._overflow.add(name)
                 self._sheets[name] = rows
                 self._widths[name] = width
         finally:
@@ -711,6 +721,8 @@ class _ClearingWorkbookSnapshot:
     def __getitem__(self, name):
         if name not in self._sheets:
             raise KeyError(name)
+        if name in self._overflow:
+            raise ValueError(f"{name} 的有效数据超出第 {self._MAX_WIDTH} 列，停止读取以免截断。")
         return _ClearingSheetSnapshot(self._sheets[name], self._widths[name], name)
 
     def close(self):
@@ -998,6 +1010,8 @@ def build_online_pending_segments(
     标红提示需要人工核对填写），均价仍按当日工作簿重写为黑字。电量句不做任何
     改写，只把段首日期换成 D-1，方便直接对着日期填数。
     """
+    warning = "【上网电量未更新，旧数字需人工核对】"
+    template_text = template_text.removeprefix(warning)
     energy_sentence = replace_leading_month_day(
         split_online_energy_sentence(template_text), date_label(date_text)
     )
@@ -1005,7 +1019,7 @@ def build_online_pending_segments(
     if energy_sentence:
         if energy_sentence[-1] not in ONLINE_ENERGY_SENTENCE_END:
             energy_sentence += "\uff1b"
-        segments.append((energy_sentence, True))
+        segments.append((warning + energy_sentence, True))
     segments.append((format_ahead_price_sentence(price_summary), False))
     return segments
 
@@ -1947,6 +1961,41 @@ def load_day_ahead_market_summary(date_text: str, workbook_path: Path | None = N
         workbook.close()
 
 
+@clearing_input_cache()
+def load_daily_prices(workbook_path: Path) -> dict[str, float]:
+    """清分日均价：日前取全省 96 点，实时取快报实时简析。"""
+    workbook = _open_clearing_workbook(workbook_path)
+    try:
+        sheet = workbook["全省节点均价（日更）"]
+        row = find_first_column_row(sheet, ("全省日前",))
+        raw = [sheet.cell(row, col).value for col in range(2, 98)]
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in raw):
+            raise ValueError("全省日前必须有完整 96 点有效电价")
+        brief = workbook["快报"]
+        texts = [str(brief.cell(r, 1).value or "") for r in range(1, brief.max_row + 1)]
+        texts = [t.split("实时简析", 1)[1] for t in texts if "实时简析" in t]
+        matches = [m for t in texts for m in re.findall(r"全天实时均价\s*([+-]?\d+(?:\.\d+)?)\s*元/(?:兆瓦时|MWh)", t)]
+        if len(matches) != 1:
+            raise ValueError("快报实时简析缺少唯一的全天实时均价")
+        return {"PRE": sum(raw) / 96, "RT": float(matches[0])}
+    finally:
+        workbook.close()
+
+
+def load_daily_prices_safely(workbook_path: Path | None) -> tuple[dict[str, float] | None, str | None]:
+    """均价取数失败只影响两个均价数字，不能让整份早报失败。"""
+    try:
+        return load_daily_prices(workbook_path), None
+    except Exception as exc:
+        log(f"日清分均价取数失败，日前／实时均价保留原文：{exc}")
+        return None, str(exc)
+
+
+def replace_price(text: str, price: float) -> str:
+    """只替换均价数值。"""
+    return re.sub(r"((?:日前出清|实时)均价)[+-]?\d+(?:\.\d+)?", lambda m: m.group(1) + fmt_number(price, 2), text)
+
+
 def build_strategy_text(payload: dict[str, Any], *, market_summary: str) -> str:
     load = subject_by_code(payload, "1")
     a_power = subject_by_code(payload, "2")
@@ -2301,7 +2350,7 @@ def generate(
         # 只更新均价，避免「快报  (日前)」已有的均价跟着旧数一起冻结。
         if online_energy_error is None:
             online_energy_error = (
-                f"{date_label(plan['actualOnlineEnergyDate'])} 的上网电量为 0（尚未出数），"
+                f"{date_label(plan['actualOnlineEnergyDate'])} 的上网电量为 0，无法确认已出数，"
                 "电量句保留模板原文待人工填写"
             )
         log(f"上网电量未取数，电量句保留模板原文（红字待填），日前均价仍按「快报  (日前)」更新：{online_energy_error}")
@@ -2316,7 +2365,7 @@ def generate(
     replace_paragraph(day_ahead_paragraph, build_day_ahead_clearing_text(plan["dayAheadDate"], day_ahead_clearing))
 
     strategy_heading = find_exact_paragraph(doc, "三、现货交易策略")
-    replace_paragraph(next_nonempty_paragraph(doc, strategy_heading), build_strategy_text(payload, market_summary=market_summary))
+    replace_paragraph(next_nonempty_paragraph(doc, strategy_heading), build_strategy_text(payload, market_summary=market_summary.replace("上涨", "上升")))
     # 粤东 500kV 线路信息不是每日固定内容，模板里带的那段直接删掉。
     remove_east_guangdong_section(doc)
     plant_strategy_source = day_ahead_workbook
@@ -2342,11 +2391,17 @@ def generate(
     clear_auto_section_red(doc, spot_filled=spot_filled)
     day_ahead_heading = find_exact_paragraph(doc, "1.日前市场")
     day_ahead_paragraph = next_nonempty_paragraph(doc, day_ahead_heading)
+    daily_prices, daily_prices_error = load_daily_prices_safely(daily_clearing_workbook)
+    if daily_prices is not None:
+        daily_market_summary = replace_price(daily_market_summary, daily_prices["PRE"])
     replace_paragraph(day_ahead_paragraph, build_day_ahead_market_text(payload, market_summary=daily_market_summary))
     highlight_negative_numbers(day_ahead_paragraph)
     actual_heading = find_exact_paragraph(doc, "2.实时市场")
     actual_paragraph = next_nonempty_paragraph(doc, actual_heading)
-    replace_paragraph(actual_paragraph, build_actual_market_text(payload))
+    actual_market_text = build_actual_market_text(payload)
+    if daily_prices is not None:
+        actual_market_text = replace_price(actual_market_text, daily_prices["RT"])
+    replace_paragraph(actual_paragraph, actual_market_text)
     highlight_negative_numbers(actual_paragraph)
     weather_paragraph = find_paragraph(
         doc,
@@ -2418,8 +2473,14 @@ def generate(
         "plantStrategiesMissing": missing_plants,
         "plantStrategiesSource": str(plant_strategy_source) if plant_strategy_source else None,
         "dayAheadMarketSummarySource": {"file": str(day_ahead_workbook), "sheet": "快报(日前)", "cell": "A41"},
-        "dailyClearingMarketSummarySource": {"file": str(daily_clearing_workbook), "date": plan["dailyClearingDate"], "sheet": "快报(日前)", "cell": "A41"},
+        "dailyClearingMarketSummarySource": {"file": str(daily_clearing_workbook), "date": plan["dailyClearingDate"], "sheet": "快报(日前)", "cell": "A41", "note": "市场开机与环比沿用原文；日前均价取全省节点96点平均"},
         "onlineEnergyError": online_energy_error,
+        "dailyClearingPrices": (
+            {"file": str(daily_clearing_workbook), "date": plan["dailyClearingDate"], "PRE": {"sheet": "全省节点均价（日更）", "rowLabel": "全省日前", "columns": "B:CS", "value": daily_prices["PRE"]}, "RT": {"sheet": "快报", "label": "实时简析", "value": daily_prices["RT"]}}
+            if daily_prices is not None
+            else None
+        ),
+        "dailyClearingPricesError": daily_prices_error,
         "dailyClearingError": daily_clearing_error,
         "weatherError": weather_error,
         "knownGaps": [

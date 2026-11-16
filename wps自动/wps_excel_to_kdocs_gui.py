@@ -3311,6 +3311,7 @@ class WpsWriterFrame(ttk.Frame):
         self.browser_worker = self._start_tracked_thread(
             worker,
             name="wps-browser-start" if start else "wps-browser-check",
+            blocks_shutdown=start,
         )
 
     def _start_tracked_thread(
@@ -3319,24 +3320,28 @@ class WpsWriterFrame(ttk.Frame):
         *,
         args: tuple[Any, ...] = (),
         name: str,
+        blocks_shutdown: bool = True,
     ) -> threading.Thread:
         thread: threading.Thread
+        # Automatic status probes only read browser state. They must not keep an
+        # idle toolbox open; writes and explicit login launches remain protected.
+        registry = self.task_registry if blocks_shutdown else None
 
         def tracked_target() -> None:
             try:
                 target(*args)
             finally:
-                if self.task_registry is not None:
-                    self.task_registry.unregister_thread(thread)
+                if registry is not None:
+                    registry.unregister_thread(thread)
 
         thread = threading.Thread(target=tracked_target, name=name, daemon=True)
-        if self.task_registry is not None:
-            self.task_registry.register_thread(thread)
+        if registry is not None:
+            registry.register_thread(thread)
         try:
             thread.start()
         except BaseException:
-            if self.task_registry is not None:
-                self.task_registry.unregister_thread(thread)
+            if registry is not None:
+                registry.unregister_thread(thread)
             raise
         self.schedule_drain_logs()
         return thread
