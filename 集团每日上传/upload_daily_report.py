@@ -14,7 +14,7 @@ import threading
 import time
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -251,13 +251,13 @@ def choose_files_interactively() -> list[Path]:
         import tkinter as tk
         from tkinter import filedialog
     except Exception as exc:
-        raise RuntimeError("无法打开文件选择窗口，请改用命令行传入两个文件路径。") from exc
+        raise RuntimeError("无法打开文件选择窗口，请改用命令行传入能销文件路径。") from exc
 
     root = tk.Tk()
     root.withdraw()
     root.attributes("-topmost", True)
     selected = filedialog.askopenfilenames(
-        title="请选择能销数据 Excel；也可同时选择省内数据",
+        title="请选择能销数据 Excel（省内数据使用内置模板）",
         initialdir=str(SCRIPT_DIR),
         filetypes=[
             ("Excel 文件", "*.xlsx *.xls"),
@@ -268,66 +268,15 @@ def choose_files_interactively() -> list[Path]:
     return [Path(item) for item in selected]
 
 
-def probe_standard_province_templates(folder: Path, target_date: str, *, days: int = 45) -> list[Path]:
-    center = datetime.strptime(target_date, "%Y-%m-%d").date()
-    candidates: list[Path] = []
-    for offset in range(days + 1):
-        offsets = [0] if offset == 0 else [-offset, offset]
-        for day_offset in offsets:
-            day = center + timedelta(days=day_offset)
-            path = folder / f"广东-省内数据-{day:%Y%m%d}.xlsx"
-            if path.exists() and not path.name.startswith("~$") and "自动更新" not in path.stem:
-                candidates.append(path)
-    return candidates
-
-
 def find_province_template(folder: Path, target_date: str) -> UploadFile:
-    candidates: list[UploadFile] = []
-    visible_excel_files: list[str] = []
-    paths = list(folder.glob("*.xlsx"))
-    if not paths:
-        paths = probe_standard_province_templates(folder, target_date)
-    for path in paths:
-        if path.name.startswith("~$") or "自动更新" in path.stem:
-            continue
-        visible_excel_files.append(path.name)
-        if "省内" not in path.name:
-            continue
-        try:
-            candidates.append(
-                UploadFile(
-                    path=path.resolve(),
-                    kind="省内",
-                    date=extract_date_from_name(path),
-                    auto_template=True,
-                )
-            )
-        except ValueError:
-            continue
-    if not candidates:
-        if BUILTIN_PROVINCE_TEMPLATE.is_file():
-            log("同目录未找到可用省内数据，使用内置省内模板。")
-            return UploadFile(
-                path=BUILTIN_PROVINCE_TEMPLATE.resolve(), kind="省内",
-                date=target_date, auto_template=True, builtin_template=True,
-            )
-        visible = "、".join(sorted(visible_excel_files)) or "无"
-        raise ValueError(
-            f"没有在 {folder} 找到可作为模板的省内数据 .xlsx 文件。"
-            f"内置省内模板也不存在：{BUILTIN_PROVINCE_TEMPLATE}。"
-            f"实际看到的 Excel 文件：{visible}"
-        )
-    target_day = datetime.strptime(target_date, "%Y-%m-%d").date()
-    selected = min(
-        candidates,
-        key=lambda item: (
-            abs((datetime.strptime(item.date, "%Y-%m-%d").date() - target_day).days),
-            datetime.strptime(item.date, "%Y-%m-%d").date() > target_day,
-            -item.path.stat().st_mtime,
-        ),
+    """Use the shipped resource regardless of nearby historical workbooks."""
+    if not BUILTIN_PROVINCE_TEMPLATE.is_file():
+        raise ValueError(f"内置省内模板不存在：{BUILTIN_PROVINCE_TEMPLATE}，请修复安装。")
+    log("使用内置省内数据模板，按能销文件日期生成。")
+    return UploadFile(
+        path=BUILTIN_PROVINCE_TEMPLATE.resolve(), kind="省内",
+        date=target_date, auto_template=True, builtin_template=True,
     )
-    log(f"自动选择省内模板：{selected.path.name}")
-    return selected
 
 
 def prepare_upload_files(paths: list[Path]) -> tuple[str, list[UploadFile]]:
@@ -353,7 +302,7 @@ def prepare_upload_files(paths: list[Path]) -> tuple[str, list[UploadFile]]:
     if len(uploads) == 1:
         only_upload = uploads[0]
         if only_upload.kind != "能销":
-            raise ValueError("只选择一个文件时必须选择能销数据文件，省内数据会自动从同目录或内置模板生成。")
+            raise ValueError("只选择一个文件时必须选择能销数据文件，省内数据会自动从内置模板生成。")
         uploads.append(find_province_template(only_upload.path.parent, only_upload.date))
         seen.add("省内")
 
@@ -1442,12 +1391,21 @@ def get_daily_status(context, run_date: str, data_type: str, province_id: str) -
     rows = payload.get("data")
     if not isinstance(rows, list):
         raise RuntimeError("查询日报上传状态返回格式不正确。")
-    if rows and (len(rows) != 1 or not isinstance(rows[0], dict) or
-                 str(rows[0].get("date", ""))[:10] != run_date or
-                 str(rows[0].get("groupDataType", data_type)) != data_type or
-                 str(rows[0].get("provinceId", province_id)) != province_id):
-        raise RuntimeError("网站未返回唯一且日期、类型、省份一致的日报上传状态。")
-    return rows[0] if rows else None
+    if not rows:
+        return None
+    # The list endpoint can include other dates/types/provinces despite its filters.
+    # Never use the first row or treat an unmatched nonempty response as not uploaded.
+    matches = [row for row in rows if isinstance(row, dict) and
+               str(row.get("date", ""))[:10] == run_date and
+               str(row.get("groupDataType", data_type)) == data_type and
+               str(row.get("provinceId", province_id)) == str(province_id)]
+    if len(matches) != 1 or any(not isinstance(row, dict) for row in rows):
+        raise RuntimeError(
+            "网站未返回唯一且日期、类型、省份一致的日报上传状态。"
+            f"查询日期={run_date}，类型={data_type}，省份={province_id}；"
+            f"返回 {len(rows)} 条，匹配 {len(matches)} 条。"
+        )
+    return matches[0]
 
 
 def file_payload(path: Path) -> dict[str, Any]:
@@ -1630,7 +1588,7 @@ def run_gui() -> None:
     selected_paths: list[Path] = []
     log_events: queue.Queue[tuple[str, str]] = queue.Queue()
     force_var = tk.BooleanVar(value=False)
-    summary_var = tk.StringVar(value="请选择能销数据 Excel；省内数据缺省时使用内置模板")
+    summary_var = tk.StringVar(value="请选择能销数据 Excel；省内数据自动使用内置模板")
     file_lines_var = tk.StringVar(value="未选择文件")
 
     def gui_log(message: str) -> None:
@@ -1645,7 +1603,7 @@ def run_gui() -> None:
     def refresh_selection_text() -> None:
         if not selected_paths:
             file_lines_var.set("未选择文件")
-            summary_var.set("请选择能销数据 Excel；省内数据缺省时使用内置模板")
+            summary_var.set("请选择能销数据 Excel；省内数据自动使用内置模板")
             return
         try:
             target_date, uploads = prepare_upload_files(selected_paths)
@@ -1659,7 +1617,7 @@ def run_gui() -> None:
     def choose_files() -> None:
         nonlocal selected_paths
         selected = filedialog.askopenfilenames(
-            title="请选择能销数据 Excel；也可同时选择省内数据",
+            title="请选择能销数据 Excel（省内数据使用内置模板）",
             initialdir=str(SCRIPT_DIR),
             filetypes=[
                 ("Excel 文件", "*.xlsx *.xls"),

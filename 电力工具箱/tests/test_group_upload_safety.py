@@ -22,7 +22,7 @@ class GroupUploadSafetyTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.folder = Path(temporary.name)
 
-    def test_two_days_energy_only_staging_recomputes_saved_formula_and_keeps_inputs(self):
+    def test_two_days_explicit_template_staging_recomputes_saved_formula_and_keeps_inputs(self):
         module = self.module
         source = self.folder / "广东-省内数据-20261101.xlsx"
         book = Workbook()
@@ -41,7 +41,7 @@ class GroupUploadSafetyTests(unittest.TestCase):
             with (mock.patch.object(module, "run_api_upload", side_effect=generate),
                   mock.patch.object(module, "fetch_startup_max", return_value=20),
                   mock.patch.object(module, "fetch_capacity_average", return_value=capacity)):
-                run_group_upload_with_staging(module, [energy], force=False, on_log=lambda _: None)
+                run_group_upload_with_staging(module, [source, energy], force=False, on_log=lambda _: None)
             output = self.folder / f"广东-省内数据-{day.replace('-', '')}.xlsx"
             for cached in (True, False):
                 book = load_workbook(output, data_only=cached)
@@ -100,6 +100,19 @@ class GroupUploadSafetyTests(unittest.TestCase):
             context.request.get.return_value = self.response({"retCode": "T200", "data": rows})
             with self.subTest(rows=rows), self.assertRaisesRegex(RuntimeError, "唯一"):
                 self.module.get_daily_status(context, "2026-11-02", "DAY_MARKET_INFO", "44")
+
+    def test_status_selects_unique_match_from_unfiltered_list(self):
+        target = self.status(provinceId=44)
+        rows = [self.status(date="2026-11-01"),
+                self.status(groupDataType="DAY_ENERGY_SCALE"),
+                target, self.status(provinceId="45")]
+        context = mock.Mock()
+        context.request.get.return_value = self.response({"retCode": "T200", "data": rows})
+        self.assertEqual(self.module.get_daily_status(
+            context, "2026-11-02", "DAY_MARKET_INFO", "44"), target)
+        context.request.get.return_value = self.response({"retCode": "T200", "data": rows + [target]})
+        with self.assertRaisesRegex(RuntimeError, "返回 5 条，匹配 2 条"):
+            self.module.get_daily_status(context, "2026-11-02", "DAY_MARKET_INFO", "44")
 
     def run_upload(self, payload, after_rows, succeeds):
         module = self.module

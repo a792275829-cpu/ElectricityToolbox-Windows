@@ -6,7 +6,6 @@ import json
 import math
 import re
 import sys
-import time
 import urllib.parse
 import urllib.request
 from contextlib import contextmanager
@@ -518,7 +517,7 @@ def weather_code_label(code: Any) -> str:
     return "\u591a\u4e91"
 
 
-def fetch_guangdong_weather_text(report_date: str) -> str:
+def _fetch_open_meteo_weather(report_date: str) -> str:
     start = datetime.strptime(report_date, "%Y-%m-%d").date()
     end = start + timedelta(days=2)
     query = urllib.parse.urlencode(
@@ -532,18 +531,19 @@ def fetch_guangdong_weather_text(report_date: str) -> str:
         }
     )
     url = f"https://api.open-meteo.com/v1/forecast?{query}"
-    last_error: Exception | None = None
-    for _ in range(3):
-        try:
-            with urllib.request.urlopen(url, timeout=30) as response:
-                data = json.load(response)
-            break
-        except Exception as exc:
-            last_error = exc
-            time.sleep(2)
-    else:
-        raise RuntimeError(f"\u8bfb\u53d6\u5e7f\u4e1c\u5929\u6c14\u5931\u8d25\uff1a{last_error}") from last_error
+    with urllib.request.urlopen(url, timeout=8) as response:
+        data = json.load(response)
     daily = data.get("daily") or {}
+    expected_dates = [(start + timedelta(days=i)).isoformat() for i in range(3)]
+    if daily.get("time") != expected_dates:
+        raise ValueError("天气接口日期不完整或与报告日起三天不符")
+    for key in ("weather_code", "temperature_2m_max", "temperature_2m_min"):
+        values = daily.get(key)
+        if not isinstance(values, list) or len(values) != 3 or any(
+            isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+            for v in values
+        ):
+            raise ValueError(f"天气接口三天数据缺失：{key}")
     labels = [weather_code_label(code) for code in daily.get("weather_code") or []]
     max_values = [parse_float(value) for value in daily.get("temperature_2m_max") or [] if value is not None]
     min_values = [parse_float(value) for value in daily.get("temperature_2m_min") or [] if value is not None]
@@ -551,6 +551,63 @@ def fetch_guangdong_weather_text(report_date: str) -> str:
         raise RuntimeError("\u672a\u8bfb\u53d6\u5230\u5e7f\u4e1c\u672a\u6765\u4e09\u5929\u5929\u6c14\u6570\u636e")
     weather_text = labels[0] if labels[0] == labels[-1] else f"{labels[0]}\u8f6c{labels[-1]}"
     return f"\u672a\u6765\u4e09\u5929{weather_text}\uff0c\u6c14\u6e29{round(min(min_values))}\u2103-{round(max(max_values))}\u2103\uff0c"
+
+
+def _parse_china_weather(content: bytes, report_date: str) -> str:
+    # lxml 已随 Word 依赖安装；仅解析广州七天预报，不读取生活指数等同名字段。
+    from lxml import html
+
+    root = html.fromstring(content.decode("utf-8"))
+    stamps = root.xpath('//*[@id="fc_24h_internal_update_time"]/@value')
+    if len(stamps) != 1:
+        raise ValueError("中国天气网缺少唯一预报日期")
+    base = datetime.strptime(stamps[0], "%Y%m%d%H").date()
+    start = datetime.strptime(report_date, "%Y-%m-%d").date()
+    days = {}
+    for offset, row in enumerate(root.xpath('//*[@id="7d"]/ul/li')):
+        day = base + timedelta(days=offset)
+        if not start <= day <= start + timedelta(days=2):
+            continue
+        heading = row.findtext("h1", "")
+        if not heading.startswith(f"{day.day}日"):
+            raise ValueError("中国天气网预报日期与日序不符")
+        label = row.xpath('string(p[@class="wea"])').strip()
+        temperature = row.xpath('p[@class="tem"]')
+        values = re.findall(r"-?\d+", temperature[0].text_content()) if temperature else []
+        if not label or len(values) != 2:
+            raise ValueError(f"中国天气网 {day} 天气或最高/最低温缺失")
+        high, low = map(int, values)
+        if low > high:
+            raise ValueError(f"中国天气网 {day} 温度范围无效")
+        days[day] = (label, high, low)
+    wanted = [start + timedelta(days=i) for i in range(3)]
+    if any(day not in days for day in wanted):
+        raise ValueError("中国天气网未覆盖报告日起完整三天，不使用其他日期预报")
+    labels = [days[day][0] for day in wanted]
+    weather = labels[0] if labels[0] == labels[-1] else f"{labels[0]}转{labels[-1]}"
+    low = min(days[day][2] for day in wanted)
+    high = max(days[day][1] for day in wanted)
+    return f"未来三天{weather}，气温{low}℃-{high}℃，"
+
+
+def fetch_guangdong_weather_text(report_date: str) -> str:
+    try:
+        return _fetch_open_meteo_weather(report_date)
+    except Exception as first_error:
+        log(f"天气主源 Open-Meteo 读取失败，尝试中国天气网广州预报：{first_error}")
+        try:
+            request = urllib.request.Request(
+                "https://www.weather.com.cn/weather/101280101.shtml",
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            with urllib.request.urlopen(request, timeout=8) as response:
+                text = _parse_china_weather(response.read(), report_date)
+            log("天气已更新，来源：中国天气网（广州），已核对报告日起三天日期。")
+            return text
+        except Exception as fallback_error:
+            raise RuntimeError(
+                f"天气主源失败：{first_error}；中国天气网备用源失败：{fallback_error}"
+            ) from first_error
 
 
 def replace_weather_prefix(paragraph, report_date: str) -> None:

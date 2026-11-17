@@ -560,7 +560,7 @@ class GroupUploadPage(ToolPage):
         self.selected_paths: list[Path] = []
         self.selection_var = tk.StringVar(master=self, value="未选择文件")
         self.summary_var = tk.StringVar(
-            master=self, value="请选择能销数据，或同时选择省内和能销数据。"
+            master=self, value="请选择能销数据；省内数据由内置模板自动生成。"
         )
         self.force = tk.BooleanVar(master=self, value=False)
 
@@ -601,13 +601,15 @@ class GroupUploadPage(ToolPage):
     def apply_selected_paths(self, paths: list[Path]) -> None:
         try:
             module = load_module("toolbox_group_upload", self.paths.group_upload)
+            if len(paths) != 1:
+                raise ValueError("请选择一个能销数据文件，省内数据由内置模板自动生成。")
             target_date, uploads = module.prepare_upload_files(paths)
         except Exception as exc:
             self.selected_paths = paths
             self.selection_var.set("\n".join(path.name for path in paths))
             self.summary_var.set(f"文件校验失败：{exc}")
             raise
-        self.selected_paths = [item.path for item in uploads]
+        self.selected_paths = [item.path for item in uploads if item.kind == "能销"]
         self.selection_var.set(
             "\n".join(
                 f"{module.UPLOAD_TYPES[item.kind]['name']}：{item.path.name}"
@@ -640,8 +642,8 @@ class GroupUploadPage(ToolPage):
         return command
 
     def choose_files(self) -> None:
-        selected = filedialog.askopenfilenames(
-            title="选择能销数据；也可同时选择省内数据",
+        selected = filedialog.askopenfilename(
+            title="选择能销数据（省内数据内置，无需选择）",
             initialdir=str(
                 self.file_dialogs.initial_directory("group_upload_input")
             ),
@@ -650,13 +652,13 @@ class GroupUploadPage(ToolPage):
         )
         if not selected:
             return
-        paths = [Path(item) for item in selected]
+        paths = [Path(selected)]
         try:
             self.apply_selected_paths(paths)
         except Exception as exc:
             messagebox.showerror("文件校验失败", str(exc), parent=self)
             return
-        self.file_dialogs.remember_file("group_upload_input", selected[0])
+        self.file_dialogs.remember_file("group_upload_input", selected)
 
     def confirm_upload(self) -> None:
         if not self.selected_paths:

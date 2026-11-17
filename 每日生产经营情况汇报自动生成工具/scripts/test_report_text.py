@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import io
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, call
@@ -19,6 +21,60 @@ import generate_red_marked_report as report
 
 
 class ReportTextTests(unittest.TestCase):
+    @staticmethod
+    def weather_page(stamp="2026111708", day_numbers=(17, 18, 19)):
+        rows = "".join(
+            f'<li><h1>{day}日</h1><p class="wea">多云</p>'
+            f'<p class="tem"><span>{high}</span>/<i>{low}℃</i></p></li>'
+            for day, high, low in zip(day_numbers, (28, 24, 18), (20, 14, 13))
+        )
+        return (f'<input id="fc_24h_internal_update_time" value="{stamp}">'
+                f'<div id="7d"><ul>{rows}</ul></div>').encode()
+
+    def test_weather_timeout_uses_validated_backup(self):
+        with patch.object(report.urllib.request, "urlopen", side_effect=[
+            TimeoutError("TLS handshake timed out"), io.BytesIO(self.weather_page())
+        ]) as request:
+            self.assertEqual(report.fetch_guangdong_weather_text("2026-11-17"),
+                             "未来三天多云，气温13℃-28℃，")
+        self.assertEqual(request.call_count, 2)
+        self.assertTrue(all(c.kwargs["timeout"] == 8 for c in request.call_args_list))
+
+    def test_weather_backup_refuses_wrong_dates_and_missing_temperature(self):
+        page = self.weather_page()
+        for content, date in ((page, "2026-11-16"), (page, "2026-11-18"),
+                              (page.replace(b'2026111708', b'2025111708'), "2026-11-17"),
+                              (page.replace(b'<span>28</span>', b''), "2026-11-17")):
+            with self.subTest(date=date, content=content), self.assertRaises(ValueError):
+                report._parse_china_weather(content, date)
+
+    def test_weather_backup_handles_year_rollover(self):
+        self.assertEqual(report._parse_china_weather(
+            self.weather_page("2026123108", (31, 1, 2)), "2026-12-31"),
+            "未来三天多云，气温13℃-28℃，")
+
+    def test_weather_primary_requires_complete_three_days(self):
+        daily = {"time": ["2026-11-17", "2026-11-18", "2026-11-19"],
+                 "weather_code": [61, 61, 61], "temperature_2m_max": [28, 24, 18],
+                 "temperature_2m_min": [20, 14, 13]}
+        for missing in (False, True):
+            data = {**daily, "temperature_2m_min": [20, None, 13]} if missing else daily
+            with patch.object(report.urllib.request, "urlopen", return_value=io.BytesIO(
+                json.dumps({"daily": data}).encode()
+            )):
+                if missing:
+                    with self.assertRaises(ValueError):
+                        report._fetch_open_meteo_weather("2026-11-17")
+                else:
+                    self.assertEqual(report._fetch_open_meteo_weather("2026-11-17"),
+                                     "未来三天小雨，气温13℃-28℃，")
+
+    def test_weather_all_sources_fail_preserves_first_error(self):
+        with patch.object(report.urllib.request, "urlopen", side_effect=[
+            TimeoutError("first TLS error"), TimeoutError("backup failed")
+        ]), self.assertRaisesRegex(RuntimeError, "first TLS error.*backup failed"):
+            report.fetch_guangdong_weather_text("2026-11-17")
+
     def test_weather_unchanged_does_not_remove_manual_text(self):
         from docx import Document
         doc = Document()

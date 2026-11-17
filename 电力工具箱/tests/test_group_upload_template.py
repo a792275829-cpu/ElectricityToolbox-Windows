@@ -110,19 +110,18 @@ class GroupUploadTemplateTests(unittest.TestCase):
         self.assert_output(self.folder / "广东-省内数据-20261023.xlsx")
         self.assertFalse(observed[1].parent.exists())
 
-    def test_cross_day_numeric_template_without_formula_is_rejected(self):
+    def test_nearby_numeric_template_is_ignored_in_favor_of_builtin(self):
         from shutil import copy2
         province = self.folder / "广东-省内数据-20261022.xlsx"
         copy2(self.template, province)
         def upload(paths, *, force):
-            self.assertEqual(paths[0].name, province.name)
-            self.assertNotEqual(paths[0].parent, province.parent)
-            self.assertFalse(self.module.prepare_upload_files(paths)[1][0].builtin_template)
+            self.assertEqual(paths[0], self.template)
+            self.assertNotEqual(paths[1].parent, province.parent)
+            self.assertTrue(self.module.prepare_upload_files(paths)[1][0].builtin_template)
             self.update(paths)
         with mock.patch.object(self.module, "run_api_upload", side_effect=upload):
-            with self.assertRaisesRegex(RuntimeError, "不能自动或跨日复用"):
-                run_group_upload_with_staging(self.module, [self.energy], force=False, on_log=lambda _: None)
-        self.assertFalse((self.folder / "广东-省内数据-20261023.xlsx").exists())
+            run_group_upload_with_staging(self.module, [self.energy], force=False, on_log=lambda _: None)
+        self.assert_output(self.folder / "广东-省内数据-20261023.xlsx")
         self.assertEqual(province.read_bytes(), self.original_template)
 
     def test_locked_generated_file_is_rejected_without_touching_template(self):
