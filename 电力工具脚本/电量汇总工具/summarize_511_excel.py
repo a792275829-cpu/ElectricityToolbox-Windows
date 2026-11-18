@@ -30,6 +30,7 @@ from openpyxl.utils import get_column_letter
 WORKSPACE = Path(__file__).resolve().parents[2]
 if str(WORKSPACE) not in sys.path:
     sys.path.insert(0, str(WORKSPACE))
+from toolbox_cancellation import checkpoint
 from toolbox_file_button import FileSelectButton
 from toolbox_native_excel import load_value_workbook, prefetch_workbooks
 from toolbox_native_write import save_workbook as save_native_workbook
@@ -129,6 +130,7 @@ def run_summary(
         raise ValueError("没有找到可汇总的 Excel 数据，请选择包含交易结果或节点电价文件的文件夹。")
 
     log(f"共识别 {len(units)} 台机组，开始生成汇总表。")
+    checkpoint()
     final_output = write_workbook(units, output_path, log, node_prices=node_prices)
     log(f"汇总完成：{final_output}")
     return final_output
@@ -157,6 +159,7 @@ def _collect_station_units(station_dirs, logger):
     units: dict[tuple[str, str], UnitData] = {}
     sources = {}
     for station_dir in station_dirs:
+        checkpoint()
         station_key = station_dir.name
         station_name = STATION_DISPLAY_NAMES.get(station_key, station_key)
         logger(f"处理场站：{station_name}")

@@ -12,6 +12,7 @@ from pathlib import Path
 from toolbox_credentials import CredentialStore
 from toolbox_redaction import redact
 from toolbox_storage import data_path
+from toolbox_cancellation import uses_checkpoints
 from .runtime import ToolPaths, TaskRegistry, python_executable, utf8_environment
 from .service_catalog import desktop_catalog
 from .tasks import ProcessRunner, ProcessExecutionError, TaskEvent, TaskEventKind
@@ -34,6 +35,7 @@ class ToolboxService:
         self._journal = deque(maxlen=2000)
         self._dropped = 0
         self._tasks = {}
+        self._cooperative_tasks = set()
         self._requests = {}
         self._tools = {t["id"]: t for t in desktop_catalog(self.paths)}
 
@@ -80,6 +82,7 @@ class ToolboxService:
             if self.confirmation(tool_id, action, p) and params.get("confirmed") is not True:
                 raise ValueError("请先确认上传、覆盖或文件归类操作")
             cancellable = self.cancellable(tool_id, action, p)
+            cooperative = uses_checkpoints(tool_id, action)
             with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix="toolbox-task-", suffix=".json", delete=False) as stream:
                 request_path = Path(stream.name)
                 json.dump(dict(tool_id=tool_id, action=action, values=p), stream, ensure_ascii=False)
@@ -111,7 +114,8 @@ class ToolboxService:
                         str(Path(__file__).resolve().parents[2] / "desktop/python/task_worker.py"), "--workspace", str(self.paths.workspace),
                         "--request", str(request_path)], cwd=self.paths.workspace,
                         env=utf8_environment(), token=token, on_output=output,
-                        allow_browser_breakaway=tool_id == "wps-writer")
+                        allow_browser_breakaway=tool_id == "wps-writer",
+                        cooperative=cooperative)
                     if result is None:
                         raise RuntimeError("业务进程未返回完成结果，请核对日志")
                     if no_data:
@@ -135,18 +139,19 @@ class ToolboxService:
                 request_path.unlink(missing_ok=True)
                 raise
             self._tasks[task_id] = tool_id
+            if cooperative:
+                self._cooperative_tasks.add(task_id)
             self._requests[request_id] = (fingerprint, task_id)
             return task_id
 
+    def cancel_on_disconnect(self):
+        for task in self.registry.active_snapshots():
+            if task.task_id not in self._cooperative_tasks:
+                self.registry.cancel(task.task_id)
+
     @staticmethod
     def cancellable(tool_id, action, p):
-        if tool_id == "daily-pdf-parser" and action == "run":
-            return p["mode"] == "parse"
-        writable = tool_id in {"market-table", "transaction-info", "power-benefit", "spot-price",
-                               "group-upload", "private-batch-upload"}
-        return action not in {"run", "update"} or not (
-            writable or tool_id in {"wps-writer", "guangdong-price"}
-            or tool_id == "summary-upload" and p["mode"] != "summary")
+        return True
 
     @staticmethod
     def confirmation(tool_id, action, p):

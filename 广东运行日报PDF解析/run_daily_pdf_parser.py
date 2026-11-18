@@ -2,10 +2,16 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from gd_pdf_tool import parse_pdf, write_quote_excel
 from gd_pdf_tool.uploader import build_upload_plan, upload_report_files, verify_quote_workbook
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from toolbox_cancellation import checkpoint
 
 
 def default_output_path(pdf_path: str | Path, report_date: str) -> Path:
@@ -28,6 +34,7 @@ def convert_pdf_to_excel(
         if output_path
         else default_output_path(source, result.report_date)
     )
+    checkpoint()
     written = write_quote_excel(result.rows, output)
     verify_quote_workbook(written, result.rows)
     logger(f"报告日期：{result.report_date}")

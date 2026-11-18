@@ -13,6 +13,7 @@ def dispatch(workspace, method, params):
     from toolbox.runtime import ToolPaths, python_executable
     from toolbox.service import ToolboxService
     from toolbox.workflows import validate
+    from toolbox_cancellation import uses_checkpoints
     service = ToolboxService(workspace)
     if method == "__prepare_start":
         tool, action = params.get("tool_id"), params.get("action", "run")
@@ -20,6 +21,7 @@ def dispatch(workspace, method, params):
         cancellable = service.cancellable(tool, action, values)
         return dict(values=values, confirmation=service.confirmation(tool, action, values),
                     name=service._tools[tool]["name"], cancellable=cancellable,
+                    cooperative=uses_checkpoints(tool, action),
                     python=python_executable(), worker=str(ROOT / "desktop/python/task_worker.py"))
     if method in {"start", "tasks", "events", "cancel", "shutdown", "request_close", "installer_close"}:
         raise ValueError("任务控制必须由 Rust 服务执行")

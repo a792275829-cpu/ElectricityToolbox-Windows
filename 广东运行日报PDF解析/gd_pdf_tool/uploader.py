@@ -250,6 +250,7 @@ def wait_upload_response(page, action, *, endpoint: str, label: str, logger,
 
 def upload_one(page, context, auth, plan: UploadPlan, path: Path, *, label: str, data_type: str, logger):
     from playwright.sync_api import expect
+    from toolbox_cancellation import checkpoint
 
     page.get_by_role("tab", name=label, exact=True).click()
     set_report_date(page, plan.report_date)
@@ -259,6 +260,7 @@ def upload_one(page, context, auth, plan: UploadPlan, path: Path, *, label: str,
         raise RuntimeError("页面有其他待上传文件，已停止，避免全部上传包含无关文件。")
     row = date_row(page, plan.report_date)
     logger(f"{label}：{plan.report_date.isoformat()} 选择文件 {path.name}")
+    checkpoint()
     prefix = "/datacenter/gd/api/pub/data/report/import" if data_type == "SPOT_RUN_REPORT_DATA" else "/datacenter/gd/api/pub/data/import"
     validating = wait_upload_response(
         page, lambda: row.locator('input[type="file"]').set_input_files(str(path)),
@@ -272,6 +274,7 @@ def upload_one(page, context, auth, plan: UploadPlan, path: Path, *, label: str,
     except AssertionError as exc:
         raise RuntimeError(f"{label}文件未通过网站校验，未执行全部上传。") from exc
     logger(f"{label}：执行全部上传")
+    checkpoint()
     uploading = wait_upload_response(
         page, button.click, endpoint=prefix + "/create/multi",
         label=f"{label}全部上传", logger=logger, submitted=True,
@@ -291,6 +294,8 @@ def upload_report_files(plan: UploadPlan, *, logger: Callable[[str], None] = pri
 
     config = config or load_upload_config()
     auth = load_auth_module()
+    from toolbox_cancellation import TaskCancelled, checkpoint
+    checkpoint()
     completed: list[str] = []
     with auth.AuthStateLock():
         with sync_playwright() as playwright:
@@ -304,9 +309,14 @@ def upload_report_files(plan: UploadPlan, *, logger: Callable[[str], None] = pri
                     (plan.pdf_path, "现货交易日报", "SPOT_RUN_REPORT_DATA"),
                     (plan.excel_path, "报价容量数据", "SPOT_RUN_REPORT_QUOTE_CAPACITY"),
                 ):
+                    checkpoint()
                     upload_one(page, context, auth, plan, path, label=label, data_type=data_type, logger=logger)
                     completed.append(label)
                 auth.save_auth_state(context)
+            except TaskCancelled:
+                if completed:
+                    logger(f"已上传并确认：{'、'.join(completed)}。")
+                raise
             except Exception:
                 if completed:
                     logger(f"已完成：{'、'.join(completed)}；后续上传失败或状态未确认，本地 PDF 和 Excel 已保留。")

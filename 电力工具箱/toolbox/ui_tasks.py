@@ -12,7 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 from .page_contracts import PAGE_BINDINGS
 from .runtime import TaskRegistry
-from .tasks import TaskCancelled
+from .tasks import CancellationToken, TaskCancelled
 from .tasks.errors import RemoteTaskError
 
 WPS_QUEUE_WAIT_SECONDS = 30
@@ -70,6 +70,7 @@ class RemoteTaskRegistry(TaskRegistry):
         self._wps_operation_lock = threading.Lock()
 
     def execute_remote(self, tool_id, action, values, token, log):
+        token.raise_if_cancelled()
         # Original page dialogs already confirm operations requiring confirmation.
         fingerprint = json.dumps([tool_id, action, values], sort_keys=True, ensure_ascii=False)
         with self._request_lock:
@@ -94,7 +95,8 @@ class RemoteTaskRegistry(TaskRegistry):
             return batch.get("pending", 0)
         while True:
             if token.cancelled and not cancelled:
-                cancelled = bool(self.client.call("cancel", dict(task_id=task_id)))
+                self.client.call("cancel", dict(task_id=task_id))
+                cancelled = True
             consume_events()
             snapshot = next(t for t in self.client.call("tasks") if t["id"] == task_id)
             if snapshot["state"] in {"succeeded", "cancelled", "failed"}:
@@ -173,21 +175,28 @@ class RemoteTaskRegistry(TaskRegistry):
         worker._remote_business = True
         return worker
 
-    def wps_action(self, action, config, indexes, log, *, operation=None):
-        from .tasks import CancellationToken
+    def wps_action(self, action, config, indexes, log, *, operation=None, token=None):
+        token = token if token is not None else CancellationToken()
         values = dict(config=json.dumps(config, ensure_ascii=False),
                       selected_indexes=",".join(str(i + 1) for i in indexes) or "1", operation=json.dumps(operation or {}))
         # Login checks, document reads and writes share the dedicated browser.
         # Queue them before submission; the service's exclusion remains intact.
         if not self._wps_operation_lock.acquire(blocking=False):
             log("正在等待其他 WPS 操作完成…")
-            if not self._wps_operation_lock.acquire(timeout=WPS_QUEUE_WAIT_SECONDS):
-                raise RuntimeError(
-                    f"等待其他 WPS 操作超过 {WPS_QUEUE_WAIT_SECONDS:g} 秒，原任务仍在运行，本次操作尚未提交。"
-                    "请等待原任务结束并核对表格结果，不要重复点击写入。"
-                )
+            deadline = time.monotonic() + WPS_QUEUE_WAIT_SECONDS
+            while True:
+                token.raise_if_cancelled()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(
+                        f"等待其他 WPS 操作超过 {WPS_QUEUE_WAIT_SECONDS:g} 秒，原任务仍在运行，本次操作尚未提交。"
+                        "请等待原任务结束并核对表格结果，不要重复点击写入。"
+                    )
+                if self._wps_operation_lock.acquire(timeout=min(0.1, remaining)):
+                    break
         try:
-            return self.execute_remote("wps-writer", action, values, CancellationToken(), log)
+            token.raise_if_cancelled()
+            return self.execute_remote("wps-writer", action, values, token, log)
         finally:
             self._wps_operation_lock.release()
 

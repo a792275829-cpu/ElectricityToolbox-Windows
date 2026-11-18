@@ -21,6 +21,8 @@ from gd_price_forecast.future_inputs import (
     attach_forecast_snapshot, fetch_forecast_snapshot, validate_forecast_snapshot,
 )
 
+from toolbox_cancellation import checkpoint
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 MAX_FORECAST_DAYS = 15
 
@@ -126,6 +128,7 @@ def _recursive_prediction(
     )
     outputs = []
     for day in dates:
+        checkpoint()
         if len(dates) == 1 and prepared_features is not None:
             X, identity = prepared_features
         else:
@@ -236,6 +239,7 @@ def run_pipeline(
 
     holdout_start = identity.iloc[holdout]['日期'].min()
     train = training_indices(identity, y, holdout_start, months)
+    checkpoint()
     holdout_model = fit_model(X.iloc[train], y.iloc[train], best_config)
     model_pred = predict_model(holdout_model, X.iloc[holdout])
     baseline = X.iloc[holdout]["price_lag_1d"].to_numpy(dtype=float)
@@ -244,6 +248,7 @@ def run_pipeline(
     mae = float(mean_absolute_error(holdout_y, blended))
 
     final_train = training_indices(identity, y, target_day, months)
+    checkpoint()
     final_model = fit_model(X.iloc[final_train], y.iloc[final_train], best_config)
     future = _recursive_prediction(
         frame, final_model, weight, prediction_dates=prediction_dates, feature_options=feature_options,
@@ -276,6 +281,7 @@ def run_pipeline(
     }
     name = "D+1日前电价.xlsx" if forecast_days == 1 else f"D+1至D+{forecast_days}日前电价.xlsx"
     operational_path = output_dir / name
+    checkpoint()
     write_price_workbook(operational_path, future)
     (output_dir / "MAE.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"

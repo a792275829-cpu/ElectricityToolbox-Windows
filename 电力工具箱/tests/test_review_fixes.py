@@ -95,9 +95,8 @@ class ReviewFixTests(unittest.TestCase):
                     clear_log=mock.Mock(), build_command=mock.Mock(return_value=[]), run_process=mock.Mock())
                 with mock.patch("toolbox.daily_pdf_page.messagebox.askyesno", return_value=True):
                     DailyPdfParserPage.start_parse(page)
-                expected = mode == "parse"
-                self.assertEqual(page.run_process.call_args.kwargs["cancellable"], expected)
-                self.assertEqual(ToolboxService.cancellable("daily-pdf-parser", "run", {"mode": mode}), expected)
+                self.assertTrue(page.run_process.call_args.kwargs.get("cancellable", True))
+                self.assertTrue(ToolboxService.cancellable("daily-pdf-parser", "run", {"mode": mode}))
 
     def test_cold_dynamic_login_keeps_exception_identity_and_cli_metadata(self):
         script = r"""

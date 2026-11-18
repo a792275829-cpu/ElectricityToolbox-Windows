@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import threading
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -126,9 +127,10 @@ def serve(workspace):
         if service.closed.is_set():
             break
     # Parent disconnect never causes a write to be killed halfway through.
+    service.cancel_on_disconnect()
     while service.registry.has_running_tasks():
-        service.registry.shutdown(timeout=0.2)
         service.collect_events()
+        time.sleep(0.02)
     send(dict(event=dict(kind="service-closed")))
 
 

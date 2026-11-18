@@ -203,14 +203,15 @@ class ServiceTaskTests(unittest.TestCase):
                 run.assert_called_once()
                 self.assertEqual(result['outputs'], [])
 
-    def test_private_upload_is_noninterruptible_in_both_services(self):
+    def test_private_upload_uses_checkpoints_instead_of_process_termination(self):
         from desktop.python.service_compat import dispatch
         file = self.root / 'sample.xlsx'
         file.write_bytes(b'isolated test input')
         params = dict(tool_id='private-batch-upload', action='run', values=dict(files=[str(file)]))
         prepared = dispatch(ROOT, '__prepare_start', params)
-        self.assertFalse(prepared['cancellable'])
-        self.assertFalse(ToolboxService.cancellable('private-batch-upload', 'run', prepared['values']))
+        self.assertTrue(prepared['cancellable'])
+        self.assertTrue(prepared['cooperative'])
+        self.assertTrue(ToolboxService.cancellable('private-batch-upload', 'run', prepared['values']))
         self.assertTrue(ToolboxService.cancellable('private-batch-upload', 'login', {}))
 
     def test_wps_inspection_forwards_the_original_range_requests(self):

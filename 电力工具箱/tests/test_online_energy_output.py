@@ -15,11 +15,29 @@ from toolbox.runtime import ToolPaths, load_module
 
 
 ROOT = Path(__file__).resolve().parents[2]
+TOOLBOX_TEST_TAGS = ()
 
 
 class OnlineEnergyOutputTests(unittest.TestCase):
     def setUp(self):
         self.module = load_module("test_online_energy_output", ToolPaths(ROOT).online_energy)
+
+    def test_decimal_unit_conversion_survives_workbook_readback(self):
+        import openpyxl
+
+        raw = [8.63, "8.37", 8.44, "8.46", 8.467, None] + [None] * 18
+        values = self.module.online_energy_hours(raw, label="清远", multiplier=10, allow_empty=True)
+        with tempfile.TemporaryDirectory() as folder:
+            rows = [dict(company="清远电厂", unit="#1", time=f"{hour:02d}:00", onlineEle=value)
+                    for hour, value in enumerate(values)]
+            path = self.module.save_excel("2026-11-17", rows, Path(folder))
+            workbook = openpyxl.load_workbook(path, data_only=True)
+            try:
+                cells = [row[0] for row in workbook["汇总"]["A3:A8"]]
+                self.assertEqual([cell.value for cell in cells], [86.3, 83.7, 84.4, 84.6, 84.67, None])
+                self.assertTrue(all(cell.number_format == "General" for cell in cells))
+            finally:
+                workbook.close()
 
     def range_module(self, fetch, *, units=({"id": "u", "name": "#1"},)):
         """Patch the browser boundary so a whole date range uses one session."""

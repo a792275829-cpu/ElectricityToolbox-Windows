@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
-from threading import Event
 from typing import Any
+from toolbox_cancellation import CancellationToken, TaskCancelled
 
 
 class TaskState(str, Enum):
@@ -47,23 +47,3 @@ class TaskSnapshot:
 
     def transition(self, state: TaskState, **changes: Any) -> "TaskSnapshot":
         return replace(self, state=state, **changes)
-
-
-class TaskCancelled(RuntimeError):
-    pass
-
-
-class CancellationToken:
-    def __init__(self) -> None:
-        self._event = Event()
-
-    @property
-    def cancelled(self) -> bool:
-        return self._event.is_set()
-
-    def cancel(self) -> None:
-        self._event.set()
-
-    def raise_if_cancelled(self) -> None:
-        if self.cancelled:
-            raise TaskCancelled("任务已取消")

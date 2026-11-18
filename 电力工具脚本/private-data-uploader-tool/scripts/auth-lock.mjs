@@ -7,12 +7,13 @@ function isAlive(pid) {
   catch (error) { return error.code !== 'ESRCH'; }
 }
 
-export async function acquireAuthLock(config, timeoutMs = 15 * 60 * 1000, log = () => {}) {
+export async function acquireAuthLock(config, timeoutMs = 15 * 60 * 1000, log = () => {}, checkpoint = () => {}) {
   const target = `${config.authStatePath}.lock`;
   await fs.mkdir(path.dirname(target), { recursive: true });
   const started = Date.now();
   let notified = false;
   while (true) {
+    checkpoint();
     let handle;
     try {
       handle = await fs.open(target, 'wx', 0o600);

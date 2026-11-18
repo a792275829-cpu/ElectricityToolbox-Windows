@@ -31,6 +31,7 @@ from toolbox_credentials import apply_credentials
 from toolbox_excel_read import read_cell_snapshots
 import toolbox_native_workbook as native_workbook
 from toolbox_native_domain import with_native_session
+from toolbox_cancellation import TaskCancelled, checkpoint
 from toolbox_workbook_commit import (
     FileFingerprint, assert_workbook_unchanged, commit_workbooks, workbook_fingerprint,
 )
@@ -375,6 +376,7 @@ def collect_target_prices(
                     unit_id = str(unit["id"])
                     unit_name = auth.unit_display_name(unit)
                     log(f"{target.key}：使用场站 {unit_name}")
+                    checkpoint()
                     day_ahead = fetch_price_series(
                         context,
                         auth,
@@ -383,6 +385,7 @@ def collect_target_prices(
                         data_type=1,
                         label=f"{target.key} 日前出清电价",
                     )
+                    checkpoint()
                     real_time = fetch_price_series(
                         context,
                         auth,
@@ -1154,6 +1157,8 @@ def main() -> int:
             create_backup=not args.no_backup,
         )
         return 0
+    except TaskCancelled:
+        raise
     except KeyboardInterrupt:
         print("已取消。", file=sys.stderr)
         return 130

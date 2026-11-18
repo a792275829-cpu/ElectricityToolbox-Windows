@@ -6,6 +6,8 @@ import time
 import unittest
 from pathlib import Path
 
+TOOLBOX_TEST_TAGS = ()
+
 
 class TaskModelTests(unittest.TestCase):
     def test_snapshot_is_immutable_and_token_cancels(self) -> None:
@@ -36,6 +38,38 @@ class EventBufferTests(unittest.TestCase):
 
 
 class ProcessRunnerTests(unittest.TestCase):
+    def test_cooperative_cancel_waits_for_current_step_and_cleanup(self):
+        from tempfile import TemporaryDirectory
+        from toolbox.tasks import CancellationToken, ProcessRunner, TaskCancelled
+
+        program = """
+import os
+import time
+from pathlib import Path
+marker = Path(os.environ['TOOLBOX_TASK_CANCEL_FILE'])
+try:
+    print('ready', flush=True)
+    for _ in range(200):
+        if marker.exists():
+            Path('completed').write_text('verified')
+            raise SystemExit(130)
+        time.sleep(.02)
+    Path('next-step').touch()
+finally:
+    Path('cleaned').touch()
+"""
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            token, runner = CancellationToken(), ProcessRunner()
+            with self.assertRaises(TaskCancelled):
+                runner.run([sys.executable, "-u", "-c", program], cwd=root, env=None,
+                           token=token, on_output=lambda line: token.cancel() if line.strip() == "ready" else None,
+                           cooperative=True)
+            self.assertEqual((root / "completed").read_text(), "verified")
+            self.assertTrue((root / "cleaned").is_file())
+            self.assertFalse((root / "next-step").exists())
+            self.assertIsNone(runner.active_process)
+
     @unittest.skipIf(sys.platform == "win32", "POSIX process-group permission regression; Windows uses Job Objects")
     def test_permission_denied_group_probe_does_not_replace_cancellation(self):
         import os

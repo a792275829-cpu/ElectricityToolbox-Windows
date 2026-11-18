@@ -31,6 +31,7 @@
 | [`reviews/maintenance-policy-2026-11-10.md`](reviews/maintenance-policy-2026-11-10.md) | 维护流程分层、版本解耦、构建与回收门禁的调整及验证 |
 | [`reviews/upstream-review-2026-11-05.md`](reviews/upstream-review-2026-11-05.md) | 最新上游比对基线 |
 | [`releases/v0.1.45.md`](releases/v0.1.45.md) | 0.1.45 的发行验收范围、环境与结果 |
+| [`releases/v0.1.46.md`](releases/v0.1.46.md) | 0.1.46 的发行验收范围、环境与结果 |
 | [`releases/v0.1.44.md`](releases/v0.1.44.md) | 0.1.44 的发行验收范围、环境与结果 |
 | [`releases/v0.1.43.md`](releases/v0.1.43.md) | 0.1.43 的发行验收范围、环境与结果 |
 | [`releases/v0.1.42.md`](releases/v0.1.42.md) | 0.1.42 的发行验收范围、环境与结果 |

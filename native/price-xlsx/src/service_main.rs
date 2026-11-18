@@ -11,7 +11,7 @@ use std::{collections::{HashMap, VecDeque}, fs, io::{self, BufRead, BufReader, W
 
 #[derive(Clone)]
 struct Config { workspace: PathBuf, code_root: PathBuf, python: PathBuf }
-struct Task { value: Value, cancelled: Arc<AtomicBool> }
+struct Task { value: Value, cancelled: Arc<AtomicBool>, cooperative: bool }
 #[derive(Default)]
 struct State {
     tasks: HashMap<String, Task>, order: Vec<String>, requests: HashMap<String, (String, String)>,
@@ -65,7 +65,9 @@ fn event(state: &mut State, id: &str, kind: &str, message: &str) {
 fn transition(shared: &Shared, id: &str, mut phase: &str, mut result: Value, mut error: Option<String>) {
     let mut state = shared.lock().unwrap();
     if phase == "running" && state.tasks.get(id).is_some_and(|task| task.cancelled.load(Ordering::Acquire)) { return; }
-    if matches!(phase, "succeeded" | "failed") && state.tasks.get(id).is_some_and(|task| task.cancelled.load(Ordering::Acquire)) {
+    if state.tasks.get(id).is_some_and(|task| {
+        task.cancelled.load(Ordering::Acquire) && (phase == "succeeded" || (phase == "failed" && !task.cooperative))
+    }) {
         phase = "cancelled"; result = Value::Null; error = None;
     }
     let redacted_error = error.as_ref().map(|e| redact(e));
@@ -105,9 +107,12 @@ fn run_worker(config: Config, shared: Shared, id: String, prepared: Value, reque
     if cancelled.load(Ordering::Acquire) { transition(&shared, &id, "cancelled", Value::Null, None); return; }
     transition(&shared, &id, "running", Value::Null, None);
     let request_path = std::env::temp_dir().join(format!("toolbox-native-task-{}-{id}.json", std::process::id()));
+    let cancel_path = request_path.with_extension("cancel");
+    let cooperative = prepared["cooperative"] == true;
     let mut request_created = false;
     let mut owned_child = None;
     let mut failure_detail: Option<Value> = None;
+    let mut worker_failed = false;
     let outcome = (|| -> Result<Value, String> {
         let mut options = fs::OpenOptions::new(); options.write(true).create_new(true);
         #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
@@ -121,6 +126,9 @@ fn run_worker(config: Config, shared: Shared, id: String, prepared: Value, reque
             .current_dir(&config.workspace).env("PYTHONUTF8", "1").env("PYTHONIOENCODING", "utf-8")
             .env("TOOLBOX_PYTHON", &config.python).env("PYTHONDONTWRITEBYTECODE", "1")
             .env("TOOLBOX_CLI_PROTOCOL", "1");
+        if cooperative {
+            command.env("TOOLBOX_TASK_CANCEL_FILE", &cancel_path);
+        }
         owned_child = Some(service_process::OwnedChild::spawn_if_active(&mut command, &cancelled,
             request["tool_id"] == "wps-writer").map_err(|e| e.to_string())?);
         let owned = owned_child.as_mut().unwrap();
@@ -147,11 +155,25 @@ fn run_worker(config: Config, shared: Shared, id: String, prepared: Value, reque
         let mut trace = String::new();
         let mut no_data = None;
         let mut termination_error = None;
+        let mut cancel_sent = false;
         while ended < 2 {
             if status.is_none() {
                 status = owned.child.try_wait().map_err(|e| e.to_string())?;
             }
-            if cancelled.load(Ordering::Acquire) || status.is_some() {
+            let cancelling = cancelled.load(Ordering::Acquire);
+            if cancelling && cooperative && !cancel_sent && status.is_none() {
+                match fs::write(&cancel_path, []) {
+                    Ok(()) => cancel_sent = true,
+                    Err(_) => {
+                        let message = "暂时无法通知业务进程取消，正在重试".to_string();
+                        if termination_error.as_ref() != Some(&message) {
+                            event(&mut shared.lock().unwrap(), &id, "error", &message);
+                            termination_error = Some(message);
+                        }
+                    }
+                }
+            }
+            if (cancelling && !cooperative) || status.is_some() {
                 if let Err(error) = owned.terminate() {
                     let message = format!("后台进程终止尚未确认：{error}");
                     if termination_error.as_ref() != Some(&message) {
@@ -189,8 +211,11 @@ fn run_worker(config: Config, shared: Shared, id: String, prepared: Value, reque
             }
         }
         let status = status.unwrap_or(owned.child.wait().map_err(|e| e.to_string())?);
-        if cancelled.load(Ordering::Acquire) { return Err("任务已取消".into()); }
+        if cancelled.load(Ordering::Acquire) && (!cooperative || status.success() || status.code() == Some(130)) {
+            return Err("任务已取消".into());
+        }
         if !status.success() {
+            worker_failed = true;
             let detail = failure_detail.get_or_insert_with(|| json!({"code":"external_process","stage":"worker"}));
             if !detail["exit_code"].as_i64().is_some_and(|code| code != 0) {
                 detail["exit_code"] = json!(status.code().unwrap_or(-1));
@@ -213,8 +238,11 @@ fn run_worker(config: Config, shared: Shared, id: String, prepared: Value, reque
             event(&mut state, &id, "error", &format!("后台进程清理尚未确认：{error}"));
         });
     }
-    if request_created { let _ = fs::remove_file(request_path); }
-    if cancelled.load(Ordering::Acquire) { transition(&shared, &id, "cancelled", Value::Null, None); }
+    if request_created {
+        if cooperative { let _ = fs::remove_file(cancel_path); }
+        let _ = fs::remove_file(request_path);
+    }
+    if cancelled.load(Ordering::Acquire) && !worker_failed { transition(&shared, &id, "cancelled", Value::Null, None); }
     else { match outcome {
         Ok(result) => transition(&shared, &id, "succeeded", result, None),
         Err(error) => {
@@ -245,7 +273,7 @@ fn start(config: &Config, shared: &Shared, params: &Value, closed: &AtomicBool) 
     let cancelled = Arc::new(AtomicBool::new(false));
     {
         let mut state = shared.lock().unwrap();
-        state.tasks.insert(id.clone(), Task { value: json!({"id":id,"tool_id":tool,"name":prepared["name"],"state":"created","cancellable":prepared["cancellable"],"message":"","result":null,"error":null,"error_detail":null}), cancelled: cancelled.clone() });
+        state.tasks.insert(id.clone(), Task { value: json!({"id":id,"tool_id":tool,"name":prepared["name"],"state":"created","cancellable":prepared["cancellable"],"message":"","result":null,"error":null,"error_detail":null}), cancelled: cancelled.clone(), cooperative: prepared["cooperative"] == true });
         state.order.push(id.clone());
         state.requests.insert(request_id.to_string(), (fingerprint, id.clone()));
         event(&mut state, &id, "state", "created");
@@ -274,7 +302,7 @@ fn call(config: &Config, shared: &Shared, closed: &AtomicBool, method: &str, par
             let mut state = shared.lock().unwrap();
             let id = params["task_id"].as_str().unwrap_or("");
             let accepted = if let Some(task) = state.tasks.get_mut(id) {
-                if active(&task.value) && task.value["cancellable"] == true {
+                if matches!(task.value["state"].as_str(), Some("created" | "running")) && task.value["cancellable"] == true {
                     task.cancelled.store(true, Ordering::Release); task.value["state"] = json!("cancelling"); true
                 } else { false }
             } else { false };
@@ -347,7 +375,11 @@ fn main() {
         let state = shared.lock().unwrap();
         let tasks: Vec<_> = state.tasks.values().filter(|t| active(&t.value)).collect();
         if tasks.is_empty() { break; }
-        for task in tasks { if task.value["cancellable"] == true { task.cancelled.store(true, Ordering::Release); } }
+        for task in tasks {
+            if task.value["cancellable"] == true && !task.cooperative {
+                task.cancelled.store(true, Ordering::Release);
+            }
+        }
         drop(state); thread::sleep(Duration::from_millis(20));
     }
     let _ = writeln!(output, "{}", json!({"event":{"kind":"service-closed"}}));
@@ -376,6 +408,7 @@ mod tests {
         shared.lock().unwrap().tasks.insert("task".into(), Task {
             value: json!({"state":"running"}),
             cancelled: Arc::new(AtomicBool::new(false)),
+            cooperative: false,
         });
         transition(&shared, "task", "succeeded", json!({"message":"password=synthetic-secret"}), None);
         let state = shared.lock().unwrap();
@@ -388,10 +421,23 @@ mod tests {
         shared.lock().unwrap().tasks.insert("task".into(), Task {
             value: json!({"state":"cancelling","cancellable":true,"error_detail":{"login_kind":"network"}}),
             cancelled: Arc::new(AtomicBool::new(true)),
+            cooperative: false,
         });
         transition(&shared, "task", "succeeded", json!({"message":"done"}), None);
         assert_eq!(shared.lock().unwrap().tasks["task"].value["state"], "cancelled");
         assert!(shared.lock().unwrap().tasks["task"].value["error_detail"].is_null());
+    }
+
+    #[test]
+    fn cooperative_cancellation_preserves_a_failure_during_the_current_step() {
+        let shared: Shared = Arc::new(Mutex::new(State::default()));
+        shared.lock().unwrap().tasks.insert("task".into(), Task {
+            value: json!({"state":"cancelling"}),
+            cancelled: Arc::new(AtomicBool::new(true)),
+            cooperative: true,
+        });
+        transition(&shared, "task", "failed", Value::Null, Some("保存结果待核对".into()));
+        assert_eq!(shared.lock().unwrap().tasks["task"].value["state"], "failed");
     }
 
     #[test]
@@ -402,7 +448,7 @@ mod tests {
         file.write_all(b"existing-request").unwrap(); drop(file);
         let shared: Shared = Arc::new(Mutex::new(State::default()));
         let cancelled = Arc::new(AtomicBool::new(false));
-        shared.lock().unwrap().tasks.insert(id.clone(), Task { value: json!({"state":"created"}), cancelled:cancelled.clone() });
+        shared.lock().unwrap().tasks.insert(id.clone(), Task { value: json!({"state":"created"}), cancelled:cancelled.clone(), cooperative: false });
         let config = Config { workspace:std::env::temp_dir(), code_root:std::env::temp_dir(), python:PathBuf::from("never-run") };
         run_worker(config, shared, id, json!({}), json!({}), cancelled);
         let content = fs::read(&path);

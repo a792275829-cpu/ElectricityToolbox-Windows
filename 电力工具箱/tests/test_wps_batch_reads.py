@@ -10,8 +10,28 @@ from openpyxl import Workbook
 
 from toolbox.runtime import load_module
 
+TOOLBOX_TEST_TAGS = ()
 
 class WpsBatchReadTests(unittest.TestCase):
+    def test_old_qingyuan_summary_cleans_only_numeric_rounding_tails(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        module = load_module("wps_batch_read_test", root / "wps自动" / "wps_excel_to_kdocs_gui.py")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "上网电量汇总_2026-11-17(1).xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "汇总"
+            sheet["A12"] = "清远 实际上网电量（万千瓦时）"
+            sheet["B13"] = "3、4号机"
+            for row, value in enumerate([84.60000000000001, 83.69999999999999, 84.67, None, "83.69999999999999"], 14):
+                sheet.cell(row, 2, value)
+            sheet["B38"] = 84.60000000000001
+            workbook.save(path)
+            workbook.close()
+            first, outside = module.read_excel_ranges(path, [("汇总", "B14:B18"), ("汇总", "B38:B38")])
+            self.assertEqual(first, ([[84.6], [83.7], [84.67], [""], ["83.69999999999999"]], 5, 1))
+            self.assertEqual(outside, ([[84.60000000000001]], 1, 1))
+
     def test_multiple_ranges_use_one_open_and_keep_values_in_mapping_order(self) -> None:
         root = Path(__file__).resolve().parents[2]
         module = load_module(

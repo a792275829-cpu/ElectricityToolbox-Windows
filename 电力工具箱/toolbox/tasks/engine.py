@@ -85,9 +85,12 @@ class TaskEngine:
                 current = self._snapshots[task_id]
                 if current.state in {TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED}:
                     return current
-                if current.state is TaskState.CANCELLING and state in {TaskState.RUNNING, TaskState.SUCCEEDED}:
-                    state = TaskState.CANCELLED
-                    changes = {"message": "任务已取消", "error": TaskCancelled("任务已取消")}
+                if current.state is TaskState.CANCELLING:
+                    if state is TaskState.RUNNING:
+                        return current
+                    if state is TaskState.SUCCEEDED:
+                        state = TaskState.CANCELLED
+                        changes = {"message": "任务已取消", "error": TaskCancelled("任务已取消")}
                 updated = current.transition(state, **changes)
                 self._snapshots[task_id] = updated
             emit(TaskEvent(task_id, TaskEventKind.STATE, message=state.value))
@@ -97,6 +100,7 @@ class TaskEngine:
             try:
                 token.raise_if_cancelled()
                 transition(TaskState.RUNNING)
+                token.raise_if_cancelled()
                 result = worker(token, emit)
                 token.raise_if_cancelled()
             except TaskCancelled as exc:
@@ -122,7 +126,7 @@ class TaskEngine:
         thread.start()
         return task_id
 
-    def start_process(self, name: str, command: Sequence[str], *, cwd: Path, env: Mapping[str, str] | None, on_done: DoneCallback | None = None, on_output: Callable[[str], None] | None = None, cancellable: bool = True) -> str:
+    def start_process(self, name: str, command: Sequence[str], *, cwd: Path, env: Mapping[str, str] | None, on_done: DoneCallback | None = None, on_output: Callable[[str], None] | None = None, cancellable: bool = True, cooperative: bool = False) -> str:
         task_id = uuid4().hex
 
         def worker(token: CancellationToken, emit: Callable[[TaskEvent], None]) -> int:
@@ -130,14 +134,15 @@ class TaskEngine:
                 emit(TaskEvent(task_id, TaskEventKind.LOG, message=line))
                 if on_output is not None:
                     on_output(line)
-            return ProcessRunner().run(list(command), cwd=cwd, env=env, token=token, on_output=output).returncode
+            return ProcessRunner().run(list(command), cwd=cwd, env=env, token=token, on_output=output,
+                                       cooperative=cooperative).returncode
 
         return self.start_callable(name, worker, on_done=on_done, cancellable=cancellable, _task_id=task_id)
 
     def cancel(self, task_id: str) -> bool:
         with self._lock:
             snapshot = self._snapshots.get(task_id)
-            if snapshot is None or snapshot.state not in ACTIVE_STATES or not snapshot.cancellable:
+            if snapshot is None or snapshot.state not in {TaskState.CREATED, TaskState.RUNNING} or not snapshot.cancellable:
                 return False
             self._snapshots[task_id] = snapshot.transition(TaskState.CANCELLING)
             token = self._tokens[task_id]

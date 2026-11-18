@@ -10,6 +10,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -113,10 +114,13 @@ class AuthStateLock:
         self.acquired = False
 
     def __enter__(self) -> "AuthStateLock":
+        from toolbox_cancellation import checkpoint
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
         started = time.time()
         notified = False
         while True:
+            checkpoint()
             try:
                 fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             except FileExistsError:
@@ -444,8 +448,11 @@ def online_energy_hours(
             result.append(None)
             continue
         try:
-            value = float(raw) * multiplier
-        except (TypeError, ValueError):
+            value = float(raw)
+            if multiplier != 1 and math.isfinite(value):
+                # Scale the original decimal before converting to an Excel number.
+                value = float(Decimal(str(raw)) * multiplier)
+        except (TypeError, ValueError, InvalidOperation, OverflowError):
             raise ValueError(f"{label} {hour:02d}:00 电量缺失或无效，停止导出。") from None
         if isinstance(raw, bool) or not math.isfinite(value):
             raise ValueError(f"{label} {hour:02d}:00 电量缺失或无效，停止导出。")

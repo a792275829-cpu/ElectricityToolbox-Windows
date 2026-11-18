@@ -9,6 +9,7 @@ import io
 import select
 import time
 import json
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
@@ -16,6 +17,7 @@ from typing import Callable, Mapping, Sequence
 
 from .models import CancellationToken, TaskCancelled
 from toolbox_platform import hidden_process_options
+from toolbox_cancellation import CANCEL_EXIT_CODE, CANCEL_FILE_ENV
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,13 +51,25 @@ class ProcessRunner:
         token: CancellationToken,
         on_output: Callable[[str], None],
         allow_browser_breakaway: bool = False,
+        cooperative: bool = False,
     ) -> ProcessResult:
+        if cooperative:
+            with tempfile.TemporaryDirectory(prefix="toolbox-cancel-") as directory:
+                return self._run(command, cwd=cwd, env=env, token=token, on_output=on_output,
+                                 allow_browser_breakaway=allow_browser_breakaway,
+                                 cancel_file=Path(directory) / "cancel")
+        return self._run(command, cwd=cwd, env=env, token=token, on_output=on_output,
+                         allow_browser_breakaway=allow_browser_breakaway)
+
+    def _run(self, command, *, cwd, env, token, on_output, allow_browser_breakaway, cancel_file=None):
         from toolbox_cli_login import script_command, ERROR_PREFIX
         command = script_command(command)
         login_detail = None
         token.raise_if_cancelled()
         process_env = dict(env) if env is not None else dict(os.environ)
         process_env["TOOLBOX_CLI_PROTOCOL"] = "1"
+        if cancel_file is not None:
+            process_env[CANCEL_FILE_ENV] = str(cancel_file)
         lines: Queue[str | None] = Queue()
         options = hidden_process_options()
         if os.name == "nt":
@@ -130,12 +144,19 @@ class ProcessRunner:
         reader = threading.Thread(target=read_stdout, name=f"toolbox-output-{process.pid}", daemon=True)
         reader.start()
         stream_closed = False
+        cancel_sent = False
         try:
             while process.poll() is None or not stream_closed:
-                if token.cancelled:
-                    # The finally barrier retains ownership and retries cleanup
-                    # before this cancellation can leave the runner.
-                    raise TaskCancelled("任务已取消")
+                if token.cancelled and not cancel_sent:
+                    if cancel_file is None:
+                        raise TaskCancelled("任务已取消")
+                    try:
+                        cancel_file.touch()
+                    except OSError:
+                        # Retry notification while retaining ownership of the live writer.
+                        pass
+                    else:
+                        cancel_sent = True
                 try:
                     line = lines.get(timeout=0.05)
                 except Empty:
@@ -156,7 +177,7 @@ class ProcessRunner:
                     else:
                         on_output(line)
             returncode = process.wait()
-            if token.cancelled:
+            if token.cancelled and (cancel_file is None or returncode in {0, CANCEL_EXIT_CODE}):
                 raise TaskCancelled("任务已取消")
             if returncode != 0:
                 exc = ProcessExecutionError(returncode)

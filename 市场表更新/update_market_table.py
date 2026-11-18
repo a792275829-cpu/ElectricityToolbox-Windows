@@ -33,6 +33,7 @@ from toolbox_auth_loader import load_login_module
 from toolbox_excel_read import read_cell_snapshots
 from toolbox_workbook_commit import assert_workbook_unchanged, workbook_commit_lock, workbook_fingerprint
 from toolbox_workbook_commit import commit_workbooks
+from toolbox_cancellation import TaskCancelled, checkpoint
 from toolbox_market_workbook import save_market_workbook
 from toolbox_native_excel import excel_session
 
@@ -1444,6 +1445,7 @@ def copy_previous_day_unit_operation_mode(
 
 def fetch_values_or_skip(label: str, fetcher, *, attempts: int = 3):
     for attempt in range(1, attempts + 1):
+        checkpoint()
         try:
             return fetcher()
         except PlaywrightError as exc:
@@ -1779,6 +1781,8 @@ def main() -> int:
             create_backup=not args.no_backup,
         )
         return 0
+    except TaskCancelled:
+        raise
     except KeyboardInterrupt:
         print("已取消。", file=sys.stderr)
         return 130

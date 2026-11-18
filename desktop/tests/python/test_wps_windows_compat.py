@@ -58,6 +58,18 @@ class BrowserDiscoveryTests(unittest.TestCase):
 
 
 class WpsOperationSerializationTests(unittest.TestCase):
+    def test_cancelled_queued_write_does_not_submit_or_release_the_active_operation(self):
+        from toolbox.tasks import CancellationToken, TaskCancelled
+        from toolbox.ui_tasks import RemoteTaskRegistry
+
+        registry = RemoteTaskRegistry(None)
+        token = CancellationToken()
+        with registry._wps_operation_lock, patch.object(registry, "execute_remote") as execute:
+            with self.assertRaises(TaskCancelled):
+                registry.wps_action("run", {}, [], lambda _line: token.cancel(), token=token)
+            execute.assert_not_called()
+            self.assertTrue(registry._wps_operation_lock.locked())
+
     def test_stuck_operation_does_not_keep_queued_threads_alive_forever(self):
         from toolbox.ui_tasks import RemoteTaskRegistry
         registry = RemoteTaskRegistry(None)

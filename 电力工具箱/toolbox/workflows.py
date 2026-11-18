@@ -5,6 +5,8 @@ import json
 import math
 import subprocess
 from pathlib import Path
+from toolbox_cancellation import CANCEL_EXIT_CODE, checkpoint, uses_checkpoints
+from toolbox_cli_login import script_command
 
 from toolbox_dates import normalize_date_input, parse_date_input
 from toolbox_storage import data_path
@@ -231,7 +233,10 @@ def execute(paths, tool_id, action, p):
     """Run in an owned worker process; its children share its process group."""
     command_list = plan(paths, tool_id, action, p)
     for command, cwd in command_list:
-        subprocess.run(command, cwd=cwd, check=True)
+        checkpoint()
+        if uses_checkpoints(tool_id, action):
+            command = script_command(command)
+        run_command(command, cwd)
     if command_list:
         if action == "login":
             return dict(message="登录已完成", outputs=[])
@@ -279,21 +284,31 @@ def execute(paths, tool_id, action, p):
         from .review_classification import prepare_review_folder, missing_review_stations
         source = Path(p["input_dir"]).expanduser()
         output = Path(p["output_file"]).expanduser()
-        from .tasks import CancellationToken
-        prepared = prepare_review_folder(source, logger=log, token=CancellationToken(), excluded=(output,))
+        prepared = prepare_review_folder(source, logger=log, excluded=(output,))
         missing = missing_review_stations(prepared)
         outputs = []
         if action != "preview" and p["mode"] != "upload":
+            checkpoint()
             module = load_module("toolbox_summary", paths.summary)
             result = module.run_summary(input_dir=prepared, output_path=output, logger=log)
             outputs.append(str(result))
         if action == "preview" or p["mode"] != "summary":
-            subprocess.run([node_executable(), str(paths.private_uploader), "--plan" if action == "preview" else "--execute",
-                            "--source", str(prepared)], cwd=paths.private_uploader_dir, check=True)
+            checkpoint()
+            run_command([node_executable(), str(paths.private_uploader), "--plan" if action == "preview" else "--execute",
+                         "--source", str(prepared)], paths.private_uploader_dir)
         return dict(outputs=outputs, missing=list(missing))
     elif tool_id == "wps-writer":
         return execute_wps(paths, action, p, log)
     return dict(message="任务已完成")
+
+
+def run_command(command, cwd):
+    try:
+        subprocess.run(command, cwd=cwd, check=True)
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode == CANCEL_EXIT_CODE:
+            checkpoint()
+        raise
 
 
 def execute_wps(paths, action, p, log):
@@ -336,6 +351,7 @@ def execute_wps(paths, action, p, log):
     for item in prepared:
         groups.setdefault(item.kdocs_url, []).append(item)
     for url, group in groups.items():
+        checkpoint()
         result = module.write_to_wps(url, group, log, browser_mode=mode, cdp_url=cdp, overwrite=config["overwrite"])
         rows = {entry["index"]: entry for entry in result.get("results", [])}
         if not result.get("saved"):

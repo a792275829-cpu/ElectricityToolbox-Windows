@@ -1,5 +1,6 @@
 import { chromium } from 'playwright';
 import fs from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import crypto from 'node:crypto';
@@ -176,6 +177,7 @@ async function collectPlan(sourceDir) {
   const plan = [];
 
   for (const target of targets) {
+    checkpoint();
     const matchedDirs = dirs.filter((dir) => target.aliases.some((alias) => dir.name.includes(alias)));
     const files = [];
 
@@ -459,8 +461,17 @@ async function uploadFile(page, filePath, current, total) {
   log(`[${current}/${total}] 成功：${path.basename(filePath)}`);
 }
 
+class TaskCancelled extends Error {}
+
+function checkpoint() {
+  const marker = process.env.TOOLBOX_TASK_CANCEL_FILE;
+  if (marker && existsSync(marker)) {
+    throw new TaskCancelled('任务已取消，已完成的上传请查看日志。');
+  }
+}
+
 async function executeUpload(plan, config) {
-  const releaseLock = await acquireAuthLock(config, undefined, log);
+  const releaseLock = await acquireAuthLock(config, undefined, log, checkpoint);
   let browser;
   let context;
   try {
@@ -471,8 +482,10 @@ async function executeUpload(plan, config) {
     let currentFile = 0;
     log(`本次共需上传 ${totalFiles} 个文件。`);
     for (const item of plan) {
+      checkpoint();
       await switchTenant(page, config, item.target);
       for (const file of item.files) {
+        checkpoint();
         currentFile += 1;
         await uploadFile(page, file, currentFile, totalFiles);
       }
@@ -539,9 +552,11 @@ async function switchTenantForImport(page, config, target) {
 async function postBatch(context, config, batch, fields) {
   const payloadFiles = [];
   for (const file of batch.files) {
+    checkpoint();
     payloadFiles.push({ ...file, buffer: await fs.readFile(file.path) });
   }
   const { body, contentType } = buildMultipart(payloadFiles, fields);
+  checkpoint();
   const startedAt = Date.now();
   const label = `${batch.files.length} 个文件`;
   const heartbeat = setInterval(() => {
@@ -671,19 +686,27 @@ async function runBatch(config, args) {
   if (args.powerSource) log(`原始功率预测数据来源：${args.powerSource}`);
   log(`共 ${files.length} 个文件，分 ${batches.length} 批上传。`);
 
-  const releaseLock = await acquireAuthLock(config, undefined, log);
+  const releaseLock = await acquireAuthLock(config, undefined, log, checkpoint);
   let browser;
   let context;
   const succeeded = [];
   const failed = [];
   let completedBatches = 0;
+  const verifyCompletedBatches = async () => {
+    if (!args.verify || completedBatches === 0) return;
+    const reported = datesOf([...succeeded, ...failed]);
+    const uploadedFiles = batches.slice(0, completedBatches).flatMap(batch => batch.files);
+    await logImportStatus(context, config, reported.length > 0 ? reported : inferDatesFromNames(uploadedFiles, args.date));
+  };
   try {
     ({ browser, context } = await launchContext(config));
     await ensureLogin(context, config);
     const page = await context.newPage();
+    checkpoint();
     await switchTenantForImport(page, config, target);
 
     for (let index = 0; index < batches.length; index += 1) {
+      checkpoint();
       const batch = batches[index];
       log(`[${index + 1}/${batches.length}] 上传 ${batch.files.length} 个文件（${(batch.bytes / 1048576).toFixed(2)}MB）`);
       for (const file of batch.files) log(`   ${path.basename(file.path)}`);
@@ -709,11 +732,12 @@ async function runBatch(config, args) {
     }
 
     await saveAuthState(context, config);
-    if (args.verify) {
-      const reported = datesOf([...succeeded, ...failed]);
-      await logImportStatus(context, config, reported.length > 0 ? reported : inferDatesFromNames(files, args.date));
-    }
+    await verifyCompletedBatches();
   } catch (error) {
+    if (error instanceof TaskCancelled) {
+      await verifyCompletedBatches();
+      throw error;
+    }
     // 前几批可能已经入库：把已完成批次和成功文件数带进错误，避免用户全量重传造成重复数据。
     throw new Error(
       `${safeErrorMessage(error)}（已完成 ${completedBatches}/${batches.length} 批、`
@@ -785,6 +809,11 @@ async function main() {
 }
 
 main().catch((error) => {
+  if (error instanceof TaskCancelled) {
+    log(error.message);
+    process.exitCode = 130;
+    return;
+  }
   if (error.login_kind && process.env.TOOLBOX_CLI_PROTOCOL === '1') {
     console.log('TOOLBOX_ERROR=' + JSON.stringify({
       code: ['network', 'server'].includes(error.login_kind) ? 'network' : 'authentication',

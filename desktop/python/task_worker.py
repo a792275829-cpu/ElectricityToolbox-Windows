@@ -19,11 +19,16 @@ def main():
     from toolbox.workflows import execute
     from toolbox.service import RESULT_PREFIX, ERROR_PREFIX
     from toolbox.tasks.errors import error_detail
+    from toolbox_cancellation import CANCEL_EXIT_CODE, TaskCancelled, checkpoint
     request = json.loads(args.request.read_text(encoding="utf-8"))
     from toolbox_native_excel import excel_session
     try:
+        checkpoint()
         with excel_session():
             result = execute(ToolPaths(args.workspace), request["tool_id"], request["action"], request["values"])
+    except TaskCancelled as exc:
+        print(str(exc), flush=True)
+        return CANCEL_EXIT_CODE
     except Exception as exc:
         detail = error_detail(exc, tool_id=request["tool_id"], action=request["action"])
         print(ERROR_PREFIX + json.dumps(detail, ensure_ascii=False), flush=True)
@@ -33,7 +38,7 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        sys.exit(main())
     except Exception:
         traceback.print_exc()
         sys.exit(1)

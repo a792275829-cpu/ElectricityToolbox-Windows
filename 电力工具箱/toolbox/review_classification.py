@@ -5,6 +5,7 @@ import hashlib
 import re
 import shutil
 from pathlib import Path
+from toolbox_cancellation import checkpoint
 from typing import Callable
 
 from .file_rules import clearing_file_date
@@ -106,10 +107,12 @@ def prepare_review_folder(
     source: Path,
     *,
     logger: Callable[[str], None],
-    token: CancellationToken,
+    token: CancellationToken | None = None,
     template: Path | None = None,
     excluded: tuple[Path, ...] = (),
 ) -> Path:
+    check = checkpoint if token is None else token.raise_if_cancelled
+    check()
     source = source.resolve()
     template = template or default_template_folder()
     if source == template.resolve():
@@ -128,7 +131,7 @@ def prepare_review_folder(
         if folder.is_dir() and not folder.is_symlink() and len(_station_matches(folder.name)) == 1:
             candidates.extend(_excel_files(folder, excluded_paths))
     for path in candidates:
-        token.raise_if_cancelled()
+        check()
         if is_node_price_file(path):
             logger(f"保留节点电价文件供海风汇总：{path.name}")
             continue
@@ -180,6 +183,7 @@ def prepare_review_folder(
                 index += 1
             reserved.add(destination)
             planned.append((path, destination))
+        check()
         if not single_station:
             for station in STATION_ALIASES:
                 folder = source / station
@@ -190,10 +194,11 @@ def prepare_review_folder(
         moved: list[tuple[Path, Path]] = []
         try:
             for path, destination in planned:
-                token.raise_if_cancelled()
+                check()
                 _move_without_overwrite(path, destination)
                 moved.append((path, destination))
                 logger(f"整理：{path.name} → {destination.parent.name}/{destination.name}")
+            check()
         except BaseException:
             # Return already moved files to their original locations on failure.
             for original, destination in reversed(moved):

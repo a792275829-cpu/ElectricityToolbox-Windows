@@ -9,6 +9,7 @@ import uuid
 from contextlib import contextmanager, ExitStack
 from datetime import datetime
 from pathlib import Path
+from toolbox_cancellation import checkpoint
 from typing import Callable, Protocol, TypeVar
 from toolbox_native_domain import invoke
 from toolbox_native_workbook import NativeTransaction, transaction_available
@@ -90,6 +91,7 @@ def commit_workbooks(
     create_backup: bool,
 ) -> dict[Path, Path | None]:
     try:
+        checkpoint()
         if transaction_available():
             with NativeTransaction(prepared, create_backup) as transaction:
                 for index, item in enumerate(prepared):

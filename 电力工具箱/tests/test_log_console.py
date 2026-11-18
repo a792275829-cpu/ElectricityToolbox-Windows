@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import threading
 import time
 import tkinter as tk
 import unittest
@@ -377,7 +378,8 @@ class LogConsoleTests(unittest.TestCase):
 
         module = load_module("wps_remote_log_test", Path(__file__).resolve().parents[2] / "wps自动/wps_excel_to_kdocs_gui.py")
         trace = "Traceback (most recent call last):\nTimeoutError: original remote timeout\n"
-        def fail(_action, _config, _indexes, log):
+        def fail(_action, _config, _indexes, log, *, token):
+            self.assertFalse(token.cancelled)
             log(trace)
             raise RemoteTaskError("命令退出码 1\n" + trace, trace)
         registry = Mock(remote_business=True)
@@ -399,6 +401,44 @@ class LogConsoleTests(unittest.TestCase):
                 self.assertEqual(1, len(daily))
                 self.assertIn(trace, daily[0].read_text())
             finally:
+                frame.destroy()
+
+    def test_wps_cancel_button_signals_the_running_remote_operation(self):
+        from unittest.mock import Mock
+        from toolbox.runtime import load_module
+
+        source = Path(__file__).resolve().parents[2] / "wps自动/wps_excel_to_kdocs_gui.py"
+        module = load_module("wps_cancel_button_test", source)
+        started, release = threading.Event(), threading.Event()
+        registry = Mock(remote_business=True)
+
+        def write(_action, _config, _indexes, _log, *, token):
+            started.set()
+            if not release.wait(3):
+                raise TimeoutError("test worker was not released")
+            token.raise_if_cancelled()
+            raise AssertionError("write should not continue after cancellation")
+
+        registry.wps_action.side_effect = write
+        with patch.object(module.WpsWriterFrame, "load_initial_config"), patch.object(module, "LOG_DIR", Path(self.temp.name)):
+            frame = module.WpsWriterFrame(self.root)
+            frame.task_registry = registry
+            try:
+                with patch.object(frame, "selected_config_indexes", return_value=[0]), patch.object(frame, "current_runtime_config", return_value={}), patch.object(frame, "save_current_config"):
+                    frame.write()
+                self.assertTrue(started.wait(3))
+                self.assertEqual(str(frame.cancel_button.cget("state")), "normal")
+                frame.cancel_button.invoke()
+                self.assertEqual(str(frame.cancel_button.cget("state")), "disabled")
+                release.set()
+                frame.worker.join(3)
+                self.assertFalse(frame.worker.is_alive())
+                frame.drain_logs()
+                self.assertTrue(frame.log_console.status.get().startswith("已取消 · 耗时"))
+            finally:
+                release.set()
+                if frame.worker is not None:
+                    frame.worker.join(3)
                 frame.destroy()
 
     def test_failed_process_displays_reason_and_retains_exitcode(self):

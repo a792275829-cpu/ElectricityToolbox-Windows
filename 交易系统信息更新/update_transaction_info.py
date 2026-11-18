@@ -34,6 +34,7 @@ from toolbox_dates import parse_date_input
 from toolbox_credentials import apply_credentials
 from toolbox_excel_read import read_cell_snapshots
 from toolbox_native_excel import load_value_workbook
+from toolbox_cancellation import TaskCancelled, checkpoint
 from toolbox_workbook_commit import (
     FileFingerprint, assert_workbook_unchanged, commit_workbooks, workbook_fingerprint,
 )
@@ -304,6 +305,7 @@ def collect_pairs(
             try:
                 auth.ensure_login(context, config)
                 for day_ahead_date in date_range(start_date, end_date):
+                    checkpoint()
                     actual_date = day_ahead_date - timedelta(days=DATE_OFFSET_DAYS)
                     log(
                         f"正在读取：日前 {day_ahead_date.isoformat()} / "
@@ -1017,6 +1019,8 @@ def main() -> int:
             overwrite=not args.skip_existing,
         )
         return 0
+    except TaskCancelled:
+        raise
     except KeyboardInterrupt:
         print("已取消。", file=sys.stderr)
         return 130

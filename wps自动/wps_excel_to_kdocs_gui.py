@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import queue
 import re
@@ -35,6 +36,7 @@ if str(BASE_DIR.parent) not in sys.path:
     sys.path.insert(0, str(BASE_DIR.parent))
 from toolbox_file_button import FileSelectButton
 from toolbox_background_read import BackgroundRead
+from toolbox_cancellation import CancellationToken, TaskCancelled, checkpoint, run_with_checkpoint
 from toolbox_storage import data_path
 from toolbox_platform import (
     detached_browser_process_options,
@@ -609,6 +611,15 @@ def validate_formula_caches(workbook, sheet_name, regions) -> None:
                     break
 
 
+def _clean_hourly_energy_tail(value: Any) -> Any:
+    if isinstance(value, float) and math.isfinite(value):
+        rounded = round(value, 1)
+        # Keep genuine higher precision. Accept only a couple of floating-point steps.
+        if abs(value - rounded) <= 2 * math.ulp(value):
+            return rounded
+    return value
+
+
 def read_excel_ranges(
     workbook_path: Path, requests: list[tuple[str, str]]
 ) -> list[tuple[list[list[Any]], int, int]]:
@@ -634,20 +645,30 @@ def read_excel_ranges(
             last_row = max(bounds[3] for _, bounds in regions)
             first_col = min(bounds[0] for _, bounds in regions)
             last_col = max(bounds[2] for _, bounds in regions)
+            # Older hourly exports may already contain binary rounding tails.
+            # Locate the Qingyuan block by its title, even if its rows shift.
+            energy_summary = sheet_name == "汇总" and workbook_path.name.startswith("上网电量汇总_")
+            scan_row, scan_col = (1, 1) if energy_summary else (first_row, first_col)
+            qingyuan_title_row = -25
             collected: dict[int, list[list[Any]]] = {index: [] for index, _ in regions}
             for row_number, row in enumerate(
                 wb[sheet_name].iter_rows(
-                    min_row=first_row,
+                    min_row=scan_row,
                     max_row=last_row,
-                    min_col=first_col,
+                    min_col=scan_col,
                     max_col=last_col,
                     values_only=True,
                 ),
-                start=first_row,
+                start=scan_row,
             ):
+                if energy_summary and row[0] == "清远 实际上网电量（万千瓦时）":
+                    qingyuan_title_row = row_number
+                in_qingyuan = 2 <= row_number - qingyuan_title_row <= 25
                 for index, (min_col, min_row, max_col, max_row) in regions:
                     if min_row <= row_number <= max_row:
-                        cells = row[min_col - first_col : max_col - first_col + 1]
+                        cells = row[min_col - scan_col : max_col - scan_col + 1]
+                        if in_qingyuan:
+                            cells = [_clean_hourly_energy_tail(cell) for cell in cells]
                         collected[index].append([normalize_cell_value(cell) for cell in cells])
             for index, (min_col, min_row, max_col, max_row) in regions:
                 results[index] = (
@@ -764,6 +785,7 @@ def prepare_mappings(
 
     excel_values: dict[int, tuple[list[list[Any]], int, int]] = {}
     for workbook_path, requests in excel_groups.items():
+        checkpoint()
         results = read_excel_ranges(
             workbook_path, [(sheet_name, source_range) for _, sheet_name, source_range in requests]
         )
@@ -773,6 +795,7 @@ def prepare_mappings(
     online_specs = [spec for spec in source_specs if spec[2] != "excel"]
     online_values = {}
     if online_specs:
+        checkpoint()
         results = read_online_ranges(
             [(mapping.source_url, mapping.source_sheet, source_range, rows, cols)
              for _, mapping, _, _, source_range, _, rows, cols in online_specs],
@@ -885,6 +908,7 @@ def wait_for_wps_ready(page, log, timeout_seconds: int) -> dict[str, Any]:
     }
     """
     while time_module.monotonic() < deadline:
+        checkpoint()
         try:
             state = page.evaluate(readiness_script)
             last_state = state
@@ -930,6 +954,7 @@ def evaluate_wps_operation(page, script: str, payload: Any, log, timeout_seconds
             if first_error is not None:
                 message += f" 首次操作失败原因：{first_error}"
             raise RuntimeError(message) from first_error
+        checkpoint()
         try:
             return page.evaluate(bounded_wps_script(script, timeout_seconds), payload)
         except Exception as exc:
@@ -1757,6 +1782,7 @@ def write_to_wps(
             """
             log(f"正在写入 {len(payload)} 个区域…")
             try:
+                checkpoint()
                 return evaluate_wps_operation(
                     page, writer_script, payload, log, WPS_OPERATION_TIMEOUT_SECONDS, may_write=True
                 )
@@ -1855,6 +1881,7 @@ def read_online_ranges(
             """
             results = []
             for url, sheet_name, range_text, rows, cols in requests:
+                checkpoint()
                 page = find_or_open_page(context, url)
                 raw = evaluate_wps_operation(
                     page, script, {"sheetName": sheet_name, "rangeText": range_text}, log, 120
@@ -2744,6 +2771,7 @@ class WpsWriterFrame(ttk.Frame):
         self.login_event_queue: queue.Queue[tuple[str, str, WpsLoginStatus]] = queue.Queue()
         self.browser_endpoint_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self.worker: threading.Thread | None = None
+        self._operation_token: CancellationToken | None = None
         self.browser_worker: threading.Thread | None = None
         self.configs: list[DocumentConfig] = []
         self._drain_after_id: str | None = None
@@ -2960,7 +2988,7 @@ class WpsWriterFrame(ttk.Frame):
         )
         selection_label.grid(row=0, column=0, sticky="w", padx=(0, 8))
         self.execution_toolbar.bind(
-            "<Configure>", lambda event: selection_label.configure(wraplength=min(420, max(120, event.width - 200)))
+            "<Configure>", lambda event: selection_label.configure(wraplength=min(420, max(120, event.width - 285)))
         )
         ttk.Button(
             self.execution_toolbar, text="开始写入", command=self.write, style="Primary.TButton"
@@ -2968,6 +2996,10 @@ class WpsWriterFrame(ttk.Frame):
         ttk.Button(
             self.execution_toolbar, text="预览", command=self.preview
         ).grid(row=0, column=1, sticky="e", padx=(0, 6))
+        self.cancel_button = ttk.Button(
+            self.execution_toolbar, text="取消任务", command=self.cancel_operation, state="disabled"
+        )
+        self.cancel_button.grid(row=0, column=3, sticky="e", padx=(6, 0))
 
         self.log_console = LogConsole(root, module="WPS写入工具", directory=LOG_DIR / "runs")
         self.module_log_frame = self.log_console
@@ -3427,6 +3459,7 @@ class WpsWriterFrame(ttk.Frame):
             terminal = any(marker in message for marker in (
                 "操作失败：", "预览失败：", "暂时无法写入：", "检查失败：", "回读数据与来源不一致",
                 "Traceback (most recent call last)", "写入完成：", "预览通过：",
+                "任务已取消。已完成的写入请查看日志。",
             ))
             if terminal:
                 self.log_console.append("".join(chunks))
@@ -3440,10 +3473,15 @@ class WpsWriterFrame(ttk.Frame):
                     self.log_console.finish("执行失败", *diagnosis)
             elif "写入完成：" in message or "预览通过：" in message:
                 self.log_console.finish("已完成")
+            elif "任务已取消。已完成的写入请查看日志。" in message:
+                self.log_console.finish("已取消")
             if size >= 64_000:
                 break
         if chunks:
             self.log_console.append("".join(chunks))
+        if self._operation_token is not None and not (self.worker and self.worker.is_alive()):
+            self._operation_token = None
+            self.cancel_button.configure(state="disabled")
         # 排队中的登录必须在前一个浏览器探测线程结束后立刻执行；这里运行在
         # Tk 主线程，才能安全地再起线程并刷新按钮状态。
         self._run_queued_login()
@@ -3708,17 +3746,59 @@ class WpsWriterFrame(ttk.Frame):
                 )
         return mappings
 
-    def prepare_selected(self) -> list[PreparedMapping]:
+    def cancel_operation(self) -> None:
+        if self._operation_token is not None and self.worker and self.worker.is_alive():
+            self._operation_token.cancel()
+            self.cancel_button.configure(state="disabled")
+            self.log_console.status.set("正在取消…")
+
+    def _start_operation(self, run, *, preview: bool) -> None:
+        token = CancellationToken()
+        self._operation_token = token
+        self.cancel_button.configure(state="normal")
+
+        def worker():
+            try:
+                run_with_checkpoint(token.raise_if_cancelled, lambda: run(token))
+            except TaskCancelled:
+                self.log("任务已取消。已完成的写入请查看日志。")
+
+        self.worker = self._start_tracked_thread(worker, name="wps-preview" if preview else "wps-write")
+
+    def _local_operation(self, *, preview: bool) -> None:
         indexes = self.selected_config_indexes()
+        failure_title = "预览失败" if preview else "暂时无法写入"
         if not indexes:
-            raise ValueError("请先选择至少一项配置，再预览或写入。")
-        configs = [self.configs[index] for index in indexes]
-        return prepare_mappings(
-            self.flatten_configs(configs),
-            browser_mode=self.browser_mode.get(),
-            cdp_url=self.cdp_url.get().strip(),
-            log=lambda _message: None,
-        )
+            messagebox.showerror(failure_title, "请先选择至少一项配置，再预览或写入。", parent=self)
+            return
+        mappings = self.flatten_configs([self.configs[index] for index in indexes])
+        mode, cdp, overwrite = self.browser_mode.get(), self.cdp_url.get().strip(), self.overwrite.get()
+        self.clear_log()
+        self.log_console.status.set("正在预览…" if preview else "正在检查写入配置…")
+        if not preview:
+            self.save_current_config()
+
+        def run(token):
+            try:
+                token.raise_if_cancelled()
+                prepared = prepare_mappings(mappings, browser_mode=mode, cdp_url=cdp, log=self.log)
+                token.raise_if_cancelled()
+                if preview:
+                    urls = len({item.kdocs_url for item in prepared})
+                    self.detail_log_prepared("PREVIEW OK", prepared)
+                    self.log(f"预览通过：共 {len(prepared)} 个写入区域，涉及 {urls} 份目标表格。")
+                else:
+                    self.detail_log_prepared("WRITE PREPARED", prepared)
+                    self.write_worker(prepared, mode, cdp, overwrite)
+            except TaskCancelled:
+                raise
+            except Exception as exc:
+                diagnosis = explain_error(type(exc).__name__ + ": " + str(exc))
+                self._remote_messages.put((failure_title, "\n\n".join(diagnosis) if diagnosis else str(exc)))
+                self.log(f"{failure_title}：{exc}")
+                self.detail_log(traceback.format_exc())
+
+        self._start_operation(run, preview=preview)
 
     def preview(self) -> None:
         if getattr(getattr(self, "task_registry", None), "remote_business", False) is True:
@@ -3727,20 +3807,7 @@ class WpsWriterFrame(ttk.Frame):
         if self.worker and self.worker.is_alive():
             messagebox.showinfo("正在写入", "写入任务正在进行，请等待完成。", parent=self)
             return
-        self.clear_log()
-        self.log_console.status.set("正在预览…")
-        try:
-            prepared = self.prepare_selected()
-        except Exception as exc:
-            diagnosis = explain_error(type(exc).__name__ + ": " + str(exc))
-            messagebox.showerror("预览失败", "\n\n".join(diagnosis) if diagnosis else str(exc), parent=self)
-            self.log(f"预览失败：{exc}")
-            self.detail_log(f"PREVIEW ERROR: {exc}")
-            self.detail_log(traceback.format_exc())
-            return
-        urls = len({item.kdocs_url for item in prepared})
-        self.detail_log_prepared("PREVIEW OK", prepared)
-        self.log(f"预览通过：共 {len(prepared)} 个写入区域，涉及 {urls} 份目标表格。")
+        self._local_operation(preview=True)
 
     def write(self) -> None:
         if getattr(getattr(self, "task_registry", None), "remote_business", False) is True:
@@ -3749,26 +3816,7 @@ class WpsWriterFrame(ttk.Frame):
         if self.worker and self.worker.is_alive():
             messagebox.showinfo("正在写入", "写入任务正在进行，请等待完成。", parent=self)
             return
-        self.clear_log()
-        self.log_console.status.set("正在检查写入配置…")
-        try:
-            prepared = self.prepare_selected()
-        except Exception as exc:
-            diagnosis = explain_error(type(exc).__name__ + ": " + str(exc))
-            messagebox.showerror("暂时无法写入", "\n\n".join(diagnosis) if diagnosis else str(exc), parent=self)
-            self.log(f"暂时无法写入：{exc}")
-            self.detail_log(f"WRITE BLOCKED: {exc}")
-            self.detail_log(traceback.format_exc())
-            return
-
-        self.log_console.status.set("正在写入…")
-        self.save_current_config()
-        self.detail_log_prepared("WRITE PREPARED", prepared)
-        self.worker = self._start_tracked_thread(
-            self.write_worker,
-            args=(prepared, self.browser_mode.get(), self.cdp_url.get().strip(), self.overwrite.get()),
-            name="wps-write",
-        )
+        self._local_operation(preview=False)
 
     def _remote_write(self, *, preview: bool) -> None:
         if self.worker and self.worker.is_alive():
@@ -3783,10 +3831,12 @@ class WpsWriterFrame(ttk.Frame):
         self.log_console.status.set("正在预览…" if preview else "正在检查写入配置…")
         if not preview:
             self.save_current_config()
-        def worker():
+        def worker(token):
             try:
-                result = self.task_registry.wps_action("preview" if preview else "run", config, indexes, self.log)
+                result = self.task_registry.wps_action("preview" if preview else "run", config, indexes, self.log, token=token)
                 self.log(("预览通过：" if preview else "写入完成：") + result.get("message", "已完成"))
+            except TaskCancelled:
+                raise
             except Exception as exc:
                 failure = getattr(exc, "log_details", str(exc))
                 diagnosis = explain_error(str(exc))
@@ -3801,7 +3851,7 @@ class WpsWriterFrame(ttk.Frame):
                     self.detail_log(traceback.format_exc())
                 if preview:
                     self._remote_messages.put(("预览失败", str(exc)))
-        self.worker = self._start_tracked_thread(worker, name="wps-preview" if preview else "wps-write")
+        self._start_operation(worker, preview=preview)
 
     def write_worker(self, prepared: list[PreparedMapping], browser_mode: str, cdp_url: str, overwrite: bool = True) -> None:
         try:
@@ -3815,6 +3865,7 @@ class WpsWriterFrame(ttk.Frame):
                 groups.setdefault(item.kdocs_url, []).append(item)
 
             for url, group in groups.items():
+                checkpoint()
                 self.detail_log(f"WRITE TARGET: url={url}; regions={len(group)}")
                 result = write_to_wps(url, group, self.log, browser_mode=browser_mode, cdp_url=cdp_url, overwrite=overwrite)
                 self.detail_log(f"WRITE TARGET RESULT: url={url}; saved={result.get('saved')}; returned={len(result.get('results', []))}")
@@ -3840,6 +3891,8 @@ class WpsWriterFrame(ttk.Frame):
             else:
                 self.detail_log("WRITE WARNING: verification mismatches detected")
                 self.log("写入已结束，但回读数据与来源不一致，请查看上方差异。")
+        except TaskCancelled:
+            raise
         except Exception as exc:
             self.log(f"操作失败：{exc}")
             self.log("详细错误信息已保存到日志目录。")

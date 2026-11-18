@@ -127,7 +127,7 @@ def open_browser_context(playwright, *args, **kwargs):
         self.assertFalse(registry._wps_operation_lock.locked())
         task = self.call('tasks')[-1]
         self.assertEqual(task['state'], 'failed', task)
-        self.assertFalse(task['cancellable'])
+        self.assertTrue(task['cancellable'])
         self.assertIn('WPS_OPERATION_TIMEOUT', task['error'])
         self.assertTrue(any('正在等待 WPS 保存完成' in line for line in logs))
         self.call('shutdown', {'cancel': True})
@@ -184,27 +184,39 @@ def open_browser_context(playwright, *args, **kwargs):
         streamed = "".join(row["message"] for row in events["events"] if row["kind"] == "log")
         self.assertNotIn("Traceback", RemoteTaskError(task["error"], streamed).log_details)
 
-    def test_private_batch_upload_refuses_cancellation_until_completion(self):
+    def test_private_batch_upload_cancels_after_the_in_progress_batch(self):
         # Run a disposable Node uploader, never the real website uploader.
         from toolbox.runtime import ToolPaths
         uploader = ToolPaths(self.workspace).private_uploader
         uploader.parent.mkdir(parents=True)
         marker = self.workspace / "batch-completed.txt"
+        next_batch = self.workspace / "next-batch.txt"
+        ready = self.workspace / "batch-started.txt"
         uploader.write_text(
             "import fs from 'node:fs';\n"
-            "await new Promise(resolve => setTimeout(resolve, 1000));\n"
-            f"fs.writeFileSync({json.dumps(str(marker))}, 'complete');\n", encoding="utf-8")
+            "const cancel = process.env.TOOLBOX_TASK_CANCEL_FILE;\n"
+            f"fs.writeFileSync({json.dumps(str(ready))}, cancel);\n"
+            "for (let i = 0; i < 300 && !fs.existsSync(cancel); i++) {\n"
+            "  await new Promise(resolve => setTimeout(resolve, 20));\n"
+            "}\n"
+            f"fs.writeFileSync({json.dumps(str(marker))}, 'complete');\n"
+            "if (fs.existsSync(cancel)) process.exit(130);\n"
+            f"fs.writeFileSync({json.dumps(str(next_batch))}, 'unexpected');\n", encoding="utf-8")
         file = self.workspace / "sample.xlsx"
         file.write_bytes(b'isolated fixture')
         task_id = self.start(tool_id='private-batch-upload', values=dict(files=[str(file)]), confirmed=True)
         snapshot = next(task for task in self.call('tasks') if task['id'] == task_id)
-        self.assertFalse(snapshot['cancellable'])
-        self.assertFalse(self.call('cancel', dict(task_id=task_id)))
-        with self.assertRaisesRegex(ValueError, '不可安全中断'):
-            self.call('shutdown', {'cancel': True})
+        self.assertTrue(snapshot['cancellable'])
+        deadline = time.monotonic() + 10
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        self.assertTrue(ready.exists())
+        self.assertTrue(self.call('cancel', dict(task_id=task_id)))
         result = self.finish(task_id)
-        self.assertEqual(result['state'], 'succeeded', result)
+        self.assertEqual(result['state'], 'cancelled', result)
         self.assertEqual(marker.read_text(), 'complete')
+        self.assertFalse(next_batch.exists())
+        self.assertFalse(Path(ready.read_text(encoding="utf-8")).exists())
 
     def test_cli_login_errors_reach_snapshot_and_ui_classification(self):
         from toolbox.tasks.errors import RemoteTaskError, classify_error
@@ -237,17 +249,31 @@ def open_browser_context(playwright, *args, **kwargs):
         self.assertEqual(task["state"], "succeeded", task)
         self.assertIsNone(task["error_detail"])
 
-    def test_uninterruptible_write_refuses_cancellation_and_shutdown(self):
+    def test_workbook_update_accepts_cancellation_and_keeps_original(self):
         target = self.workspace / "市场表更新/update_market_table.py"
         target.parent.mkdir()
-        target.write_text('import time\ntime.sleep(1)\n', encoding="utf-8")
+        target.write_text(
+            "import os, time\nfrom pathlib import Path\n"
+            "cancel = Path(os.environ['TOOLBOX_TASK_CANCEL_FILE'])\n"
+            "print('准备中', flush=True)\n"
+            "for _ in range(300):\n"
+            "    if cancel.exists(): raise SystemExit(130)\n"
+            "    time.sleep(.02)\n"
+            "Path('市场.xlsx').write_bytes(b'unexpected replacement')\n",
+            encoding="utf-8")
         workbook = self.workspace / "市场.xlsx"
-        workbook.touch()
+        workbook.write_bytes(b"original")
         task_id = self.start(tool_id="market-table", values={"run_date": "2026-10-27", "workbook": str(workbook)})
-        self.assertFalse(self.call("cancel", {"task_id": task_id}))
-        with self.assertRaisesRegex(ValueError, "不可安全中断"):
-            self.call("shutdown", {"cancel": True})
-        self.finish(task_id)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if any(row["message"].strip() == "准备中" for row in self.call("events")["events"]):
+                break
+            time.sleep(.02)
+        else:
+            self.fail("Work is not ready for cancellation")
+        self.assertTrue(self.call("cancel", {"task_id": task_id}))
+        self.assertEqual(self.finish(task_id)["state"], "cancelled")
+        self.assertEqual(workbook.read_bytes(), b"original")
 
     def test_bounded_journal_and_invalid_cursor(self):
         self.script.write_text('for n in range(2200):print(f"line-{n}")\n', encoding="utf-8")
@@ -345,7 +371,7 @@ def open_browser_context(playwright, *args, **kwargs):
     def test_wps_login_browser_survives_with_empty_path(self):
         self.test_wps_login_window_survives_completed_workers_and_status_checks()
 
-    def test_host_disconnect_waits_for_noninterruptible_write(self):
+    def test_host_disconnect_waits_for_cooperative_write(self):
         marker = self.workspace / "completed.txt"
         target = self.workspace / "市场表更新/update_market_table.py"
         target.parent.mkdir()

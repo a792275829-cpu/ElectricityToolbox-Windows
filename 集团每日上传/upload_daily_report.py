@@ -28,6 +28,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 WORKSPACE_DIR = SCRIPT_DIR.parent
 if str(WORKSPACE_DIR) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_DIR))
+from toolbox_cancellation import checkpoint
 from toolbox_credentials import mark_browser_session, prepare_browser_session, read_login_config
 from toolbox_auth_loader import wait_for_login
 from toolbox_dates import normalize_date_input
@@ -144,6 +145,7 @@ class AuthStateLock:
         started = time.time()
         notified = False
         while True:
+            checkpoint()
             try:
                 fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             except FileExistsError:
@@ -1494,6 +1496,7 @@ def run_api_upload(
                     log(f"- {UPLOAD_TYPES[item.kind]['name']}：{item.path}")
 
                 for upload in uploads:
+                    checkpoint()
                     spec = UPLOAD_TYPES[upload.kind]
                     data_type = str(spec["data_type"])
                     try:
@@ -1516,6 +1519,7 @@ def run_api_upload(
                     else:
                         log(f"{spec['name']} 未上传，开始导入。")
 
+                    checkpoint()
                     try:
                         payload = import_daily_file(context, upload, target_date, province_id)
                     except Exception as exc:
@@ -1525,6 +1529,7 @@ def run_api_upload(
                         ) from exc
                     confirm_daily_import(context, payload, target_date, data_type, province_id)
                     log(f"{spec['name']} 导入成功。")
+                checkpoint()
                 if create_report:
                     create_daily_report(context, target_date, headless=config.headless)
                 log("数据上传和日报步骤已完成，正在收尾...")
@@ -1555,7 +1560,9 @@ def run_browser_upload(paths: list[Path], *, headless: bool, create_report: bool
                 page = open_report_page(context, allow_manual=not headless)
                 set_report_date(page, target_date)
                 for upload in uploads:
+                    checkpoint()
                     upload_one_file(page, upload)
+                checkpoint()
                 if create_report:
                     create_daily_report(context, target_date, headless=headless)
                 save_auth_state(context)

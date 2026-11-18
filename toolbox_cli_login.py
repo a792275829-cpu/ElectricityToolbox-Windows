@@ -35,12 +35,16 @@ if __name__ == "__main__":
     # Running a file rather than -m also works for tools launched from their own cwd.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from toolbox_cli_login import emit_login_error
+    from toolbox_cancellation import CANCEL_EXIT_CODE, TaskCancelled
     script = Path(sys.argv[1]).resolve()
     os.environ["TOOLBOX_CLI_PROTOCOL"] = "1"
     sys.argv = [str(script), *sys.argv[2:]]
     sys.path.insert(0, str(script.parent))
     try:
         runpy.run_path(str(script), run_name="__main__")
+    except TaskCancelled as exc:
+        print(str(exc), flush=True)
+        raise SystemExit(CANCEL_EXIT_CODE) from None
     except Exception as exc:
         emit_login_error(exc)
         raise

@@ -38,6 +38,7 @@ from toolbox_dates import parse_date_input
 from toolbox_excel_read import read_cell_snapshots
 from toolbox_native_excel import load_value_workbook
 from toolbox_workbook_inspection import load_inspection_pair, UnsupportedInspection
+from toolbox_cancellation import TaskCancelled, checkpoint
 from toolbox_workbook_commit import (
     FileFingerprint, assert_workbook_unchanged, commit_workbooks, workbook_fingerprint,
 )
@@ -411,6 +412,7 @@ def collect_data(plans: tuple[WorkbookPlan, ...], *, headed: bool = False,
                                                                expected_dates=days, data_type=data_type).items():
                             series[day].update(values)
                     for day, needed in sorted(needs.items()):
+                        checkpoint()
                         log(f"{plan.station} {day}：读取 {'、'.join(FIELDS[f] for f in FIELDS if f in needed)}")
                         if needed & {"C", "J"}:
                             params = {"date": day.isoformat(), "orgId": tenant["tenantId"], "unitIds": unit_id}
@@ -695,6 +697,8 @@ def main() -> int:
                        start_date=args.start_date, create_backup=not args.no_backup,
                        headed=args.headed, overwrite=not args.skip_existing)
         return 0
+    except TaskCancelled:
+        raise
     except Exception as exc:
         from toolbox_cli_login import emit_login_error
         emit_login_error(exc)

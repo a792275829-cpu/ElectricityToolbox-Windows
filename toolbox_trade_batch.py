@@ -2,6 +2,7 @@
 from pathlib import Path
 import unicodedata
 
+from toolbox_cancellation import checkpoint
 from toolbox_native_excel import excel_session
 
 
@@ -32,6 +33,7 @@ def iter_batch_reports(xlsx_paths, output_dir, render, *, continue_on_error=Fals
     repeated = len({source.resolve() for source, _ in planned}) < len(planned)
     with excel_session(cache=repeated, enabled=repeated):
         for source, output in planned:
+            checkpoint()
             try:
                 result = render(source, out_path=output)
             except Exception as exc:

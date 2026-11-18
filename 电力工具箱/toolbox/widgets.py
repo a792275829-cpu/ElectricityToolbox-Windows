@@ -13,6 +13,7 @@ from tkinter import messagebox, ttk
 from typing import Callable, TypeVar
 
 from toolbox_log_console import LogConsole
+from toolbox_cancellation import run_with_checkpoint, uses_checkpoints
 
 from .runtime import TaskRegistry, utf8_environment
 from .tasks import TaskSnapshot, TaskState, classify_error
@@ -370,6 +371,9 @@ class ToolPage(ttk.Frame):
             except queue.Empty:
                 break
             self._finish_snapshot(snapshot, callback)
+        if self.current_task_id and self._current_cancellable:
+            if self.registry.snapshot(self.current_task_id).state is TaskState.CANCELLING:
+                self._show_cancelling()
         if self._has_pending_work():
             self._schedule_poll()
 
@@ -414,7 +418,10 @@ class ToolPage(ttk.Frame):
 
         def task_worker(token, _emit):
             token.raise_if_cancelled()
-            result = worker(token) if len(inspect.signature(worker).parameters) else worker()
+            if len(inspect.signature(worker).parameters):
+                result = run_with_checkpoint(token.raise_if_cancelled, lambda: worker(token))
+            else:
+                result = run_with_checkpoint(token.raise_if_cancelled, worker)
             token.raise_if_cancelled()
             return result
 
@@ -444,7 +451,11 @@ class ToolPage(ttk.Frame):
 
     def cancel_current_task(self) -> None:
         if self.current_task_id and self.registry.cancel(self.current_task_id):
-            self.set_busy(True, "正在取消...")
+            self._show_cancelling()
+
+    def _show_cancelling(self) -> None:
+        self._current_cancellable = False
+        self.set_busy(True, "正在取消，等待当前步骤退出…")
 
     def _finish_snapshot(self, snapshot: TaskSnapshot, callback: Callable | None) -> None:
         self.current_task_id = None
@@ -510,6 +521,7 @@ class ToolPage(ttk.Frame):
             on_output=self.append_log,
             on_done=lambda snapshot: self._completion_queue.put((snapshot, on_success)),
             cancellable=cancellable,
+            cooperative=uses_checkpoints(getattr(self, "tool_id", None), action),
         )
 
     def destroy(self) -> None:
