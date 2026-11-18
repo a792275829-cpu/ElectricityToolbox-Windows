@@ -58,7 +58,7 @@ class WpsColdStartTests(unittest.TestCase):
                 assert hasattr(page, 'writer_frame'), 'WPS controls did not finish loading'
                 frame = page.writer_frame
                 assert len(frame.configs) == 3, 'Default document configurations missing'
-                assert sum(len(c.regions) for c in frame.configs) == 34
+                assert sum(len(c.regions) for c in frame.configs) == 39
                 assert len(frame.tree.get_children()) == 3
                 module = sys.modules['toolbox_wps_writer_gui']
                 for config in ({}, {'mappings': [{'kdocs_url': 'https://example.invalid/target',

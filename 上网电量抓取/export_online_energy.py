@@ -426,7 +426,9 @@ def number_or_zero(value: Any) -> float:
         return 0.0
 
 
-def online_energy_hours(values, *, label: str, allow_empty: bool = False) -> tuple[float | None, ...]:
+def online_energy_hours(
+    values, *, label: str, allow_empty: bool = False, multiplier: int = 1
+) -> tuple[float | None, ...]:
     """Parse the 24 hourly values; unreported hours stay blank instead of zero.
 
     网站对当日尚未填报的场站返回 ``[]``（而不是 24 个 null），这类场站按
@@ -442,7 +444,7 @@ def online_energy_hours(values, *, label: str, allow_empty: bool = False) -> tup
             result.append(None)
             continue
         try:
-            value = float(raw)
+            value = float(raw) * multiplier
         except (TypeError, ValueError):
             raise ValueError(f"{label} {hour:02d}:00 电量缺失或无效，停止导出。") from None
         if isinstance(raw, bool) or not math.isfinite(value):
@@ -546,6 +548,7 @@ def collect_date_rows(run_date: str, context, companies: list[dict[str, str]],
     for index, company in enumerate(companies, start=1):
         tenant_id = company["tenantId"]
         company_name = company["name"]
+        energy_multiplier = 1 if display_company_name(company_name) in {"海门", "汕头", "东莞"} else 10
         log(f"[{index}/{len(companies)}] 切换公司：{company_name}")
         switch_company(context, tenant_id)
         time.sleep(0.3)
@@ -567,6 +570,7 @@ def collect_date_rows(run_date: str, context, companies: list[dict[str, str]],
                     row["onlineEle"],
                     label=f"{plan_date} 清远 / {unit_names[str(row['unitId'])]} 计划值",
                     allow_empty=True,
+                    multiplier=energy_multiplier,
                 )
                 for row in plan_rows
             }
@@ -604,7 +608,8 @@ def collect_date_rows(run_date: str, context, companies: list[dict[str, str]],
             else:
                 values = online_energy_hours(item.get("onlineEle"),
                     label=f"{run_date} {company_name} / {unit_name}",
-                    allow_empty=True)
+                    allow_empty=True,
+                    multiplier=energy_multiplier)
                 missing_hours = sum(value is None for value in values)
                 if missing_hours == len(values):
                     log(f"  提示：{company_name} / {unit_name} 当日无数据：网站未填报任何时段上网电量，整列导出为空白（补录后可重新导出）。")

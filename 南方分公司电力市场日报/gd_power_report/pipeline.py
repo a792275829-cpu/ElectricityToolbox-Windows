@@ -381,6 +381,10 @@ def run_pipeline(
             report["day_ahead"]["cards"],
             comparison_report["cards"],
         )
+        report["market"]["day_ahead"] = _apply_day_ahead_comparisons(
+            report["market"]["day_ahead"],
+            comparison_report.get("market_cards") or [],
+        )
         report["day_ahead_comparison_source_path"] = comparison_report["source_path"]
         report["day_ahead_comparison_date"] = comparison_report["report_date"]
         report["operations"] = _compare_operation_tables(

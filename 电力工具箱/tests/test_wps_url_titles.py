@@ -33,12 +33,15 @@ class WpsTitleFormatTests(unittest.TestCase):
         self.assertEqual(url_choices([], {}, 'https://example.test/（原始）')['url'],
                          'https://example.test/（原始）')
 
-    def test_title_cache_survives_export_import_without_changing_mappings(self):
-        config = json.loads((ROOT / 'wps自动/wps_excel_to_kdocs_config.defaults.json').read_text())
+    def test_export_omits_title_cache_without_changing_mappings_or_local_cache(self):
+        config = json.loads((ROOT / 'wps自动/wps_excel_to_kdocs_config.defaults.json').read_text(encoding='utf-8'))
         original = copy.deepcopy(config['configs'])
         config['document_titles'] = {FIRST: TITLE, SECOND: '另一份表格'}
-        restored = runtime_config_from_export_payload(build_config_export(config))
-        self.assertEqual(restored['document_titles'], config['document_titles'])
+        exported = build_config_export(config)
+        restored = runtime_config_from_export_payload(exported)
+        self.assertNotIn('document_titles', exported)
+        self.assertNotIn('document_titles', restored)
+        self.assertEqual(config['document_titles'][FIRST], TITLE)
         self.assertEqual(restored['configs'], original)
 
 

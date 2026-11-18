@@ -451,10 +451,32 @@ def _dated_day_narrative(workbook: Any, report_date: date) -> str | None:
     return None
 
 
+def _recap_sheet_date_matches(sheet: Any, report_date: date) -> bool:
+    """Whether the recap sheet's own dates can belong to the comparison date.
+
+    备用简析没有单独的日期字段，只能看工作表里的日期。没有日期、日期命中目标日，
+    或日期比目标日更新（快报按次日生成）时不阻拦；日期全部早于目标日说明这份
+    快报并非当日，宁可按缺值处理。
+    """
+
+    known = {
+        value
+        for value in (
+            _as_date(sheet.cell(row, 1).value)
+            for row in range(1, min(int(sheet.max_row or 1), 200) + 1)
+        )
+        if value is not None
+    }
+    return not known or report_date in known or max(known) > report_date
+
+
 def _date_matched_day_narrative(workbook: Any, report_date: date, fallback_sheet: Any) -> str:
-    return _dated_day_narrative(workbook, report_date) or _section_text(
-        fallback_sheet, DAY_NARRATIVE_MARKERS, "A4"
-    )
+    matched = _dated_day_narrative(workbook, report_date)
+    if matched:
+        return matched
+    if not _recap_sheet_date_matches(fallback_sheet, report_date):
+        return ""
+    return _section_text(fallback_sheet, DAY_NARRATIVE_MARKERS, "A4")
 
 
 def _date_matched_realtime_narrative(
@@ -1303,6 +1325,11 @@ def parse_day_ahead_comparison_workbook(path: str | Path) -> dict[str, Any]:
         "report_date_label": _date_label(report_date),
         "source_path": str(source),
         "operations": _operations(workbook),
+        "market_cards": [
+            _market_average_price_card(
+                _date_matched_day_narrative(workbook, report_date, recap_sheet)
+            )
+        ],
         "cards": [
             _card("日前出清电量", energy, "万千瓦时"),
             _card(
@@ -1873,18 +1900,34 @@ def _market_average_price_card(text: str, *, realtime: bool = False) -> dict[str
     else:
         marker = r"(?:全省日前(?:发电侧)?(?:出清)?均价|全省日前均价)"
         label = "全省日前均价"
-    unit = r"元/(?:兆瓦时|MWh)"
-    value = _text_number(text, rf"{marker}(?:为)?\s*([\d,.]+)\s*{unit}")
+    unit = r"元\s*[/／]\s*(?:兆瓦时|MWh)"
+    number = r"[+-]?\d[\d,]*(?:\.\d+)?"
+    price_pattern = rf"{marker}\s*(?:为|[：:])?\s*({number})\s*{unit}"
+    value = _text_number(text, price_pattern)
     delta = None
     delta_prefix = None
-    for prefix in (("较日前", "环比") if realtime else ("环比",)):
-        delta = _text_delta(
-            text,
-            rf"{marker}(?:为)?\s*[\d,.]+\s*{unit}[^。；]*?{prefix}(下降|上涨|上升|减少|增加)\s*([\d,.]+)\s*{unit}",
-        )
-        if delta is not None:
-            delta_prefix = prefix
-            break
+    # 限定在均价所在句内，避免误取后续机组或负荷的环比。
+    price_match = re.search(price_pattern, text)
+    tail = re.split(r"[。；;！!？?]", text[price_match.end():], maxsplit=1)[0] if price_match else ""
+    prefixes = ("较日前", "环比") if realtime else ("环比", "较昨日", "较上日", "较前日")
+    # 比较短语必须自成一个分句（紧跟标点或行首）：「机组报价环比上涨…」这类
+    # 其他指标的比较不能改写成均价环比；同句多个比较短语时取最靠前的一个。
+    boundary = r"(?:^|[，,、；;\s])"
+    differences = r"(下降|上涨|上升|减少|增加|降低|升高|下跌|回落|涨|跌)"
+    candidates: list[tuple[int, str, float]] = []
+    for prefix in prefixes:
+        for change in re.finditer(
+            rf"{boundary}{prefix}\s*{differences}\s*({number})\s*{unit}",
+            tail,
+        ):
+            amount = float(change.group(2).replace(",", ""))
+            negative = change.group(1) in {"下降", "减少", "降低", "下跌", "回落", "跌"}
+            candidates.append((change.start(), prefix, -amount if negative else amount))
+        for flat in re.finditer(rf"{boundary}{prefix}\s*(?:基本)?(?:持平|不变)", tail):
+            candidates.append((flat.start(), prefix, 0.0))
+    if candidates:
+        _, prefix, delta = min(candidates, key=lambda item: item[0])
+        delta_prefix = "较日前" if prefix == "较日前" else "环比"
     card = _card(label, value, "元/兆瓦时", delta=delta)
     if delta_prefix is not None:
         card["delta_prefix"] = delta_prefix

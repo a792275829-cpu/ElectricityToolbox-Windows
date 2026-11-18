@@ -3658,7 +3658,11 @@ class WpsWriterFrame(ttk.Frame):
             self.log(f"导入配置失败：{exc}")
             return
         self.log(f"已导入配置：{Path(path_text).name}")
-        messagebox.showinfo("导入配置", "配置已导入并保存。", parent=self)
+        messagebox.showinfo(
+            "导入配置",
+            "配置已导入并保存。使用前请选择本地源文件或填写来源链接，并填写目标表格链接。",
+            parent=self,
+        )
 
     def export_config(self) -> None:
         default_name = f"写入配置_{datetime.now().strftime('%Y%m%d')}.json"

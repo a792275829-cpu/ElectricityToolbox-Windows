@@ -1238,6 +1238,7 @@ class PageAdapterTests(unittest.TestCase):
             "version": 1,
             "exported_at": "2026-06-29T16:45:11",
             "recent_urls": ["https://www.kdocs.cn/l/target"],
+            "document_titles": {"https://www.kdocs.cn/l/target": "目标文档"},
             "browser_mode": "cdp",
             "cdp_url": "http://127.0.0.1:9222",
             "configs": [
@@ -1267,6 +1268,16 @@ class PageAdapterTests(unittest.TestCase):
         self.assertEqual(runtime_config["cdp_url"], "http://127.0.0.1:9222")
         self.assertEqual(runtime_config["configs"][0]["name"], "上网电量写入")
         self.assertEqual(runtime_config["configs"][0]["regions"][0]["target_sheet"], "汕头")
+        self.assertEqual(runtime_config["configs"][0]["local_file"], "")
+        self.assertEqual(runtime_config["configs"][0]["kdocs_url"], "")
+        self.assertEqual(runtime_config["recent_urls"], [])
+        self.assertNotIn("document_titles", runtime_config)
+
+        row = payload["configs"][0]
+        row.update(source_type="kdocs", source_url="https://www.kdocs.cn/l/source", local_file="")
+        imported_online = module.runtime_config_from_export_payload(payload)["configs"][0]
+        self.assertEqual(imported_online["source_type"], "kdocs")
+        self.assertEqual(imported_online["source_url"], "")
 
     def test_wps_writer_exports_runtime_config_with_schema(self) -> None:
         from toolbox.runtime import load_module
@@ -1304,7 +1315,11 @@ class PageAdapterTests(unittest.TestCase):
         self.assertEqual(exported["version"], 1)
         self.assertEqual(exported["exported_at"], "2026-06-29T16:45:11")
         self.assertEqual(exported["configs"][0]["source_type"], "kdocs")
-        self.assertEqual(module.runtime_config_from_export_payload(exported), runtime_config)
+        self.assertEqual(exported["configs"][0]["source_url"], "")
+        self.assertEqual(exported["configs"][0]["kdocs_url"], "")
+        self.assertEqual(exported["configs"][0]["regions"], runtime_config["configs"][0]["regions"])
+        self.assertEqual(exported["recent_urls"], [])
+        self.assertEqual(module.runtime_config_from_export_payload(exported)["configs"], exported["configs"])
         disabled = {**runtime_config, "overwrite": False}
         exported_disabled = module.build_config_export(disabled, exported_at="2026-06-29T16:45:11")
         self.assertFalse(module.runtime_config_from_export_payload(exported_disabled)["overwrite"])

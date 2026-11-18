@@ -149,6 +149,8 @@ class OnlineEnergyOutputTests(unittest.TestCase):
                 workbook.close()
 
     def test_qingyuan_collection_uses_dedicated_endpoint_and_d2_plan(self):
+        import openpyxl
+
         context = mock.Mock()
         companies = [{'tenantId': 'qingyuan-test-tenant', 'name': '清远电厂'}]
         units = [{'id': 'u2', 'unitName': '清远#2'}, {'id': 'u1', 'unitName': '清远#1'}]
@@ -157,8 +159,9 @@ class OnlineEnergyOutputTests(unittest.TestCase):
 
         def fetch(_context, run_date, _tenant_id, *, metric='onlineEle'):
             base = 1.5 if metric == 'onlineEle' else 100.0
+            first_unit = [base] * 24 if metric == 'onlineEle' else [base, None, 0] + [base] * 21
             return [
-                {'unitId': 'u1', 'runDate': run_date, 'onlineEle': [base] * 24},
+                {'unitId': 'u1', 'runDate': run_date, 'onlineEle': first_unit},
                 {'unitId': 'u2', 'runDate': run_date, 'onlineEle': [base + 0.75] * 24},
             ]
 
@@ -189,7 +192,18 @@ class OnlineEnergyOutputTests(unittest.TestCase):
         self.assertEqual(blocks[0]['company'], '清远')
         self.assertEqual(blocks[0]['units'], ['1号机', '2号机'] * 2)
         self.assertEqual(blocks[0]['plan_date'], '2026-10-30')
-        self.assertEqual(blocks[0]['rows'][0], [1.5, 2.25, 100.0, 100.75])
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.module.save_excel('2026-10-28', rows, Path(folder))
+            workbook = openpyxl.load_workbook(path)
+            try:
+                sheet = workbook['汇总']
+                self.assertEqual(sheet['C1'].value, '清远 2026-10-30 计划电量（万千瓦时）')
+                self.assertEqual([cell.value for cell in sheet[3]], [15, 22.5, 1000, 1007.5])
+                self.assertIsNone(sheet['C4'].value)
+                self.assertEqual(sheet['C5'].value, 0)
+                self.assertEqual(sheet['C3'].number_format, 'General')
+            finally:
+                workbook.close()
 
     def test_qingyuan_plan_units_mismatch_stops_export(self):
         context = mock.Mock()
@@ -391,29 +405,38 @@ class OnlineEnergyOutputTests(unittest.TestCase):
                 self.module.collect_detail_rows("2026-10-28", self.module.Config())
         context.close.assert_called_once()
 
-    def test_non_qingyuan_unreported_hours_stay_blank_not_zero(self):
+    def test_online_energy_conversion_preserves_exceptions_and_blank_hours(self):
         import openpyxl
 
+        expected = [
+            ("汕头电厂", 12.5),
+            ("海门电厂", 12.5),
+            ("谢岗电厂", 12.5),
+            ("华能广东汕头海上风电有限责任公司", 125),
+            ("华能（汕头金平）新能源有限责任公司", 125),
+            ("华能（潮州潮安）新能源有限责任公司", 125),
+        ]
+        companies = [dict(tenantId=str(index), name=name)
+                     for index, (name, _) in enumerate(expected)]
         values = [None, 0, 12.5] + [None] * 21
         with patch.object(self.module, "number_or_zero",
                           side_effect=AssertionError("number_or_zero 补 0 分流仍存在")):
             rows = self.date_rows("2026-10-28", lambda *a: [
                 {"unitId": "u", "runDate": "2026-10-28", "onlineEle": values}],
-                units=[{"id": "u", "unitName": "#1"}])
-        self.assertEqual(len(rows), 24)
-        self.assertIsNone(rows[0]["onlineEle"])
-        self.assertEqual(rows[1]["onlineEle"], 0)
-        self.assertEqual(rows[2]["onlineEle"], 12.5)
-        self.assertEqual(sum(row["onlineEle"] is None for row in rows), 22)
+                companies=companies)
+        self.assertEqual(len(rows), 24 * len(companies))
         with tempfile.TemporaryDirectory() as folder:
             path = self.module.save_excel("2026-10-28", rows, Path(folder))
             workbook = openpyxl.load_workbook(path)
             try:
                 sheet = workbook["汇总"]
-                self.assertIsNone(sheet["A3"].value)
-                self.assertEqual(sheet["A4"].value, 0)
-                self.assertEqual(sheet["A5"].value, 12.5)
-                self.assertEqual(sheet["A3"].number_format, "General")
+                for index, (name, amount) in enumerate(expected):
+                    with self.subTest(company=name):
+                        start = 3 + index * 27
+                        hours = [sheet.cell(start + hour, 1) for hour in range(24)]
+                        self.assertEqual([cell.value for cell in hours],
+                                         [None, 0, amount] + [None] * 21)
+                        self.assertTrue(all(cell.number_format == "General" for cell in hours))
             finally:
                 workbook.close()
 

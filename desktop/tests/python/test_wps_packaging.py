@@ -28,7 +28,7 @@ class WpsPackagedConfigurationTests(unittest.TestCase):
         self.app = self.payload / 'app'
         (self.app / SEED.parent).mkdir(parents=True)
         shutil.copy2(ROOT / SEED, self.app / SEED)
-        self.seed = json.loads((ROOT / SEED).read_text())
+        self.seed = json.loads((ROOT / SEED).read_text(encoding='utf-8'))
 
     def manifest(self, build):
         return {
@@ -51,10 +51,13 @@ class WpsPackagedConfigurationTests(unittest.TestCase):
         for name in ('wps-browser-profile/Default/Cookies', 'wps-chrome.pid', 'wps-chrome-state.json'):
             self.assertFalse(prepare_payload.runtime_source(Path('wps自动') / name))
         self.assertEqual(len(self.seed['configs']), 3)
-        self.assertEqual(sum(len(item['regions']) for item in self.seed['configs']), 34)
-        self.assertTrue(all(item['local_file'] == '' for item in self.seed['configs']))
-        self.assertEqual(set(self.seed), {'recent_urls', 'browser_mode', 'cdp_url', 'configs'})
+        self.assertEqual(sum(len(item['regions']) for item in self.seed['configs']), 39)
+        self.assertFalse(self.seed['overwrite'])
+        self.assertEqual(self.seed['recent_urls'], [])
+        self.assertEqual(set(self.seed), {'overwrite', 'recent_urls', 'browser_mode', 'cdp_url', 'configs'})
         for config in self.seed['configs']:
+            for location in ('source_url', 'kdocs_url', 'local_file'):
+                self.assertEqual(config[location], '')
             self.assertEqual(set(config), {
                 'name', 'source_type', 'source_url', 'kdocs_url', 'local_file', 'regions',
             })
@@ -66,10 +69,10 @@ class WpsPackagedConfigurationTests(unittest.TestCase):
 
     def test_fresh_install_receives_all_regions_and_updates_preserve_user_config(self):
         prepare_payload.prepare_defaults(self.app, self.payload / 'defaults')
-        self.assertEqual(json.loads((self.payload / 'defaults' / RUNTIME_CONFIG).read_text()), self.seed)
+        self.assertEqual(json.loads((self.payload / 'defaults' / RUNTIME_CONFIG).read_text(encoding='utf-8')), self.seed)
         self.install('first')
         runtime = self.root / 'user/data' / RUNTIME_CONFIG
-        self.assertEqual(json.loads(runtime.read_text()), self.seed)
+        self.assertEqual(json.loads(runtime.read_text(encoding='utf-8')), self.seed)
         self.assertFalse((self.root / 'user/app' / RUNTIME_CONFIG).exists())
         custom = {'configs': [], 'custom': '保留用户设置'}
         runtime.write_text(json.dumps(custom))

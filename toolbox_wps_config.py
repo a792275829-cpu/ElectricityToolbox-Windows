@@ -101,13 +101,22 @@ def legacy_documents(data: dict[str, Any]) -> list[dict[str, Any]]:
         grouped[key]["regions"].append(region)
     return list(grouped.values())
 
+def _config_without_document_locations(data: dict[str, Any]) -> dict[str, Any]:
+    config = normalize_runtime_config(data)
+    config["recent_urls"] = []
+    config.pop("document_titles", None)
+    for document in config["configs"]:
+        document.update(source_url="", kdocs_url="", local_file="")
+    return config
+
+
 def build_config_export(runtime_config: dict[str, Any], exported_at: str | None = None) -> dict[str, Any]:
     export_time = exported_at or datetime.now().replace(microsecond=0).isoformat()
     return {
         "schema": CONFIG_EXPORT_SCHEMA,
         "version": CONFIG_EXPORT_VERSION,
         "exported_at": export_time,
-        **normalize_runtime_config(runtime_config),
+        **_config_without_document_locations(runtime_config),
     }
 
 def runtime_config_from_export_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -115,14 +124,14 @@ def runtime_config_from_export_payload(payload: dict[str, Any]) -> dict[str, Any
         raise ValueError("无法识别此配置文件，请选择由本工具导出的配置。")
     if payload.get("version") != CONFIG_EXPORT_VERSION:
         raise ValueError(f"暂不支持此配置文件版本：{payload.get('version')!r}")
-    runtime_config = normalize_runtime_config(payload)
+    runtime_config = _config_without_document_locations(payload)
     if not runtime_config["configs"]:
         raise ValueError("配置文件中没有可导入的写入配置。")
     return runtime_config
 
 def load_config_export(path: Path) -> dict[str, Any]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as exc:
         raise ValueError(f"配置文件格式有误，无法读取：{exc}") from exc
     if not isinstance(payload, dict):
