@@ -640,15 +640,6 @@ def parse_float(value: Any) -> float:
     return float(value)
 
 
-def find_first_column_row(sheet, labels: tuple[str, ...]) -> int:
-    wanted = {label.strip() for label in labels}
-    for row in range(1, sheet.max_row + 1):
-        value = sheet.cell(row, 1).value
-        if isinstance(value, str) and value.strip() in wanted:
-            return row
-    raise KeyError(f"{sheet.title} 中未找到行：{'/'.join(labels)}")
-
-
 def find_clearing_workbook(date_text: str, workbook_dir: Path = CLEARING_WORKBOOK_DIR) -> Path:
     dt = datetime.strptime(date_text, "%Y-%m-%d")
     date_token = f"{dt.year}.{dt.month}.{dt.day}"
@@ -2041,11 +2032,8 @@ def subject_by_code(payload: dict[str, Any], code: str) -> dict[str, Any]:
     raise KeyError(code)
 
 
-def load_day_ahead_market_summary(date_text: str, workbook_path: Path | None = None) -> str:
-    """直接采用指定日期快报（日前）A41 的市场开机及全省日前均价原文。"""
-    source = resolve_day_ahead_workbook(workbook_path, date_text)
-    if source is None:
-        raise FileNotFoundError(f"未找到 {date_text} 的出清情况工作簿，无法读取市场简析 A41")
+def read_day_ahead_brief(source: Path) -> tuple[str, str]:
+    """读取快报（日前）A41 的首项市场简析。"""
     workbook = _open_clearing_workbook(source)
     try:
         sheet_name = next(
@@ -2056,67 +2044,115 @@ def load_day_ahead_market_summary(date_text: str, workbook_path: Path | None = N
         value = workbook[sheet_name].cell(row=41, column=1).value
         # 先隔离首项市场简析，避免缺句时误读后面的厂级策略。
         text = re.split(r"\n\s*[2-9]\d*[.、．]", str(value or ""), maxsplit=1)[0]
-        text = re.sub(r"\s+", "", text)
-        startup = re.search(r"市场(?:机组)?开机", text)
-        price = re.search(r"(?:全省)?日前(?:出清)?(?:均价|平均电价|平均价)", text)
-        if startup is None or price is None:
-            raise ValueError(f"{source.name}「快报（日前）」A41 缺少市场开机或全省日前均价整句")
-
-        def sentence_end(start: int) -> int:
-            # 英文句号只在不是小数点时作为句末；不解析数字、单位和涨跌措辞。
-            ending = re.search(r"[。！？!?]|(?<!\d)\.(?!\d)", text[start:])
-            return start + ending.end() if ending else len(text)
-
-        # 两项常以逗号连接为一句，也可能各自独立成句；合句只复制一次。
-        spans = sorted((match.start(), sentence_end(match.start())) for match in (startup, price))
-        sentences: list[str] = []
-        last_end = -1
-        for start, end in spans:
-            if start < last_end:
-                continue
-            sentence = text[start:end]
-            if sentence[-1] not in "。！？!?.":
-                sentence += "。"
-            sentences.append(sentence)
-            last_end = end
-        return "".join(sentences)
+        return sheet_name, re.sub(r"\s+", "", text)
     finally:
         workbook.close()
 
 
+def load_day_ahead_market_summary(date_text: str, workbook_path: Path | None = None) -> str:
+    """直接采用指定日期快报（日前）A41 的市场开机及全省日前均价原文。"""
+    source = resolve_day_ahead_workbook(workbook_path, date_text)
+    if source is None:
+        raise FileNotFoundError(f"未找到 {date_text} 的出清情况工作簿，无法读取市场简析 A41")
+    _, text = read_day_ahead_brief(source)
+    startup = re.search(r"市场(?:机组)?开机", text)
+    price = re.search(r"(?:全省)?日前(?:出清)?(?:均价|平均电价|平均价)", text)
+    if startup is None or price is None:
+        raise ValueError(f"{source.name}「快报（日前）」A41 缺少市场开机或全省日前均价整句")
+
+    def sentence_end(start: int) -> int:
+        # 英文句号只在不是小数点时作为句末；不解析数字、单位和涨跌措辞。
+        ending = re.search(r"[。！？!?]|(?<!\d)\.(?!\d)", text[start:])
+        return start + ending.end() if ending else len(text)
+
+    # 两项常以逗号连接为一句，也可能各自独立成句；合句只复制一次。
+    spans = sorted((match.start(), sentence_end(match.start())) for match in (startup, price))
+    sentences: list[str] = []
+    last_end = -1
+    for start, end in spans:
+        if start < last_end:
+            continue
+        sentence = text[start:end]
+        if sentence[-1] not in "。！？!?.":
+            sentence += "。"
+        sentences.append(sentence)
+        last_end = end
+    return "".join(sentences)
+
+
+PROVINCE_DAY_AHEAD_PRICE = re.compile(
+    r"全省日前(?:出清)?(?:均价|平均电价|平均价)(?:为|[：:])?"
+    r"(?P<price>[+-]?\d+(?:,\d{3})*(?:\.\d+)?)元/(?:兆瓦时|MWh)",
+    re.IGNORECASE,
+)
+
+
+def compare_strategy_day_ahead_price(
+    summary: str, previous_date: str, previous_workbook: Path | None,
+) -> tuple[str, dict[str, Any]]:
+    """用 D-1 快报（日前）A41 重算策略段全省日前均价环比。"""
+    source = previous_workbook if previous_workbook is not None else find_clearing_workbook(previous_date)
+    actual_date = read_workbook_run_date(source)
+    if actual_date is not None and actual_date != previous_date:
+        raise ValueError(f"{source.name} 运行日为 {actual_date}，环比需要 {previous_date} 的收益表")
+    if actual_date is None:
+        filename_dates = {
+            tuple(map(int, match.groups())) for match in CLEARING_WORKBOOK_DATE_PATTERN.finditer(source.stem)
+        }
+        if filename_dates != {tuple(map(int, previous_date.split("-")))}:
+            raise ValueError(f"无法确认 {source.name} 是 {previous_date} 的收益表")
+    sheet, previous_brief = read_day_ahead_brief(source)
+    current_matches = list(PROVINCE_DAY_AHEAD_PRICE.finditer(summary))
+    previous_matches = list(PROVINCE_DAY_AHEAD_PRICE.finditer(previous_brief))
+    if len(current_matches) != 1 or len(previous_matches) != 1:
+        raise ValueError("报告日或前一日快报（日前）A41 缺少唯一的全省日前均价")
+    current, previous = current_matches[0], previous_matches[0]
+    current_price = Decimal(current["price"].replace(",", ""))
+    previous_price = Decimal(previous["price"].replace(",", ""))
+    delta = (current_price - previous_price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if delta:
+        direction = "上升" if delta > 0 else "降低"
+        comparison = f"环比{direction}{abs(delta):.2f}元/兆瓦时"
+    else:
+        comparison = "环比持平"
+    suffix = summary[current.end():]
+    suffix = re.sub(
+        r"^[，,；;](?:环比|较(?:昨日|上日|前日)).*?(?=[，；;。！？!?]|[,.](?!\d)|$)",
+        "", suffix, count=1,
+    )
+    return f"{summary[:current.end()]}，{comparison}{suffix}", {
+        "file": str(source), "date": previous_date, "sheet": sheet, "cell": "A41",
+        "previousPrice": float(previous_price), "difference": float(delta),
+    }
+
+
 @clearing_input_cache()
-def load_daily_prices(workbook_path: Path) -> dict[str, float]:
-    """清分日均价：日前取全省 96 点，实时取快报实时简析。"""
+def load_daily_realtime_price(workbook_path: Path) -> float:
+    """读取清分日「快报」实时简析的全天实时均价。"""
     workbook = _open_clearing_workbook(workbook_path)
     try:
-        sheet = workbook["全省节点均价（日更）"]
-        row = find_first_column_row(sheet, ("全省日前",))
-        raw = [sheet.cell(row, col).value for col in range(2, 98)]
-        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in raw):
-            raise ValueError("全省日前必须有完整 96 点有效电价")
         brief = workbook["快报"]
         texts = [str(brief.cell(r, 1).value or "") for r in range(1, brief.max_row + 1)]
         texts = [t.split("实时简析", 1)[1] for t in texts if "实时简析" in t]
         matches = [m for t in texts for m in re.findall(r"全天实时均价\s*([+-]?\d+(?:\.\d+)?)\s*元/(?:兆瓦时|MWh)", t)]
         if len(matches) != 1:
             raise ValueError("快报实时简析缺少唯一的全天实时均价")
-        return {"PRE": sum(raw) / 96, "RT": float(matches[0])}
+        return float(matches[0])
     finally:
         workbook.close()
 
 
-def load_daily_prices_safely(workbook_path: Path | None) -> tuple[dict[str, float] | None, str | None]:
-    """均价取数失败只影响两个均价数字，不能让整份早报失败。"""
+def load_daily_realtime_price_safely(workbook_path: Path | None) -> tuple[float | None, str | None]:
+    """实时均价缺失时沿用接口数值并记录原因。"""
     try:
-        return load_daily_prices(workbook_path), None
+        return load_daily_realtime_price(workbook_path), None
     except Exception as exc:
-        log(f"日清分均价取数失败，日前／实时均价保留原文：{exc}")
+        log(f"日清分实时均价取数失败，保留接口均价：{exc}")
         return None, str(exc)
 
 
-def replace_price(text: str, price: float) -> str:
-    """只替换均价数值。"""
-    return re.sub(r"((?:日前出清|实时)均价)[+-]?\d+(?:\.\d+)?", lambda m: m.group(1) + fmt_number(price, 2), text)
+def replace_realtime_price(text: str, price: float) -> str:
+    return re.sub(r"实时均价[+-]?\d+(?:\.\d+)?", lambda _: "实时均价" + fmt_number(price, 2), text)
 
 
 def build_strategy_text(payload: dict[str, Any], *, market_summary: str) -> str:
@@ -2410,6 +2446,15 @@ def generate(
         prefer_previous_report=prefer_previous_template,
     )
     market_summary = load_day_ahead_market_summary(plan["dayAheadDate"], day_ahead_workbook)
+    market_price_comparison = None
+    market_price_comparison_error = None
+    try:
+        market_summary, market_price_comparison = compare_strategy_day_ahead_price(
+            market_summary, plan["compareDate"], online_workbook,
+        )
+    except (OSError, ValueError) as exc:
+        market_price_comparison_error = str(exc)
+        log(f"现货交易策略全省日前均价环比未重算，保留报告日简析原文：{exc}")
     daily_clearing_workbook = resolve_day_ahead_workbook(
         daily_clearing_workbook, plan["dailyClearingDate"]
     )
@@ -2514,16 +2559,15 @@ def generate(
     clear_auto_section_red(doc, spot_filled=spot_filled)
     day_ahead_heading = find_exact_paragraph(doc, "1.日前市场")
     day_ahead_paragraph = next_nonempty_paragraph(doc, day_ahead_heading)
-    daily_prices, daily_prices_error = load_daily_prices_safely(daily_clearing_workbook)
-    if daily_prices is not None:
-        daily_market_summary = replace_price(daily_market_summary, daily_prices["PRE"])
+    # 日清分两天前的日前均价和环比是 A41 的同一组数据。
     replace_paragraph(day_ahead_paragraph, build_day_ahead_market_text(payload, market_summary=daily_market_summary))
     highlight_negative_numbers(day_ahead_paragraph)
     actual_heading = find_exact_paragraph(doc, "2.实时市场")
     actual_paragraph = next_nonempty_paragraph(doc, actual_heading)
     actual_market_text = build_actual_market_text(payload)
-    if daily_prices is not None:
-        actual_market_text = replace_price(actual_market_text, daily_prices["RT"])
+    daily_realtime_price, daily_prices_error = load_daily_realtime_price_safely(daily_clearing_workbook)
+    if daily_realtime_price is not None:
+        actual_market_text = replace_realtime_price(actual_market_text, daily_realtime_price)
     replace_paragraph(actual_paragraph, actual_market_text)
     highlight_negative_numbers(actual_paragraph)
     weather_paragraph = find_paragraph(
@@ -2596,11 +2640,13 @@ def generate(
         "plantStrategiesMissing": missing_plants,
         "plantStrategiesSource": str(plant_strategy_source) if plant_strategy_source else None,
         "dayAheadMarketSummarySource": {"file": str(day_ahead_workbook), "sheet": "快报(日前)", "cell": "A41"},
-        "dailyClearingMarketSummarySource": {"file": str(daily_clearing_workbook), "date": plan["dailyClearingDate"], "sheet": "快报(日前)", "cell": "A41", "note": "市场开机与环比沿用原文；日前均价取全省节点96点平均"},
+        "dayAheadMarketPriceComparison": market_price_comparison,
+        "dayAheadMarketPriceComparisonError": market_price_comparison_error,
+        "dailyClearingMarketSummarySource": {"file": str(daily_clearing_workbook), "date": plan["dailyClearingDate"], "sheet": "快报(日前)", "cell": "A41", "note": "市场开机、全省日前均价和对应环比均取原文"},
         "onlineEnergyError": online_energy_error,
         "dailyClearingPrices": (
-            {"file": str(daily_clearing_workbook), "date": plan["dailyClearingDate"], "PRE": {"sheet": "全省节点均价（日更）", "rowLabel": "全省日前", "columns": "B:CS", "value": daily_prices["PRE"]}, "RT": {"sheet": "快报", "label": "实时简析", "value": daily_prices["RT"]}}
-            if daily_prices is not None
+            {"file": str(daily_clearing_workbook), "date": plan["dailyClearingDate"], "RT": {"sheet": "快报", "label": "实时简析", "value": daily_realtime_price}}
+            if daily_realtime_price is not None
             else None
         ),
         "dailyClearingPricesError": daily_prices_error,

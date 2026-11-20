@@ -83,30 +83,30 @@ class ReportTextTests(unittest.TestCase):
         with patch.object(report, "fetch_guangdong_weather_text", return_value="未来三天小雨，气温15℃-28℃，"):
             report.replace_weather_prefix(paragraph, "2026-11-17")
         self.assertEqual(paragraph.text, text)
-    def test_daily_prices_follow_reference(self):
+    def test_daily_market_prices_use_their_respective_briefs(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "D.xlsx"
             wb = Workbook()
             sheet = wb.active
             sheet.title = "全省节点均价（日更）"
-            sheet.append(["全省日前"] + [383.8015625] * 96)
+            sheet.append(["全省日前"] + [452.56] * 96)
+            market_summary = "市场开机台数458台，环比增加8台，全省日前出清均价441.5元/兆瓦时，环比上涨25.64元/兆瓦时。"
+            wb.create_sheet("快报  (日前)")["A41"] = "日前简析：\n1." + market_summary
             brief = wb.create_sheet("快报")
             brief["A42"] = "日前均价422.64。实时简析：全天实时均价334.6元/兆瓦时。"
             wb.save(path)
             wb.close()
             with clearing_input_cache():
-                prices = report.load_daily_prices(path)
-            self.assertAlmostEqual(prices["PRE"], 383.8015625)
-            self.assertEqual(prices["RT"], 334.6)
-            self.assertEqual(report.replace_price("全省日前均价", 1), "全省日前均价")
-            self.assertEqual(report.replace_price("全省日前出清均价389.3元/兆瓦时，环比下降97.77元/兆瓦时。", prices["PRE"]), "全省日前出清均价383.8元/兆瓦时，环比下降97.77元/兆瓦时。")
-            sheet["B1"] = None
+                self.assertEqual(load_day_ahead_market_summary("2026-11-17", path), market_summary)
+                self.assertEqual(report.load_daily_realtime_price(path), 334.6)
+            wb.remove(sheet)
             wb.save(path)
-            with self.assertRaises(ValueError):
-                report.load_daily_prices(path)
+            self.assertEqual(report.load_daily_realtime_price(path), 334.6)
+            self.assertEqual(report.replace_realtime_price("全天实时均价422.64元/兆瓦时。", 334.6),
+                             "全天实时均价334.6元/兆瓦时。")
 
     def test_missing_price_source_degrades_instead_of_failing_report(self) -> None:
-        # 均价只占两个数字，缺表不能把整份早报打断；保留原文并记录原因。
+        # 实时简析缺失时保留接口数值。
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "D.xlsx"
             wb = Workbook()
@@ -114,10 +114,10 @@ class ReportTextTests(unittest.TestCase):
             wb.save(path)
             wb.close()
             with clearing_input_cache():
-                prices, error = report.load_daily_prices_safely(path)
+                prices, error = report.load_daily_realtime_price_safely(path)
             self.assertIsNone(prices)
-            self.assertIn("全省节点均价", error)
-            none_prices, none_error = report.load_daily_prices_safely(None)
+            self.assertIn("全天实时均价", error)
+            none_prices, none_error = report.load_daily_realtime_price_safely(None)
             self.assertIsNone(none_prices)
             self.assertTrue(none_error)
 
@@ -127,6 +127,7 @@ class ReportTextTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             day_source = Path(root) / "D.xlsx"
+            previous_source = Path(root) / "D-1.xlsx"
             clearing_source = Path(root) / "D-2.xlsx"
             for explicit in (True, False):
                 with (
@@ -136,14 +137,38 @@ class ReportTextTests(unittest.TestCase):
                     patch.object(report, "check_workbook_dates", return_value=[]),
                     patch.object(report, "resolve_template_path", return_value=Path(root) / "template.docx"),
                     patch.object(report, "load_day_ahead_market_summary", return_value="市场原文") as load,
+                    patch.object(report, "compare_strategy_day_ahead_price", return_value=("市场原文", {})) as compare,
                     patch("fetch_daily_data.run_daily_data", side_effect=StopBeforeNetwork),
                     self.assertRaises(StopBeforeNetwork),
                 ):
                     report.generate("2026-11-12", Path(root) / "template.docx", Path(root),
+                                    online_workbook=previous_source,
                                     day_ahead_workbook=day_source if explicit else None,
                                     daily_clearing_workbook=clearing_source if explicit else None)
                 self.assertEqual(load.call_args_list, [
                     call("2026-11-12", day_source), call("2026-11-10", clearing_source)])
+                compare.assert_called_once_with("市场原文", "2026-11-11", previous_source)
+
+    def test_strategy_recalculates_stale_flat_comparison_from_previous_a41(self) -> None:
+        current = "市场开机台数422台，环比减少20台，全省日前出清均价396.58元/兆瓦时，环比持平。"
+        expected = current.replace("环比持平", "环比降低39.47元/兆瓦时")
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "D-1.xlsx"
+            workbook = Workbook()
+            workbook.active.title = "基础信息"
+            workbook.active["A2"] = "2026-11-18"
+            sheet = workbook.create_sheet("快报  (日前)")
+            sheet["A39"] = "全省日前出清均价396.58元/兆瓦时。"
+            sheet["A41"] = "全省日前出清均价436.05元/兆瓦时。\n2.厂策略：全省日前出清均价999元/兆瓦时。"
+            workbook.save(path)
+            workbook.close()
+            with clearing_input_cache():
+                result, source = report.compare_strategy_day_ahead_price(current, "2026-11-18", path)
+                self.assertEqual(result, expected)
+                self.assertEqual((source["sheet"], source["cell"]), ("快报  (日前)", "A41"))
+                self.assertEqual((source["previousPrice"], source["difference"]), (436.05, -39.47))
+                with self.assertRaisesRegex(ValueError, "环比需要 2026-11-17"):
+                    report.compare_strategy_day_ahead_price(current, "2026-11-17", path)
 
     def test_market_summary_reads_a41_in_generation_cache_scope(self) -> None:
         expected = "市场开机451台，环比增加23台。全省日前均价402.99元/兆瓦时，环比上涨22.57元/兆瓦时。"
