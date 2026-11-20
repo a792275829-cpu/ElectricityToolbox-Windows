@@ -12,6 +12,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from datetime import datetime, timedelta
+from decimal import Decimal, ROUND_HALF_UP
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -1368,6 +1370,8 @@ def load_daily_clearing_inputs(date_text: str,
 
 
 UNIT_STATUS_PLANTS = ("汕头", "海门", "东莞", "清远")
+DAY_AHEAD_STATUS_PLANTS = ("汕头", "海门")
+DAY_AHEAD_TRANSITIONS = {True: "运行转备用", False: "备用转运行"}
 UNIT_STATUS_RANK = ("运行", "备用", "供热", "检修")
 UNIT_STATUS_WORDS = {
     "运行": "运行",
@@ -1470,6 +1474,51 @@ def build_unit_status_text(plant: str, units: list[tuple[str, str]]) -> str | No
     return "；".join(clauses) + "。"
 
 
+def _day_ahead_unit_transitions(sheet) -> dict[str, str]:
+    """按机组和日前电量表头，核对同日 0:00 到 23:00 的启停变化。"""
+    rows = iter(sheet.iter_rows(values_only=True))
+    unit_headers = ()
+    for headers in rows:
+        if headers and str(headers[0]).strip() == "时刻":
+            break
+        unit_headers = headers
+    else:
+        return {}
+    hourly = list(islice(rows, 24))
+    if len(hourly) != 24 or any(
+        not row or not re.fullmatch(rf"(?:{hour}|{hour:02d}):00(?::00)?", str(row[0]).strip())
+        for hour, row in enumerate(hourly)
+    ):
+        return {}
+
+    transitions = {}
+    seen = set()
+    for column, (unit_header, header) in enumerate(zip(unit_headers, headers)):
+        if not str(header).strip().startswith("日前电量"):
+            continue
+        unit = re.fullmatch(r"(\d+)号机(?:组)?|#(\d+)(?:机组)?", str(unit_header).strip())
+        if not unit:
+            continue
+        key = unit[1] or unit[2]
+        if key in seen:
+            transitions.pop(key, None)
+            continue
+        seen.add(key)
+        values = [row[column] if column < len(row) else None for row in hourly]
+        if any(value is None or isinstance(value, bool) for value in values):
+            continue
+        try:
+            energy = [float(value) for value in values]
+        except (TypeError, ValueError):
+            continue
+        if any(not math.isfinite(value) or value < 0 for value in energy):
+            continue
+        running = [value > 0 for value in energy]
+        if sum(before != after for before, after in zip(running, running[1:])) == 1:
+            transitions[key] = DAY_AHEAD_TRANSITIONS[running[0]]
+    return transitions
+
+
 def load_unit_status_texts(date_text: str,
                            workbook_path: Path | None = None) -> dict[str, str]:
     if workbook_path is None:
@@ -1477,10 +1526,23 @@ def load_unit_status_texts(date_text: str,
     rest = _read_clearing_values(workbook_path)
     unit_rows = rest[-1]
     parsed = _parse_unit_status(unit_rows)
+    plants_to_check = [plant for plant in DAY_AHEAD_STATUS_PLANTS if plant in parsed]
+    if plants_to_check:
+        workbook = _open_clearing_workbook(workbook_path)
+        try:
+            for plant in plants_to_check:
+                if plant not in workbook.sheetnames:
+                    continue
+                try:
+                    transitions = _day_ahead_unit_transitions(workbook[plant])
+                except ValueError as exc:
+                    log(f"{date_text} {plant}厂日前电量读取失败，沿用基础信息机组状态：{exc}")
+                    continue
+                parsed[plant] = [(key, transitions.get(key, status)) for key, status in parsed[plant]]
+        finally:
+            workbook.close()
     texts: dict[str, str] = {}
     for plant, units in parsed.items():
-        # 各厂（含东莞）统一以基础信息 C 列的机组状态为准；
-        # 东莞「约束情况」里的「运行日运行方式」常与 C 列不一致（如写「一、二、四套调峰」），不采用。
         text = build_unit_status_text(plant, units)
         if text:
             texts[plant] = text
@@ -1506,7 +1568,7 @@ def _startup_blocks(document) -> list[list]:
 
 def fill_startup_status(document, current: dict[str, str],
                         previous: dict[str, str]) -> int:
-    """填写两日机组启停；与前一日本地一致时写「与前一日运行方式一致」。"""
+    """填写两日机组启停；启停转换显式列出，其余同前日时简写。"""
     blocks = _startup_blocks(document)
     if len(blocks) < 2:
         return 0
@@ -1523,7 +1585,11 @@ def fill_startup_status(document, current: dict[str, str],
             )
             if target is None:
                 continue
-            if index == 1 and previous.get(plant) == body:
+            if (
+                index == 1 and previous.get(plant) == body
+                and not (plant in DAY_AHEAD_STATUS_PLANTS
+                         and any(word in body for word in DAY_AHEAD_TRANSITIONS.values()))
+            ):
                 body = "与前一日运行方式一致。"
             replace_paragraph(target, f"{plant}厂：{body}")
             filled += 1

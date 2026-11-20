@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 import unittest
+from datetime import time
 from pathlib import Path
 
 from docx import Document
@@ -12,9 +13,12 @@ from generate_red_marked_report import (
     LOCAL_TEMPLATE_PATH,
     _parse_unit_status,
     build_unit_status_text,
+    clearing_input_cache,
     fill_startup_status,
     load_unit_status_texts,
 )
+
+TOOLBOX_TEST_TAGS = ()
 
 BASE_ROWS: list[tuple] = [
     ("南方分公司", None, "机组状态", "有效容量\n（MW）", "出力下限", "出力上限", "约束原因"),
@@ -141,8 +145,19 @@ class StartupFillTests(unittest.TestCase):
         self.assertIn("汕头厂：#1、#2机组运行；#3机组备用。", first_block)
         self.assertNotIn("汕头厂：与前一日运行方式一致。", first_block)
 
+    def test_transitions_stay_visible_even_if_both_days_match(self) -> None:
+        statuses = {
+            "汕头": "#1机组运行转备用。",
+            "海门": "#2机组备用转运行。",
+            "东莞": "一套机组调峰。",
+            "清远": "一套机组备用。",
+        }
+        blocks = self._filled_blocks(statuses, statuses)
+        self.assertEqual(blocks.count("汕头厂：#1机组运行转备用。"), 2)
+        self.assertEqual(blocks.count("海门厂：#2机组备用转运行。"), 2)
 
-def _make_unit_workbook(path: Path, rows: list[tuple]) -> Path:
+
+def _make_unit_workbook(path: Path, rows: list[tuple], curves=None) -> Path:
     workbook = Workbook()
     brief = workbook.active
     brief.title = "快报  (日前)"
@@ -152,6 +167,15 @@ def _make_unit_workbook(path: Path, rows: list[tuple]) -> Path:
         for column, value in enumerate(row, start=1):
             if value is not None:
                 base.cell(index, column, value)
+    for plant, units in (curves or {}).items():
+        sheet = workbook.create_sheet(plant)
+        sheet.append(["机组电量明细"])
+        sheet.append([None, *(cell for n in units for cell in (f"{n}号机", None))])
+        sheet.append(["时刻", *(cell for _ in units for cell in ("日前电量\n（MWh）", "实时电量"))])
+        for hour in range(24):
+            # 实时列故意用正值，验证只看日前列，兼容文本和 Excel 时间。
+            hour_label = time(hour) if hour % 2 else f"{hour}:00"
+            sheet.append([hour_label, *(cell for curve in units.values() for cell in (curve[hour], 100))])
     workbook.save(path)
     workbook.close()
     return path
@@ -185,6 +209,37 @@ class DongguanStatusSourceTests(unittest.TestCase):
             "汕头", [("3", "检修"), ("2", "应急备用"), ("1", "运行")]
         )
         self.assertEqual(text, "#1机组运行；#2机组应急备用；#3机组检修。")
+
+
+class DayAheadUnitStatusTests(unittest.TestCase):
+    def test_transition_overrides_only_shantou_and_haimen_with_complete_curves(self) -> None:
+        rows = [
+            ("南方分公司", None, "机组状态"),
+            ("汕头", "#1", "供热"),
+            (None, "#2", "检修"),
+            (None, "#3", "备用"),
+            ("海门", "#1", "调试"),
+            (None, "#2", "应急备用"),
+            (None, "#3", "供热"),
+            (None, "#4", "调试"),
+            ("东莞", "#1", "供热"),
+            ("清远", "#1", "备用"),
+        ]
+        stops = [100] * 4 + [0] * 20
+        starts = [0] * 6 + [100] * 18
+        curves = {
+            "汕头": {1: stops, 2: starts, 3: [0] * 24},
+            "海门": {1: starts, 2: stops, 3: [100] * 23 + [None], 4: [100, 0] + [100] * 22},
+            "东莞": {1: stops},
+            "清远": {1: starts},
+        }
+        with tempfile.TemporaryDirectory() as tmp, clearing_input_cache():
+            path = _make_unit_workbook(Path(tmp) / "wb.xlsx", rows, curves)
+            texts = load_unit_status_texts("2026-11-06", path)
+        self.assertEqual(texts["汕头"], "#3机组备用；#1机组运行转备用；#2机组备用转运行。")
+        self.assertEqual(texts["海门"], "#3机组供热；#1机组备用转运行；#2机组运行转备用；#4机组调试。")
+        self.assertEqual(texts["东莞"], "一套机组供热。")
+        self.assertEqual(texts["清远"], "一套机组备用。")
 
 
 if __name__ == "__main__":
