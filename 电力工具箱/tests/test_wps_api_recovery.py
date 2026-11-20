@@ -175,23 +175,31 @@ class WpsBrowserRecoveryTests(unittest.TestCase):
             for index, value in enumerate(values, start=1)
         ]
 
-    def test_stuck_merge_probe_times_out_and_late_completion_cannot_resume_writing(self) -> None:
+    def test_stuck_merge_status_in_ninth_region_does_not_block_writes(self) -> None:
+        from dataclasses import replace
+
         self.page.evaluate("""() => {
+          window.mergeProbes = 0;
           const original = window.testApp.Worksheets;
           window.testApp.Worksheets = name => ({Range: address => {
             const range = original(name).Range(address);
-            range.MergeCells = new Promise(resolve => { window.finishMergeProbe = resolve; });
+            Object.defineProperty(range, 'MergeCells', {get() {
+              window.mergeProbes++;
+              return address === 'A9' ? new Promise(() => {}) : false;
+            }});
             return range;
           }});
         }""")
-        log = mock.Mock()
+        item = self.mappings()[0]
+        mappings = [replace(item, index=i, target_start=f'A{i}', target_range=f'A{i}', values=[[i]])
+                    for i in range(1, 16)]
         with mock.patch.multiple(self.module, WPS_INTERFACE_TIMEOUT_SECONDS=.1, WPS_OPERATION_TIMEOUT_SECONDS=2):
-            with self.assertRaisesRegex(RuntimeError, '单次接口连续无响应.*合并状态.*结果待核对'):
-                self.module.write_to_wps(self.page.url, self.mappings(), log, browser_mode='cdp')
-        self.page.evaluate('() => window.finishMergeProbe(false)')
-        self.page.wait_for_timeout(150)
-        self.assertEqual(self.page.evaluate('() => [window.writes, window.saves]'), [0, 0])
-        self.assertTrue(any('合并状态' in call.args[0] for call in log.call_args_list))
+            result = self.module.write_to_wps(self.page.url, mappings, lambda _: None, browser_mode='cdp', overwrite=False)
+        self.assertTrue(result['saved'])
+        self.assertEqual([row['value'] for row in result['results']], list(range(1, 16)))
+        self.assertEqual(self.page.evaluate('() => [window.writes, window.saves, window.mergeProbes]'), [15, 1, 0])
+        self.page.reload()
+        self.assertEqual(self.page.evaluate('() => window.cells.A9'), 9)
 
     def test_stuck_save_times_out_without_repeating_assignments_or_save(self) -> None:
         self.page.evaluate("""() => {
@@ -219,35 +227,39 @@ class WpsBrowserRecoveryTests(unittest.TestCase):
                 self.module.write_to_wps(self.page.url, self.mappings(), lambda _: None, browser_mode='cdp')
         self.assertEqual(self.page.evaluate('() => [window.writes, window.saves]'), [6, 1])
 
-    def delay_region_probes(self, milliseconds):
+    def delay_empty_cell_value_reads(self, milliseconds):
         self.page.evaluate("""milliseconds => {
           const original = window.testApp.Worksheets;
           window.testApp.Worksheets = name => ({Range: address => {
             const range = original(name).Range(address);
-            Object.defineProperty(range, 'MergeCells', {
-              get: () => new Promise(resolve => setTimeout(() => resolve(false), milliseconds))
+            const getValue = Object.getOwnPropertyDescriptor(range, 'Value').get;
+            Object.defineProperty(range, 'Value', {
+              get() {
+                const value = getValue.call(this);
+                return value === null ? new Promise(resolve => setTimeout(() => resolve(value), milliseconds)) : value;
+              }
             });
             return range;
           }});
         }""", milliseconds)
 
     def test_each_successful_response_gets_a_fresh_interface_deadline(self):
-        self.delay_region_probes(60)
+        self.delay_empty_cell_value_reads(60)
         started = time.monotonic()
         with mock.patch.multiple(self.module, WPS_INTERFACE_TIMEOUT_SECONDS=.25, WPS_OPERATION_TIMEOUT_SECONDS=3):
-            result = self.module.write_to_wps(self.page.url, self.mappings(), lambda _: None, browser_mode='cdp')
+            result = self.module.write_to_wps(self.page.url, self.mappings()[:5], lambda _: None, browser_mode='cdp', overwrite=False)
         self.assertTrue(result['saved'])
         self.assertGreater(time.monotonic() - started, .25)
-        self.assertEqual(self.page.evaluate('() => [window.writes, window.saves]'), [6, 1])
+        self.assertEqual(self.page.evaluate('() => [window.writes, window.saves]'), [5, 1])
 
     def test_regular_responses_cannot_extend_the_batch_total_deadline(self):
-        self.delay_region_probes(100)
+        self.delay_empty_cell_value_reads(100)
         with mock.patch.multiple(self.module, WPS_INTERFACE_TIMEOUT_SECONDS=.4, WPS_OPERATION_TIMEOUT_SECONDS=.35):
             with self.assertRaisesRegex(RuntimeError, '整批操作超过总时限.*结果待核对'):
-                self.module.write_to_wps(self.page.url, self.mappings(), lambda _: None, browser_mode='cdp')
+                self.module.write_to_wps(self.page.url, self.mappings()[:5], lambda _: None, browser_mode='cdp', overwrite=False)
         writes, saves = self.page.evaluate('() => [window.writes, window.saves]')
         self.assertGreater(writes, 0)
-        self.assertLess(writes, 6)
+        self.assertLess(writes, 5)
         self.assertEqual(saves, 0)
         self.page.wait_for_timeout(200)
         self.assertEqual(self.page.evaluate('() => [window.writes, window.saves]'), [writes, 0])

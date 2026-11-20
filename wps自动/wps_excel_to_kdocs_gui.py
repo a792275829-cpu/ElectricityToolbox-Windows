@@ -83,7 +83,7 @@ WPS_INTERFACE_TIMEOUT_SECONDS = 20
 
 
 def bounded_wps_script(script: str, timeout_seconds: float) -> str:
-    # WPS SDK promises (MergeCells/save/Value) may never settle. A timeout
+    # WPS SDK promises (save/Value) may never settle. A timeout
     # rejects the caller, while checks after every SDK await prevent the
     # suspended writer from resuming mutations if the SDK later recovers.
     return """async (payload) => {
@@ -1693,7 +1693,6 @@ def write_to_wps(
                 const sheet = app.Worksheets(item.targetSheet);
                 const range = sheet.Range(item.targetRange);
                 const assignment = item.rows === 1 && item.cols === 1 ? item.values[0][0] : item.values;
-                const mergeCells = await waitFor(range.MergeCells, '读取第 ' + item.index + ' 个区域的合并状态');
                 let expected = item.values;
                 let skipped = 0;
                 if (item.overwrite) {
@@ -1765,7 +1764,7 @@ def write_to_wps(
                   targetRange: item.targetRange,
                   rows: item.rows,
                   cols: item.cols,
-                  mergeCells, expected, skipped
+                  expected, skipped
                 });
               }
               checkActive();
